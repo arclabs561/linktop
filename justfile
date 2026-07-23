@@ -1,7 +1,7 @@
 check:
-    cargo fmt -- --check
-    cargo test
-    cargo clippy --all-targets -- -D warnings
+    cargo +1.88 fmt -- --check
+    cargo +1.88 test
+    cargo +1.88 clippy --all-targets -- -D warnings
 
 # Capture a real fixed-size TUI frame to a private ignored text file and PNG.
 capture-ui view="overview" columns="140" rows="30":
