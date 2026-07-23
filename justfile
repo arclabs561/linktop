@@ -1,5 +1,6 @@
 check:
     cargo +1.88 fmt -- --check
+    cargo +1.88 build --bin linktop
     cargo +1.88 test
     cargo +1.88 clippy --all-targets -- -D warnings
 
@@ -24,7 +25,6 @@ install: check
 # Point the PATH command at this checkout's debug binary. Every subsequent
 # `cargo build`, `cargo run`, `just check`, or capture refreshes the same file.
 install-dev: check
-    cargo build --quiet --bin linktop
     cargo_bin="${CARGO_HOME:-${HOME}/.cargo}/bin"; \
     target="{{justfile_directory()}}/target/debug/linktop"; \
     mkdir -p "$cargo_bin"; \
