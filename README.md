@@ -95,8 +95,8 @@ directory is already on the PATH in the author's dotfiles; on another machine,
 add `${CARGO_HOME:-$HOME/.cargo}/bin` to `PATH`.
 
 For development on this machine, run `just install-dev` once. It points the PATH
-entry at this checkout's debug binary, so every later Cargo build or visual
-capture immediately becomes the `linktop` launched from the shell. Run
+entry at this checkout's debug binary, so every later `just check`, Cargo build,
+or visual capture immediately becomes the `linktop` launched from the shell. Run
 `just install` again when a standalone release binary is preferred.
 
 For development without installing:
