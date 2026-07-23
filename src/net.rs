@@ -16,8 +16,8 @@ use serde_json::Value;
 
 use crate::metrics::LatencyMetrics;
 use crate::model::{
-    Address, Health, InterfaceCounters, LinkSnapshot, MonitorControl, MonitorUpdate, ProbeKind,
-    ProbeResult, SnapshotReport, WifiTelemetry,
+    Address, Health, InterfaceCounters, LinkSnapshot, MonitorControl, MonitorMode, MonitorUpdate,
+    ProbeKind, ProbeResult, SnapshotReport, WifiTelemetry,
 };
 use crate::{peers, process};
 
@@ -32,6 +32,7 @@ const PUBLIC_ENDPOINTS: [&str; 3] = [
 
 pub fn start_monitor(
     interval: Duration,
+    mode: MonitorMode,
 ) -> (
     Receiver<MonitorUpdate>,
     Sender<MonitorControl>,
@@ -39,30 +40,41 @@ pub fn start_monitor(
 ) {
     let (update_tx, update_rx) = mpsc::channel();
     let (control_tx, control_rx) = mpsc::channel();
-    let handle = thread::spawn(move || monitor_loop(interval, update_tx, control_rx));
+    let handle = thread::spawn(move || monitor_loop(interval, mode, update_tx, control_rx));
     (update_rx, control_tx, handle)
 }
 
 fn monitor_loop(
     interval: Duration,
+    mode: MonitorMode,
     update_tx: Sender<MonitorUpdate>,
     control_rx: Receiver<MonitorControl>,
 ) {
     let mut paused = false;
     let mut stopped = false;
-    let mut force_refresh = true;
+    let mut internet_refresh_pending = [true; 3];
+    let mut peers_refresh_pending = true;
+    let mut wifi_refresh_pending = true;
     let mut tick = 0_u64;
     let mut gateway = None;
     let mut interface = None;
+    let mut path_generation = 0_u64;
+    let mut path_fingerprint = None;
     let probe_in_flight = Arc::new(std::array::from_fn::<_, 4, _>(|_| AtomicBool::new(false)));
     let traffic_in_flight = Arc::new(AtomicBool::new(false));
+    let peers_in_flight = Arc::new(AtomicBool::new(false));
+    let wifi_in_flight = Arc::new(AtomicBool::new(false));
     let sleep_step = Duration::from_millis(100);
     let steps_per_tick = (interval.as_millis() / sleep_step.as_millis()).max(1) as usize;
 
     while !stopped {
         while let Ok(control) = control_rx.try_recv() {
             match control {
-                MonitorControl::Refresh => force_refresh = true,
+                MonitorControl::Refresh => {
+                    internet_refresh_pending.fill(true);
+                    peers_refresh_pending = true;
+                    wifi_refresh_pending = true;
+                }
                 MonitorControl::Pause(value) => paused = value,
                 MonitorControl::Stop => stopped = true,
             }
@@ -72,61 +84,141 @@ fn monitor_loop(
         }
 
         if !paused {
-            if force_refresh || tick.is_multiple_of(5) {
-                let link = collect_link();
-                gateway.clone_from(&link.gateway);
-                interface.clone_from(&link.interface);
-                let _ = update_tx.send(MonitorUpdate::Link(link));
+            let link = collect_link();
+            let fingerprint = link.path_fingerprint();
+            if path_fingerprint.as_ref() != Some(&fingerprint) {
+                path_generation = path_generation.wrapping_add(1).max(1);
+                path_fingerprint = Some(fingerprint);
+                internet_refresh_pending.fill(true);
+                peers_refresh_pending = true;
+                wifi_refresh_pending = true;
             }
-            spawn_probe(
-                ProbeKind::Gateway,
-                gateway.clone(),
-                update_tx.clone(),
-                1,
-                probe_in_flight.clone(),
-            );
-            spawn_traffic(
-                interface.clone(),
-                update_tx.clone(),
-                traffic_in_flight.clone(),
-            );
-            // Internet probes are a bounded startup/refresh diagnostic rather
-            // than background traffic coupled to the gateway sample rate.
-            if force_refresh {
-                spawn_probe(
+            gateway.clone_from(&link.gateway);
+            interface.clone_from(&link.interface);
+            let _ = update_tx.send(MonitorUpdate::Link {
+                generation: path_generation,
+                snapshot: link.clone(),
+            });
+
+            match mode {
+                MonitorMode::Overview => {
+                    spawn_probe(
+                        ProbeKind::Gateway,
+                        gateway.clone(),
+                        update_tx.clone(),
+                        1,
+                        path_generation,
+                        probe_in_flight.clone(),
+                    );
+                    spawn_traffic(
+                        interface.clone(),
+                        update_tx.clone(),
+                        path_generation,
+                        traffic_in_flight.clone(),
+                    );
+                }
+                MonitorMode::Link => {
+                    spawn_traffic(
+                        interface.clone(),
+                        update_tx.clone(),
+                        path_generation,
+                        traffic_in_flight.clone(),
+                    );
+                }
+                MonitorMode::Peers => {}
+            }
+
+            // Internet probes are a bounded startup, transition, or manual
+            // refresh diagnostic rather than background traffic coupled to
+            // the gateway sample rate.
+            if mode == MonitorMode::Overview {
+                for (pending, kind) in internet_refresh_pending.iter_mut().zip([
                     ProbeKind::Dns,
-                    gateway.clone(),
-                    update_tx.clone(),
-                    1,
-                    probe_in_flight.clone(),
-                );
-                spawn_probe(
                     ProbeKind::Https,
-                    gateway.clone(),
-                    update_tx.clone(),
-                    1,
-                    probe_in_flight.clone(),
-                );
-                spawn_probe(
                     ProbeKind::PublicIp,
-                    gateway.clone(),
-                    update_tx.clone(),
-                    1,
-                    probe_in_flight.clone(),
-                );
+                ]) {
+                    if *pending
+                        && spawn_probe(
+                            kind,
+                            gateway.clone(),
+                            update_tx.clone(),
+                            1,
+                            path_generation,
+                            probe_in_flight.clone(),
+                        )
+                    {
+                        *pending = false;
+                    }
+                }
             }
-            if force_refresh || tick.is_multiple_of(15) {
-                spawn_peers(update_tx.clone());
-                spawn_wifi(interface.clone(), update_tx.clone());
+
+            if tick.is_multiple_of(15) && mode == MonitorMode::Overview {
+                peers_refresh_pending = true;
+                wifi_refresh_pending = true;
             }
-            force_refresh = false;
+            if tick.is_multiple_of(3) && mode == MonitorMode::Link {
+                wifi_refresh_pending = true;
+            }
+            if mode == MonitorMode::Peers {
+                peers_refresh_pending = true;
+            }
+            match mode {
+                MonitorMode::Overview => {
+                    if peers_refresh_pending
+                        && spawn_peers(
+                            link.clone(),
+                            update_tx.clone(),
+                            path_generation,
+                            peers_in_flight.clone(),
+                        )
+                    {
+                        peers_refresh_pending = false;
+                    }
+                    if wifi_refresh_pending
+                        && spawn_wifi(
+                            interface.clone(),
+                            update_tx.clone(),
+                            path_generation,
+                            wifi_in_flight.clone(),
+                        )
+                    {
+                        wifi_refresh_pending = false;
+                    }
+                }
+                MonitorMode::Link => {
+                    if wifi_refresh_pending
+                        && spawn_wifi(
+                            interface.clone(),
+                            update_tx.clone(),
+                            path_generation,
+                            wifi_in_flight.clone(),
+                        )
+                    {
+                        wifi_refresh_pending = false;
+                    }
+                }
+                MonitorMode::Peers => {
+                    if peers_refresh_pending
+                        && spawn_peers(
+                            link.clone(),
+                            update_tx.clone(),
+                            path_generation,
+                            peers_in_flight.clone(),
+                        )
+                    {
+                        peers_refresh_pending = false;
+                    }
+                }
+            }
             tick = tick.wrapping_add(1);
         }
 
         for _ in 0..steps_per_tick {
             match control_rx.recv_timeout(sleep_step) {
                 Ok(MonitorControl::Refresh) => {
-                    force_refresh = true;
+                    internet_refresh_pending.fill(true);
+                    peers_refresh_pending = true;
+                    wifi_refresh_pending = true;
                     break;
                 }
                 Ok(MonitorControl::Pause(value)) => {
@@ -152,18 +244,24 @@ fn spawn_probe(
     gateway: Option<String>,
     tx: Sender<MonitorUpdate>,
     gateway_attempts: usize,
+    generation: u64,
     in_flight: Arc<[AtomicBool; 4]>,
-) {
+) -> bool {
     let slot = probe_slot(kind);
     if in_flight[slot].swap(true, Ordering::AcqRel) {
-        return;
+        return false;
     }
-    let _ = tx.send(MonitorUpdate::ProbeStarted(kind));
+    let _ = tx.send(MonitorUpdate::ProbeStarted { generation, kind });
     thread::spawn(move || {
         let result = run_probe(kind, gateway.as_deref(), gateway_attempts);
-        let _ = tx.send(MonitorUpdate::ProbeFinished(kind, result));
+        let _ = tx.send(MonitorUpdate::ProbeFinished {
+            generation,
+            kind,
+            result,
+        });
         in_flight[slot].store(false, Ordering::Release);
     });
+    true
 }
 
 fn probe_slot(kind: ProbeKind) -> usize {
@@ -175,26 +273,60 @@ fn probe_slot(kind: ProbeKind) -> usize {
     }
 }
 
-fn spawn_peers(tx: Sender<MonitorUpdate>) {
+fn spawn_peers(
+    link: LinkSnapshot,
+    tx: Sender<MonitorUpdate>,
+    generation: u64,
+    in_flight: Arc<AtomicBool>,
+) -> bool {
+    if in_flight.swap(true, Ordering::AcqRel) {
+        return false;
+    }
     thread::spawn(move || {
-        let _ = tx.send(MonitorUpdate::Peers(peers::collect()));
+        let _ = tx.send(MonitorUpdate::Peers {
+            generation,
+            snapshot: peers::collect(&link),
+        });
+        in_flight.store(false, Ordering::Release);
     });
+    true
 }
 
-fn spawn_wifi(interface: Option<String>, tx: Sender<MonitorUpdate>) {
+fn spawn_wifi(
+    interface: Option<String>,
+    tx: Sender<MonitorUpdate>,
+    generation: u64,
+    in_flight: Arc<AtomicBool>,
+) -> bool {
+    if in_flight.swap(true, Ordering::AcqRel) {
+        return false;
+    }
     thread::spawn(move || {
         let telemetry = collect_wifi_telemetry(interface.as_deref());
-        let _ = tx.send(MonitorUpdate::Wifi(telemetry));
+        let _ = tx.send(MonitorUpdate::Wifi {
+            generation,
+            telemetry,
+        });
+        in_flight.store(false, Ordering::Release);
     });
+    true
 }
 
-fn spawn_traffic(interface: Option<String>, tx: Sender<MonitorUpdate>, in_flight: Arc<AtomicBool>) {
+fn spawn_traffic(
+    interface: Option<String>,
+    tx: Sender<MonitorUpdate>,
+    generation: u64,
+    in_flight: Arc<AtomicBool>,
+) {
     if in_flight.swap(true, Ordering::AcqRel) {
         return;
     }
     thread::spawn(move || {
         let counters = interface.as_deref().and_then(collect_interface_counters);
-        let _ = tx.send(MonitorUpdate::Traffic(counters));
+        let _ = tx.send(MonitorUpdate::Traffic {
+            generation,
+            counters,
+        });
         in_flight.store(false, Ordering::Release);
     });
 }
@@ -203,7 +335,8 @@ pub fn collect_snapshot(timeout: Duration) -> SnapshotReport {
     let mut link = collect_link();
     let wifi_interface = link.interface.clone();
     let wifi = thread::spawn(move || collect_wifi_telemetry(wifi_interface.as_deref()));
-    let neighbors = thread::spawn(peers::collect);
+    let neighbor_link = link.clone();
+    let neighbors = thread::spawn(move || peers::collect(&neighbor_link));
     let gateway = link.gateway.clone();
     let (tx, rx) = mpsc::channel();
     for kind in ProbeKind::ALL {
@@ -252,6 +385,7 @@ pub fn collect_snapshot(timeout: Duration) -> SnapshotReport {
             health: Health::Unavailable,
             detail: "neighbor-cache worker panicked".into(),
             sources: Vec::new(),
+            failed_sources: Vec::new(),
             oui_source: None,
             peers: Vec::new(),
         });
@@ -323,10 +457,12 @@ pub fn collect_link() -> LinkSnapshot {
     let interface = route.as_ref().and_then(|value| value.0.clone());
     let gateway = route.and_then(|value| value.1);
     let addresses = local_addresses(interface.as_deref());
+    let (ssid, ssid_restricted) = wifi_ssid(interface.as_deref());
     LinkSnapshot {
         host: short_hostname(),
         link_type: interface.as_deref().map(link_type),
-        ssid: wifi_ssid(interface.as_deref()),
+        ssid,
+        ssid_restricted,
         wifi: None,
         interface,
         gateway,
@@ -587,6 +723,10 @@ fn value_after(words: &[&str], needle: &str) -> Option<String> {
 }
 
 fn local_addresses(default_interface: Option<&str>) -> Vec<Address> {
+    let temporary_addresses = default_interface
+        .filter(|_| cfg!(target_os = "macos"))
+        .map(macos_temporary_addresses)
+        .unwrap_or_default();
     let mut addresses: Vec<_> = get_if_addrs()
         .unwrap_or_default()
         .into_iter()
@@ -604,6 +744,7 @@ fn local_addresses(default_interface: Option<&str>) -> Vec<Address> {
                 address: ip.to_string(),
                 family: if ip.is_ipv4() { 4 } else { 6 },
                 is_default: default_interface == Some(item.name.as_str()),
+                is_temporary: temporary_addresses.contains(&ip.to_string()),
             }
         })
         .collect();
@@ -619,6 +760,14 @@ fn local_addresses(default_interface: Option<&str>) -> Vec<Address> {
 }
 
 fn resolver_servers() -> Vec<String> {
+    if cfg!(target_os = "macos")
+        && let Some(output) = command_output("scutil", &["--dns"])
+    {
+        let resolvers = parse_macos_resolvers(&output);
+        if !resolvers.is_empty() {
+            return resolvers;
+        }
+    }
     fs::read_to_string("/etc/resolv.conf")
         .unwrap_or_default()
         .lines()
@@ -629,9 +778,45 @@ fn resolver_servers() -> Vec<String> {
         .collect()
 }
 
-fn wifi_ssid(interface: Option<&str>) -> Option<String> {
-    let interface = interface?;
-    if cfg!(target_os = "macos") {
+fn parse_macos_resolvers(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.trim().split_once(':')?;
+            key.trim()
+                .starts_with("nameserver[")
+                .then(|| value.trim().to_string())
+        })
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn macos_temporary_addresses(interface: &str) -> BTreeSet<String> {
+    parse_macos_temporary_addresses(&command_output("ifconfig", &[interface]).unwrap_or_default())
+}
+
+fn parse_macos_temporary_addresses(output: &str) -> BTreeSet<String> {
+    output
+        .lines()
+        .filter(|line| line.contains(" temporary"))
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next() == Some("inet6"))
+                .then(|| fields.next())
+                .flatten()
+                .and_then(|value| value.split('%').next())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn wifi_ssid(interface: Option<&str>) -> (Option<String>, bool) {
+    let Some(interface) = interface else {
+        return (None, false);
+    };
+    let value = if cfg!(target_os = "macos") {
         command_output("ipconfig", &["getsummary", interface]).and_then(|output| {
             output.lines().find_map(|line| {
                 let line = line.trim();
@@ -655,6 +840,11 @@ fn wifi_ssid(interface: Option<&str>) -> Option<String> {
         })
     } else {
         None
+    };
+    if cfg!(target_os = "macos") && value.as_deref() == Some("<redacted>") {
+        (None, true)
+    } else {
+        (value, false)
     }
 }
 
@@ -916,6 +1106,27 @@ mod tests {
         assert_eq!(counters.received_bytes, 2_000);
         assert_eq!(counters.transmitted_bytes, 3_000);
         assert_eq!(counters.drops, 3);
+    }
+
+    #[test]
+    fn parses_effective_macos_resolvers_across_scoped_sections() {
+        let resolvers = parse_macos_resolvers(
+            "resolver #1\n  nameserver[0] : 100.100.100.100\n\
+             resolver #2\n  nameserver[0] : 192.168.1.1\n\
+             DNS configuration (for scoped queries)\n\
+             resolver #1\n  nameserver[0] : 192.168.1.1\n",
+        );
+        assert_eq!(resolvers, vec!["100.100.100.100", "192.168.1.1"]);
+    }
+
+    #[test]
+    fn identifies_only_macos_ipv6_addresses_marked_temporary() {
+        let addresses = parse_macos_temporary_addresses(
+            "inet6 fe80::1%en0 prefixlen 64 secured scopeid 0xe\n\
+             inet6 2001:db8::1 prefixlen 64 autoconf temporary\n\
+             inet 192.0.2.2 netmask 0xffffff00\n",
+        );
+        assert_eq!(addresses, BTreeSet::from(["2001:db8::1".into()]));
     }
 
     #[test]

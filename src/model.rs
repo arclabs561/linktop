@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::fmt;
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -65,12 +66,13 @@ impl fmt::Display for ProbeKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Address {
     pub interface: String,
     pub address: String,
     pub family: u8,
     pub is_default: bool,
+    pub is_temporary: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,6 +81,7 @@ pub struct LinkSnapshot {
     pub interface: Option<String>,
     pub link_type: Option<String>,
     pub ssid: Option<String>,
+    pub ssid_restricted: bool,
     pub wifi: Option<WifiTelemetry>,
     pub gateway: Option<String>,
     pub public_ip: Option<String>,
@@ -115,11 +118,103 @@ impl LinkSnapshot {
             interface: None,
             link_type: None,
             ssid: None,
+            ssid_restricted: false,
             wifi: None,
             gateway: None,
             public_ip: None,
             resolvers: Vec::new(),
             addresses: Vec::new(),
+        }
+    }
+
+    pub(crate) fn path_fingerprint(&self) -> PathFingerprint {
+        let mut resolvers = self.resolvers.clone();
+        resolvers.sort();
+        resolvers.dedup();
+        let mut addresses: Vec<_> = self
+            .addresses
+            .iter()
+            .filter(|address| address.is_default)
+            .filter_map(|address| {
+                path_address_identity(&address.address)
+                    .map(|identity| (address.interface.clone(), identity))
+            })
+            .collect();
+        addresses.sort();
+        addresses.dedup();
+        PathFingerprint {
+            interface: self.interface.clone(),
+            link_type: self.link_type.clone(),
+            ssid: self.ssid.clone(),
+            ssid_restricted: self.ssid_restricted,
+            gateway: self.gateway.clone(),
+            resolvers,
+            addresses,
+        }
+    }
+
+    fn path_label(&self) -> String {
+        let interface = self.interface.as_deref().unwrap_or("no default interface");
+        let ssid = self
+            .ssid
+            .as_deref()
+            .map(|value| format!(" / {value}"))
+            .or_else(|| {
+                self.ssid_restricted
+                    .then(|| " / SSID hidden by macOS".into())
+            })
+            .unwrap_or_default();
+        let gateway = self.gateway.as_deref().unwrap_or("no gateway");
+        format!("{interface}{ssid} via {gateway}")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PathFingerprint {
+    interface: Option<String>,
+    link_type: Option<String>,
+    ssid: Option<String>,
+    ssid_restricted: bool,
+    gateway: Option<String>,
+    resolvers: Vec<String>,
+    addresses: Vec<(String, String)>,
+}
+
+impl PathFingerprint {
+    fn changed_dimensions(&self, current: &Self) -> Vec<&'static str> {
+        let mut changed = Vec::new();
+        if self.interface != current.interface {
+            changed.push("interface");
+        }
+        if self.link_type != current.link_type {
+            changed.push("link type");
+        }
+        if self.ssid != current.ssid || self.ssid_restricted != current.ssid_restricted {
+            changed.push("SSID");
+        }
+        if self.gateway != current.gateway {
+            changed.push("gateway");
+        }
+        if self.resolvers != current.resolvers {
+            changed.push("resolvers");
+        }
+        if self.addresses != current.addresses {
+            changed.push("address prefix");
+        }
+        changed
+    }
+}
+
+fn path_address_identity(value: &str) -> Option<String> {
+    match value.parse::<IpAddr>().ok()? {
+        IpAddr::V4(address) => Some(address.to_string()),
+        IpAddr::V6(address) if address.is_unicast_link_local() => None,
+        IpAddr::V6(address) => {
+            let segments = address.segments();
+            Some(format!(
+                "{:x}:{:x}:{:x}:{:x}::/64",
+                segments[0], segments[1], segments[2], segments[3]
+            ))
         }
     }
 }
@@ -186,6 +281,7 @@ pub struct PeerSnapshot {
     pub health: Health,
     pub detail: String,
     pub sources: Vec<String>,
+    pub failed_sources: Vec<String>,
     pub oui_source: Option<String>,
     pub peers: Vec<Peer>,
 }
@@ -196,6 +292,7 @@ impl PeerSnapshot {
             health: Health::Queued,
             detail: "waiting for neighbor cache".into(),
             sources: Vec::new(),
+            failed_sources: Vec::new(),
             oui_source: None,
             peers: Vec::new(),
         }
@@ -262,13 +359,39 @@ pub struct Event {
 
 #[derive(Debug, Clone)]
 pub enum MonitorUpdate {
-    Link(LinkSnapshot),
-    Wifi(Option<WifiTelemetry>),
-    Peers(PeerSnapshot),
-    Traffic(Option<InterfaceCounters>),
-    ProbeStarted(ProbeKind),
-    ProbeFinished(ProbeKind, ProbeResult),
+    Link {
+        generation: u64,
+        snapshot: LinkSnapshot,
+    },
+    Wifi {
+        generation: u64,
+        telemetry: Option<WifiTelemetry>,
+    },
+    Peers {
+        generation: u64,
+        snapshot: PeerSnapshot,
+    },
+    Traffic {
+        generation: u64,
+        counters: Option<InterfaceCounters>,
+    },
+    ProbeStarted {
+        generation: u64,
+        kind: ProbeKind,
+    },
+    ProbeFinished {
+        generation: u64,
+        kind: ProbeKind,
+        result: ProbeResult,
+    },
     Notice(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitorMode {
+    Overview,
+    Link,
+    Peers,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -294,6 +417,7 @@ pub struct App {
     pub events: VecDeque<Event>,
     pub paused: bool,
     pub cycles: u64,
+    pub path_generation: u64,
 }
 
 impl App {
@@ -314,6 +438,7 @@ impl App {
             events: VecDeque::with_capacity(MAX_EVENTS),
             paused: false,
             cycles: 0,
+            path_generation: 0,
         };
         app.push_event(Health::Running, "instrument started");
         app
@@ -321,33 +446,65 @@ impl App {
 
     pub fn apply(&mut self, update: MonitorUpdate) {
         match update {
-            MonitorUpdate::Link(mut link) => {
-                link.public_ip = self.link.public_ip.clone();
-                link.wifi = self.link.wifi.clone();
-                let changed = self.link.interface != link.interface
-                    || self.link.gateway != link.gateway
-                    || self.link.ssid != link.ssid;
+            MonitorUpdate::Link {
+                generation,
+                snapshot: mut link,
+            } => {
+                if generation < self.path_generation {
+                    return;
+                }
+                if generation == self.path_generation {
+                    link.public_ip = self.link.public_ip.clone();
+                    link.wifi = self.link.wifi.clone();
+                    self.link = link;
+                    return;
+                }
+
+                let initial = self.path_generation == 0;
+                let previous_fingerprint = self.link.path_fingerprint();
+                let current_fingerprint = link.path_fingerprint();
+                let previous = self.link.path_label();
+                self.path_generation = generation;
                 self.link = link;
-                if changed {
-                    self.gateway_samples.clear();
-                    self.gateway_outcomes.clear();
-                    self.gateway_attempts = 0;
-                    self.gateway_metrics = None;
-                    self.push_event(
-                        Health::Ok,
-                        format!(
-                            "path: {} via {}",
-                            self.link
-                                .interface
-                                .as_deref()
-                                .unwrap_or("unknown interface"),
-                            self.link.gateway.as_deref().unwrap_or("unknown gateway")
-                        ),
-                    );
+                self.gateway_samples.clear();
+                self.gateway_outcomes.clear();
+                self.gateway_attempts = 0;
+                self.gateway_metrics = None;
+                self.interface_counters = None;
+                self.interface_counters_at = None;
+                self.interface_rate = None;
+                self.peers = PeerSnapshot::pending();
+                for probe in &mut self.probes {
+                    *probe = ProbeView::queued(probe.kind);
+                }
+                let current = self.link.path_label();
+                self.push_event(
+                    Health::Running,
+                    if initial {
+                        format!("path: {current}")
+                    } else {
+                        let dimensions = previous_fingerprint
+                            .changed_dimensions(&current_fingerprint)
+                            .join(", ");
+                        format!("path changed ({dimensions}): {previous} → {current}")
+                    },
+                );
+            }
+            MonitorUpdate::Wifi {
+                generation,
+                telemetry,
+            } => {
+                if generation == self.path_generation {
+                    self.link.wifi = telemetry;
                 }
             }
-            MonitorUpdate::Wifi(wifi) => self.link.wifi = wifi,
-            MonitorUpdate::Peers(peers) => {
+            MonitorUpdate::Peers {
+                generation,
+                snapshot: peers,
+            } => {
+                if generation != self.path_generation {
+                    return;
+                }
                 let previous = self.peers.peers.len();
                 let current = peers.peers.len();
                 self.peers = peers;
@@ -355,7 +512,13 @@ impl App {
                     self.push_event(Health::Ok, format!("neighbor cache: {current} peer(s)"));
                 }
             }
-            MonitorUpdate::Traffic(counters) => {
+            MonitorUpdate::Traffic {
+                generation,
+                counters,
+            } => {
+                if generation != self.path_generation {
+                    return;
+                }
                 let now = Instant::now();
                 self.interface_rate = self
                     .interface_counters
@@ -368,7 +531,10 @@ impl App {
                 self.interface_counters = counters;
                 self.interface_counters_at = Some(now);
             }
-            MonitorUpdate::ProbeStarted(kind) => {
+            MonitorUpdate::ProbeStarted { generation, kind } => {
+                if generation != self.path_generation {
+                    return;
+                }
                 let probe = self.probe_mut(kind);
                 // Preserve the last settled result while a periodic refresh is
                 // in flight. Only the initial sample needs an explicit running
@@ -379,7 +545,14 @@ impl App {
                     probe.detail = "probing…".into();
                 }
             }
-            MonitorUpdate::ProbeFinished(kind, result) => {
+            MonitorUpdate::ProbeFinished {
+                generation,
+                kind,
+                result,
+            } => {
+                if generation != self.path_generation {
+                    return;
+                }
                 self.cycles += u64::from(kind == ProbeKind::Gateway);
                 let previous = self.probe(kind).health;
                 if kind == ProbeKind::Gateway {
@@ -551,7 +724,9 @@ impl SnapshotReport {
             .collect();
         let health = if probes.iter().any(|probe| probe.health == Health::Failed) {
             Health::Failed
-        } else if probes.iter().any(|probe| probe.health == Health::Degraded) {
+        } else if probes.iter().any(|probe| probe.health == Health::Degraded)
+            || neighbors.health == Health::Degraded
+        {
             Health::Degraded
         } else if probes
             .iter()
@@ -616,15 +791,16 @@ mod tests {
     fn gateway_samples_are_bounded() {
         let mut app = App::new();
         for latency in 1..=MAX_GATEWAY_SAMPLES + 5 {
-            app.apply(MonitorUpdate::ProbeFinished(
-                ProbeKind::Gateway,
-                ProbeResult {
+            app.apply(MonitorUpdate::ProbeFinished {
+                generation: 0,
+                kind: ProbeKind::Gateway,
+                result: ProbeResult {
                     health: Health::Ok,
                     detail: "reply".into(),
                     latency_ms: Some(latency as f64),
                     metrics: None,
                 },
-            ));
+            });
         }
         assert_eq!(app.gateway_samples.len(), MAX_GATEWAY_SAMPLES);
         assert_eq!(app.gateway_samples.front(), Some(&6));
@@ -634,9 +810,10 @@ mod tests {
     fn failed_probe_controls_overall_health() {
         let mut app = App::new();
         for kind in ProbeKind::ALL {
-            app.apply(MonitorUpdate::ProbeFinished(
+            app.apply(MonitorUpdate::ProbeFinished {
+                generation: 0,
                 kind,
-                ProbeResult {
+                result: ProbeResult {
                     health: if kind == ProbeKind::Https {
                         Health::Failed
                     } else {
@@ -646,7 +823,7 @@ mod tests {
                     latency_ms: Some(12.0),
                     metrics: None,
                 },
-            ));
+            });
         }
         assert_eq!(app.overall_health(), Health::Failed);
     }
@@ -686,20 +863,213 @@ mod tests {
     fn rolling_gateway_metrics_count_failed_attempts() {
         let mut app = App::new();
         for latency in [Some(10.0), None, Some(12.0)] {
-            app.apply(MonitorUpdate::ProbeFinished(
-                ProbeKind::Gateway,
-                ProbeResult {
+            app.apply(MonitorUpdate::ProbeFinished {
+                generation: 0,
+                kind: ProbeKind::Gateway,
+                result: ProbeResult {
                     health: latency.map_or(Health::Failed, |_| Health::Ok),
                     detail: "sample".into(),
                     latency_ms: latency,
                     metrics: None,
                 },
-            ));
+            });
         }
         let metrics = app.gateway_metrics.unwrap();
         assert_eq!(metrics.sent, 3);
         assert_eq!(metrics.received, 2);
         assert_eq!(metrics.lost, 1);
         assert_eq!(metrics.loss_rate, Some(1.0 / 3.0));
+    }
+
+    #[test]
+    fn path_transition_resets_path_scoped_state_and_names_both_networks() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: test_link("en0", "house", "192.168.1.1"),
+        });
+        app.apply(MonitorUpdate::ProbeFinished {
+            generation: 1,
+            kind: ProbeKind::Gateway,
+            result: ProbeResult {
+                health: Health::Ok,
+                detail: "192.168.1.1".into(),
+                latency_ms: Some(4.0),
+                metrics: None,
+            },
+        });
+        app.apply(MonitorUpdate::ProbeFinished {
+            generation: 1,
+            kind: ProbeKind::PublicIp,
+            result: ProbeResult {
+                health: Health::Ok,
+                detail: "203.0.113.8".into(),
+                latency_ms: Some(10.0),
+                metrics: None,
+            },
+        });
+
+        app.apply(MonitorUpdate::Link {
+            generation: 2,
+            snapshot: test_link("en0", "phone-hotspot", "172.20.10.1"),
+        });
+
+        assert_eq!(app.path_generation, 2);
+        assert!(app.gateway_samples.is_empty());
+        assert!(app.link.public_ip.is_none());
+        assert!(app.link.wifi.is_none());
+        assert!(app.interface_counters.is_none());
+        assert_eq!(app.peers.health, Health::Queued);
+        assert!(app.events.back().unwrap().message.contains("house"));
+        assert!(app.events.back().unwrap().message.contains("phone-hotspot"));
+    }
+
+    #[test]
+    fn stale_result_cannot_cross_a_path_generation() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: test_link("en0", "house", "192.168.1.1"),
+        });
+        app.apply(MonitorUpdate::Link {
+            generation: 2,
+            snapshot: test_link("en0", "phone-hotspot", "172.20.10.1"),
+        });
+        app.apply(MonitorUpdate::ProbeFinished {
+            generation: 1,
+            kind: ProbeKind::PublicIp,
+            result: ProbeResult {
+                health: Health::Ok,
+                detail: "198.51.100.9".into(),
+                latency_ms: Some(12.0),
+                metrics: None,
+            },
+        });
+        app.apply(MonitorUpdate::Wifi {
+            generation: 1,
+            telemetry: Some(WifiTelemetry {
+                signal_dbm: Some(-30.0),
+                noise_dbm: None,
+                signal_percent: None,
+                channel: Some(11),
+                channel_width_mhz: None,
+                frequency_mhz: None,
+                band: None,
+                phy: None,
+                tx_rate_mbps: None,
+                rx_rate_mbps: None,
+                mcs: None,
+            }),
+        });
+
+        assert!(app.link.public_ip.is_none());
+        assert!(app.link.wifi.is_none());
+        assert_eq!(app.cycles, 0);
+    }
+
+    #[test]
+    fn temporary_address_rotation_does_not_change_path_identity() {
+        let before = test_link("en0", "house", "192.168.1.1");
+        let mut after = before.clone();
+        after.addresses.push(Address {
+            interface: "en0".into(),
+            address: "2001:db8:abcd:1::1234".into(),
+            family: 6,
+            is_default: true,
+            is_temporary: true,
+        });
+        let mut rotated = after.clone();
+        rotated.addresses.last_mut().unwrap().address = "2001:db8:abcd:1::9876".into();
+        rotated.addresses.last_mut().unwrap().is_temporary = false;
+        assert_eq!(after.path_fingerprint(), rotated.path_fingerprint());
+
+        rotated.addresses.last_mut().unwrap().address = "2001:db8:abcd:2::9876".into();
+        assert_ne!(after.path_fingerprint(), rotated.path_fingerprint());
+    }
+
+    #[test]
+    fn transition_event_names_nonvisual_fingerprint_changes() {
+        for (expected, change) in [
+            ("link type", "link"),
+            ("resolvers", "resolver"),
+            ("address prefix", "address"),
+        ] {
+            let before = test_link("en0", "house", "192.168.1.1");
+            let mut after = before.clone();
+            match change {
+                "link" => after.link_type = Some("ethernet".into()),
+                "resolver" => after.resolvers = vec!["9.9.9.9".into()],
+                "address" => after.addresses[0].address = "198.51.100.2".into(),
+                _ => unreachable!(),
+            }
+            let mut app = App::new();
+            app.apply(MonitorUpdate::Link {
+                generation: 1,
+                snapshot: before,
+            });
+            app.apply(MonitorUpdate::Link {
+                generation: 2,
+                snapshot: after,
+            });
+            assert!(
+                app.events.back().unwrap().message.contains(expected),
+                "transition event should identify {expected}: {}",
+                app.events.back().unwrap().message
+            );
+        }
+    }
+
+    #[test]
+    fn partial_neighbor_evidence_degrades_snapshot_summary() {
+        let neighbors = PeerSnapshot {
+            health: Health::Degraded,
+            detail: "one native cache source failed".into(),
+            sources: vec!["arp -an".into()],
+            failed_sources: vec!["ndp -an".into()],
+            oui_source: None,
+            peers: Vec::new(),
+        };
+        let results = ProbeKind::ALL
+            .into_iter()
+            .map(|kind| {
+                (
+                    kind,
+                    ProbeResult {
+                        health: Health::Ok,
+                        detail: "complete".into(),
+                        latency_ms: Some(1.0),
+                        metrics: None,
+                    },
+                )
+            })
+            .collect();
+        let report = SnapshotReport::from_results(
+            test_link("en0", "house", "192.168.1.1"),
+            None,
+            neighbors,
+            results,
+        );
+        assert_eq!(report.summary.health, Health::Degraded);
+    }
+
+    fn test_link(interface: &str, ssid: &str, gateway: &str) -> LinkSnapshot {
+        LinkSnapshot {
+            host: "workstation".into(),
+            interface: Some(interface.into()),
+            link_type: Some("wifi".into()),
+            ssid: Some(ssid.into()),
+            ssid_restricted: false,
+            wifi: None,
+            gateway: Some(gateway.into()),
+            public_ip: None,
+            resolvers: vec![gateway.into()],
+            addresses: vec![Address {
+                interface: interface.into(),
+                address: "192.0.2.2".into(),
+                family: 4,
+                is_default: true,
+                is_temporary: false,
+            }],
+        }
     }
 }

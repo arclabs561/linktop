@@ -1,2 +1,6 @@
 /target/
 .agents/
+!docs/design/
+!docs/design/**
+!docs/adr/
+!docs/adr/**

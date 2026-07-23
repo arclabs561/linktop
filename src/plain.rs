@@ -23,14 +23,12 @@ impl From<&App> for PlainState {
 pub fn format_update(update: &MonitorUpdate, before: &PlainState, app: &App) -> Vec<String> {
     let elapsed = format_elapsed(app.uptime());
     match update {
-        MonitorUpdate::Link(link) if path_changed(&before.link, link) => vec![format!(
-            "+{elapsed} path     {} → {} [{}] → {}",
-            link.host,
-            link.interface.as_deref().unwrap_or("unknown interface"),
-            link.link_type.as_deref().unwrap_or("unknown link"),
-            link.gateway.as_deref().unwrap_or("unknown gateway")
-        )],
-        MonitorUpdate::Wifi(wifi) if before.link.wifi.as_ref() != wifi.as_ref() => {
+        MonitorUpdate::Link { snapshot: link, .. } if path_changed(&before.link, link) => {
+            path_lines(&elapsed, link)
+        }
+        MonitorUpdate::Wifi { telemetry: wifi, .. }
+            if before.link.wifi.as_ref() != wifi.as_ref() =>
+        {
             let Some(wifi) = wifi else {
                 return vec![format!(
                     "+{elapsed} radio    unavailable [source: platform link tools]"
@@ -48,10 +46,17 @@ pub fn format_update(update: &MonitorUpdate, before: &PlainState, app: &App) -> 
                     .unwrap_or_else(|| "?".into())
             )]
         }
-        MonitorUpdate::Peers(peers) if before.peers.peers != peers.peers => {
+        MonitorUpdate::Peers { snapshot: peers, .. }
+            if before.peers.peers != peers.peers
+                || before.peers.health != peers.health
+                || before.peers.failed_sources != peers.failed_sources =>
+        {
             peer_change_lines(&elapsed, &before.peers, peers, app.link.gateway.as_deref())
         }
-        MonitorUpdate::Traffic(Some(counters)) => app
+        MonitorUpdate::Traffic {
+            counters: Some(counters),
+            ..
+        } => app
             .interface_rate
             .as_ref()
             .map(|rate| {
@@ -67,7 +72,7 @@ pub fn format_update(update: &MonitorUpdate, before: &PlainState, app: &App) -> 
                 )]
             })
             .unwrap_or_default(),
-        MonitorUpdate::ProbeFinished(kind, result) => {
+        MonitorUpdate::ProbeFinished { kind, result, .. } => {
             let mut measurements = result
                 .latency_ms
                 .map(|value| format!("rtt={value:.1}ms "))
@@ -95,20 +100,56 @@ pub fn format_update(update: &MonitorUpdate, before: &PlainState, app: &App) -> 
             )]
         }
         MonitorUpdate::Notice(message) => vec![format!("+{elapsed} notice   {message}")],
-        MonitorUpdate::Link(_)
-        | MonitorUpdate::Wifi(_)
-        | MonitorUpdate::Peers(_)
-        | MonitorUpdate::Traffic(None)
-        | MonitorUpdate::ProbeStarted(_) => Vec::new(),
+        MonitorUpdate::Link { .. }
+        | MonitorUpdate::Wifi { .. }
+        | MonitorUpdate::Peers { .. }
+        | MonitorUpdate::Traffic { counters: None, .. }
+        | MonitorUpdate::ProbeStarted { .. } => Vec::new(),
     }
 }
 
 fn path_changed(before: &LinkSnapshot, after: &LinkSnapshot) -> bool {
-    before.host != after.host
-        || before.interface != after.interface
-        || before.link_type != after.link_type
-        || before.ssid != after.ssid
-        || before.gateway != after.gateway
+    before.host != after.host || before.path_fingerprint() != after.path_fingerprint()
+}
+
+fn path_lines(elapsed: &str, link: &LinkSnapshot) -> Vec<String> {
+    let ssid = link
+        .ssid
+        .as_deref()
+        .map(|value| format!(" / {value}"))
+        .or_else(|| {
+            link.ssid_restricted
+                .then(|| " / SSID hidden by macOS Location Services policy".into())
+        })
+        .unwrap_or_default();
+    let mut lines = vec![format!(
+        "+{elapsed} path     {} → {} [{}{}] → {}",
+        link.host,
+        link.interface.as_deref().unwrap_or("unknown interface"),
+        link.link_type.as_deref().unwrap_or("unknown link"),
+        ssid,
+        link.gateway.as_deref().unwrap_or("unknown gateway")
+    )];
+    lines.push(format!(
+        "+{elapsed} resolver {} [source: host resolver configuration]",
+        if link.resolvers.is_empty() {
+            "unavailable".into()
+        } else {
+            link.resolvers.join(", ")
+        }
+    ));
+    lines.extend(
+        link.addresses
+            .iter()
+            .filter(|address| address.is_default)
+            .map(|address| {
+                format!(
+                    "+{elapsed} address  interface={} family=ipv{} address={} temporary={} [source: host interface state]",
+                    address.interface, address.family, address.address, address.is_temporary
+                )
+            }),
+    );
+    lines
 }
 
 fn peer_change_lines(
@@ -129,6 +170,10 @@ fn peer_change_lines(
     let old = peer_map(&before.peers);
     let new = peer_map(&after.peers);
     if before.health == crate::model::Health::Queued {
+        lines.extend(
+            new.values()
+                .map(|peer| format!("+{elapsed} peer =   {}", peer_label(peer, gateway))),
+        );
         return lines;
     }
     for (key, peer) in &new {
@@ -165,11 +210,12 @@ fn peer_map(peers: &[Peer]) -> BTreeMap<(String, Option<String>, Option<String>)
 
 fn peer_label(peer: &Peer, gateway: Option<&str>) -> String {
     format!(
-        "{} mac={} interface={} state={} role={}{}",
+        "{} mac={} interface={} state={} evidence=\"{}\" role={}{}",
         peer.address,
         peer.mac.as_deref().unwrap_or("unknown"),
         peer.interface.as_deref().unwrap_or("unknown"),
         peer.state.as_deref().unwrap_or("cached"),
+        crate::ui::peer_state_meaning(peer.state.as_deref()),
         if gateway == Some(peer.address.as_str()) {
             "gateway"
         } else {
@@ -213,15 +259,16 @@ mod tests {
     #[test]
     fn live_probe_line_is_append_only_plain_text() {
         let mut app = App::new();
-        let update = MonitorUpdate::ProbeFinished(
-            ProbeKind::Gateway,
-            ProbeResult {
+        let update = MonitorUpdate::ProbeFinished {
+            generation: 0,
+            kind: ProbeKind::Gateway,
+            result: ProbeResult {
                 health: Health::Ok,
                 detail: "192.168.1.1, 1 attempt(s), 0% loss".into(),
                 latency_ms: Some(3.2),
                 metrics: None,
             },
-        );
+        };
         let before = PlainState::from(&app);
         app.apply(update.clone());
         let rendered = format_update(&update, &before, &app).join("\n");
@@ -237,6 +284,7 @@ mod tests {
             health: Health::Ok,
             detail: "1 cached peer(s); no liveness scan".into(),
             sources: vec!["arp -an".into()],
+            failed_sources: Vec::new(),
             peers: vec![Peer {
                 address: "192.168.1.9".into(),
                 mac: Some("aa:bb:cc:dd:ee:ff".into()),
@@ -248,13 +296,17 @@ mod tests {
             oui_source: Some("test registry".into()),
         };
         let before = PlainState::from(&app);
-        let update = MonitorUpdate::Peers(PeerSnapshot {
-            health: Health::Ok,
-            detail: "0 cached peer(s); no liveness scan".into(),
-            sources: vec!["arp -an".into()],
-            oui_source: Some("test registry".into()),
-            peers: Vec::new(),
-        });
+        let update = MonitorUpdate::Peers {
+            generation: 0,
+            snapshot: PeerSnapshot {
+                health: Health::Ok,
+                detail: "0 cached peer(s); no liveness scan".into(),
+                sources: vec!["arp -an".into()],
+                failed_sources: Vec::new(),
+                oui_source: Some("test registry".into()),
+                peers: Vec::new(),
+            },
+        };
         app.apply(update.clone());
         let rendered = format_update(&update, &before, &app).join("\n");
         assert!(rendered.contains("not proof of departure"));
