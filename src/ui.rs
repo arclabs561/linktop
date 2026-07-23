@@ -247,7 +247,7 @@ fn render_probes(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .map(|probe| {
             let latency = probe
                 .latency_ms
-                .map(|value| format!("{:>6.0} ms", value))
+                .map(|value| format!("{value:>6.0} ms"))
                 .unwrap_or_else(|| "       —".into());
             Line::from(vec![
                 Span::styled(
