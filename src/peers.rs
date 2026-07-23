@@ -4,10 +4,95 @@ use std::process::Command;
 use std::str::FromStr;
 use std::time::Duration;
 
-use crate::model::{Health, MacScope, Peer, PeerSnapshot};
+use if_addrs::IfAddr;
+
+use crate::model::{Health, LinkSnapshot, MacScope, Peer, PeerSnapshot};
 use crate::{oui, process};
 
-pub fn collect() -> PeerSnapshot {
+#[derive(Debug, Clone)]
+struct PeerScope {
+    active_interface: Option<String>,
+    gateway: Option<IpAddr>,
+    networks: Vec<LocalNetwork>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LocalNetwork {
+    address: IpAddr,
+    netmask: IpAddr,
+}
+
+impl PeerScope {
+    fn for_link(link: &LinkSnapshot) -> Self {
+        let active_interface = link.interface.clone();
+        let networks = if_addrs::get_if_addrs()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|interface| {
+                active_interface.as_deref().is_none_or(|active| {
+                    interface.name == active || interface.ip().to_string() == active
+                })
+            })
+            .map(|interface| match interface.addr {
+                IfAddr::V4(address) => LocalNetwork {
+                    address: IpAddr::V4(address.ip),
+                    netmask: IpAddr::V4(address.netmask),
+                },
+                IfAddr::V6(address) => LocalNetwork {
+                    address: IpAddr::V6(address.ip),
+                    netmask: IpAddr::V6(address.netmask),
+                },
+            })
+            .collect();
+        Self {
+            active_interface,
+            gateway: link.gateway.as_deref().and_then(parse_ip_token),
+            networks,
+        }
+    }
+
+    fn contains(&self, peer: &Peer) -> bool {
+        let Some(address) = parse_ip_token(&peer.address) else {
+            return false;
+        };
+        if self.gateway == Some(address) {
+            return true;
+        }
+        let interface_matches = match (self.active_interface.as_deref(), peer.interface.as_deref())
+        {
+            (Some(active), Some(observed)) => active == observed,
+            (Some(_), None) => true,
+            (None, _) => true,
+        };
+        interface_matches
+            && (self.networks.is_empty()
+                || self
+                    .networks
+                    .iter()
+                    .any(|network| network.contains(address)))
+    }
+
+    fn is_bounded(&self) -> bool {
+        self.active_interface.is_some() && !self.networks.is_empty()
+    }
+}
+
+impl LocalNetwork {
+    fn contains(self, candidate: IpAddr) -> bool {
+        match (self.address, self.netmask, candidate) {
+            (IpAddr::V4(address), IpAddr::V4(mask), IpAddr::V4(candidate)) => {
+                u32::from(address) & u32::from(mask) == u32::from(candidate) & u32::from(mask)
+            }
+            (IpAddr::V6(address), IpAddr::V6(mask), IpAddr::V6(candidate)) => {
+                u128::from(address) & u128::from(mask) == u128::from(candidate) & u128::from(mask)
+            }
+            _ => false,
+        }
+    }
+}
+
+pub fn collect(link: &LinkSnapshot) -> PeerSnapshot {
+    let scope = PeerScope::for_link(link);
     let commands: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
         &[("arp", &["-an"]), ("ndp", &["-an"])]
     } else if cfg!(target_os = "windows") {
@@ -21,6 +106,7 @@ pub fn collect() -> PeerSnapshot {
         .map(|address| address.ip())
         .collect();
     let mut sources = Vec::new();
+    let mut failed_sources = Vec::new();
     let mut peers = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -28,20 +114,17 @@ pub fn collect() -> PeerSnapshot {
         let mut command = Command::new(program);
         command.args(*arguments);
         let Ok(Some(output)) = process::run_bounded(&mut command, Duration::from_secs(2)) else {
+            failed_sources.push(source_label(program, arguments));
             continue;
         };
         if !output.status.success() {
+            failed_sources.push(source_label(program, arguments));
             continue;
         }
-        sources.push(
-            std::iter::once(*program)
-                .chain(arguments.iter().copied())
-                .collect::<Vec<_>>()
-                .join(" "),
-        );
+        sources.push(source_label(program, arguments));
         let parsed =
             parse_neighbor_output(&String::from_utf8_lossy(&output.stdout), &local_addresses);
-        for peer in parsed {
+        for peer in parsed.into_iter().filter(|peer| scope.contains(peer)) {
             let key = (
                 peer.address.clone(),
                 peer.mac.clone(),
@@ -70,11 +153,16 @@ pub fn collect() -> PeerSnapshot {
     }
     let oui_source = oui_registry.map(|registry| registry.source().to_string());
 
-    if sources.is_empty() {
+    let health = evidence_health(commands.len(), sources.len());
+    if health == Health::Unavailable {
         PeerSnapshot {
-            health: Health::Unavailable,
-            detail: "no neighbor-cache command available".into(),
+            health,
+            detail: format!(
+                "no neighbor-cache source completed: {}",
+                failed_sources.join(" + ")
+            ),
             sources,
+            failed_sources,
             oui_source,
             peers,
         }
@@ -87,13 +175,45 @@ pub fn collect() -> PeerSnapshot {
                 peer.address.clone(),
             )
         });
+        let scope_note = if scope.is_bounded() {
+            "; active-path filtered"
+        } else {
+            "; path filter unavailable"
+        };
+        let failure_note = if failed_sources.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; incomplete evidence: {} failed",
+                failed_sources.join(" + ")
+            )
+        };
         PeerSnapshot {
-            health: Health::Ok,
-            detail: format!("{} cached peer(s); no liveness scan", peers.len()),
+            health,
+            detail: format!(
+                "{} cached peer(s); no liveness scan{scope_note}{failure_note}",
+                peers.len()
+            ),
             sources,
+            failed_sources,
             oui_source,
             peers,
         }
+    }
+}
+
+fn source_label(program: &str, arguments: &[&str]) -> String {
+    std::iter::once(program)
+        .chain(arguments.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn evidence_health(attempted: usize, completed: usize) -> Health {
+    match completed {
+        0 => Health::Unavailable,
+        completed if completed < attempted => Health::Degraded,
+        _ => Health::Ok,
     }
 }
 
@@ -275,5 +395,37 @@ mod tests {
         assert_eq!(peers[0].mac.as_deref(), Some("00:11:22:33:04:05"));
         assert_eq!(peers[1].interface.as_deref(), Some("utun4"));
         assert_eq!(peers[1].state.as_deref(), Some("INCOMPLETE"));
+    }
+
+    #[test]
+    fn old_same_interface_cache_entries_are_excluded_after_a_subnet_change() {
+        let scope = PeerScope {
+            active_interface: Some("en0".into()),
+            gateway: Some(IpAddr::from_str("172.20.10.1").unwrap()),
+            networks: vec![LocalNetwork {
+                address: IpAddr::from_str("172.20.10.14").unwrap(),
+                netmask: IpAddr::from_str("255.255.255.240").unwrap(),
+            }],
+        };
+        let peers = parse_neighbor_output(
+            "192.168.1.1 dev en0 lladdr aa:bb:cc:dd:ee:01 STALE\n\
+             172.20.10.1 dev en0 lladdr aa:bb:cc:dd:ee:02 REACHABLE\n\
+             172.20.10.3 dev en0 lladdr aa:bb:cc:dd:ee:03 STALE\n\
+             172.20.10.4 dev en1 lladdr aa:bb:cc:dd:ee:04 STALE\n",
+            &BTreeSet::new(),
+        );
+        let visible: Vec<_> = peers
+            .into_iter()
+            .filter(|peer| scope.contains(peer))
+            .map(|peer| peer.address)
+            .collect();
+        assert_eq!(visible, ["172.20.10.1", "172.20.10.3"]);
+    }
+
+    #[test]
+    fn incomplete_native_evidence_is_degraded() {
+        assert_eq!(evidence_health(2, 2), Health::Ok);
+        assert_eq!(evidence_health(2, 1), Health::Degraded);
+        assert_eq!(evidence_health(2, 0), Health::Unavailable);
     }
 }
