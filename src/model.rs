@@ -208,6 +208,8 @@ pub struct HistoryContext {
     pub kind: HistoryContextKind,
     pub summary: String,
     pub compact_summary: String,
+    pub context_anchor: String,
+    pub place_authority: String,
     pub evidence: String,
 }
 

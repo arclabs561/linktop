@@ -6,7 +6,10 @@ use netmon_evidence::{
     CollectionPolicyV0, CoverageStateV0, CoverageV0, HOST_PATH_SCHEMA_V0, HostPathObservationV0,
     HostPathV0, NetworkNameV0, NetworkNameVisibilityV0, ObservationOrderV0, SourceRefV0,
 };
-use netmon_replay::{ContextRelationV0, append_jsonl, compare_contexts, read_jsonl};
+use netmon_replay::{
+    ContextRecurrenceV0, ContextRelationV0, append_jsonl, compare_contexts, read_jsonl,
+    summarize_context_recurrence,
+};
 
 use crate::model::{
     App, EvidenceCoverage, HistoryContext, HistoryContextKind, LinkSnapshot, MonitorUpdate,
@@ -32,6 +35,8 @@ impl HistorySession {
                     kind: HistoryContextKind::Configured,
                     summary: "history configured; no prior evidence log".into(),
                     compact_summary: "configured · no prior evidence".into(),
+                    context_anchor: "pending current context".into(),
+                    place_authority: "unknown · assertion source not configured".into(),
                     evidence: "private JSONL · retention explicitly enabled".into(),
                 },
             };
@@ -46,9 +51,15 @@ impl HistorySession {
                     writable: true,
                     initial: HistoryContext {
                         kind: HistoryContextKind::Loaded,
-                        summary: format!("history loaded: {count} compatible record(s)"),
-                        compact_summary: format!("loaded · {count} prior record(s)"),
-                        evidence: "netmon host-path v0 · private JSONL".into(),
+                        summary: format!(
+                            "history loaded: {count} record(s); current context assessment pending"
+                        ),
+                        compact_summary: format!("loaded · {count} prior · assessment pending"),
+                        context_anchor: "pending current context".into(),
+                        place_authority: "unknown · assertion source not configured".into(),
+                        evidence:
+                            "netmon host-path v0 · private JSONL · waiting for current context"
+                                .into(),
                     },
                 }
             }
@@ -61,6 +72,8 @@ impl HistorySession {
                     kind: HistoryContextKind::Unavailable,
                     summary: format!("history unavailable: {error}"),
                     compact_summary: "unavailable · live diagnosis unaffected".into(),
+                    context_anchor: "unavailable".into(),
+                    place_authority: "unknown · history unavailable".into(),
                     evidence: "current live diagnosis is unaffected; log left unchanged".into(),
                 },
             },
@@ -92,6 +105,8 @@ impl HistorySession {
                 kind: HistoryContextKind::AppendFailed,
                 summary: format!("history append failed: {error}"),
                 compact_summary: "append failed · live diagnosis unaffected".into(),
+                context_anchor: "current context observed; append failed".into(),
+                place_authority: "unknown · assertion source not configured".into(),
                 evidence: "current live diagnosis is unaffected; log left unchanged".into(),
             };
             app.history_context = Some(status.clone());
@@ -283,89 +298,138 @@ fn summarize(
         .collect();
     let previous = same_observer.last().copied();
     let comparison = compare_contexts(previous, current);
-    let matching = same_observer
-        .iter()
-        .filter(|record| record.context_key() == current.context_key())
-        .count();
-    let compatible = same_observer
-        .iter()
-        .filter(|record| netmon_replay::contexts_are_compatible(record, current))
-        .count();
-    let age = previous
-        .map(|record| {
-            human_age(
-                current
-                    .order
-                    .event_time_unix_ms
-                    .saturating_sub(record.order.event_time_unix_ms),
-            )
-        })
-        .unwrap_or_default();
+    let recurrence = summarize_context_recurrence(prior_records, current);
+    let matching = recurrence.exact_prior_observations;
+    let compatible = recurrence.compatible_prior_observations;
+    let previous_age = age_since(
+        current,
+        previous.map(|record| record.order.event_time_unix_ms),
+    );
+    let exact_age = age_since(current, recurrence.last_exact_observation_unix_ms);
     let dimensions = comparison.changed_dimensions.join(", ");
-    let (place, compact_place) = match (
-        current.path.associated_bssid.as_ref(),
+    let (attachment, compact_attachment) = attachment_evidence(current, &recurrence);
+    let context_anchor = match (
         current.path.next_hop_link_address.as_ref(),
         current.path.network_name.visibility,
     ) {
-        (Some(_), _, _) => (
-            "place candidate evidence: associated BSSID observed; no place asserted",
-            "place candidate: BSSID",
-        ),
-        (None, Some(_), _) => (
-            "place candidate evidence: gateway link binding observed; no place asserted",
-            "place candidate: gateway",
-        ),
-        (None, None, NetworkNameVisibilityV0::Restricted) => (
-            "place candidate limited: SSID/BSSID restricted by the platform",
-            "place evidence restricted",
-        ),
-        (None, None, _) => (
-            "place candidate limited: no BSSID or gateway link binding",
-            "place evidence absent",
-        ),
+        (Some(_), _) => "gateway link binding observed",
+        (None, NetworkNameVisibilityV0::Observed) => {
+            "limited: network name observed; gateway link binding absent"
+        }
+        (None, NetworkNameVisibilityV0::Restricted) => {
+            "limited: network name restricted; gateway link binding absent"
+        }
+        (None, NetworkNameVisibilityV0::Unavailable) => {
+            "limited: network name and gateway link binding unavailable"
+        }
     };
+    let place_authority = "unknown · assertion source not configured";
     let (kind, summary, compact_summary) = match (comparison.relation, matching) {
         (ContextRelationV0::FirstObservation, _) => (
             HistoryContextKind::FirstObservation,
-            "first observation for this host in the evidence log".into(),
-            format!("first observation · {compact_place}"),
+            format!("first observation for this host · {attachment} · place unknown"),
+            format!("first observation · {compact_attachment} · place unknown"),
         ),
         (ContextRelationV0::SameContext, _) => (
             HistoryContextKind::Recurring,
             format!(
-                "recurring network context · {matching} prior observation(s) · last {age}{}",
+                "recurring network context · {matching} exact prior · last {exact_age} · {attachment} · place unknown{}",
                 changed_suffix(&dimensions)
             ),
-            format!("recurring · {matching} prior · {age} · {compact_place}"),
+            format!(
+                "recurring · {matching} prior · {} · {compact_attachment} · place unknown",
+                compact_age(&exact_age)
+            ),
         ),
-        (ContextRelationV0::CompatibleContext, _) => (
+        (ContextRelationV0::CompatibleContext, 0) => (
             HistoryContextKind::Compatible,
             format!(
-                "compatible prior context · {compatible} candidate(s) · incomplete evidence prevents same/change claim · changed {dimensions} · prior {age}"
+                "compatible/incomplete prior context · {compatible} candidate(s) · changed {dimensions} · prior {previous_age} · {attachment} · place unknown"
             ),
-            format!("compatible/incomplete · {compatible} candidate(s) · changed {dimensions}"),
+            format!(
+                "compatible/incomplete · {compatible} candidate(s) · {compact_attachment} · place unknown"
+            ),
+        ),
+        (ContextRelationV0::CompatibleContext, _) => (
+            HistoryContextKind::Recurring,
+            format!(
+                "recurring network context · {matching} exact prior · latest comparison incomplete · last exact {exact_age} · {attachment} · place unknown"
+            ),
+            format!(
+                "recurring · {matching} prior · latest incomplete · {compact_attachment} · place unknown"
+            ),
         ),
         (ContextRelationV0::ContextChanged, 0) => (
             HistoryContextKind::Changed,
             format!(
-                "new network context relative to the prior record · changed {dimensions} · prior {age}"
+                "new network context · changed {dimensions} · prior {previous_age} · {attachment} · place unknown"
             ),
-            format!("new context · changed {dimensions} · {compact_place}"),
+            format!("new context · changed {dimensions} · {compact_attachment} · place unknown"),
         ),
         (ContextRelationV0::ContextChanged, _) => (
             HistoryContextKind::Returned,
             format!(
-                "returned to a known network context · {matching} prior observation(s) · changed {dimensions} · prior {age}"
+                "returned to a known network context · {matching} exact prior · last exact {exact_age} · changed {dimensions} · {attachment} · place unknown"
             ),
-            format!("returned · {matching} prior · changed {dimensions}"),
+            format!(
+                "returned · {matching} prior · {} · changed {dimensions} · place unknown",
+                compact_age(&exact_age)
+            ),
         ),
     };
     HistoryContext {
         kind,
         summary,
         compact_summary,
-        evidence: format!("netmon host-path v0 · {place}"),
+        context_anchor: context_anchor.into(),
+        place_authority: place_authority.into(),
+        evidence: format!(
+            "netmon host-path v0 · context anchor: {context_anchor} · place {place_authority}"
+        ),
     }
+}
+
+fn attachment_evidence(
+    current: &HostPathObservationV0,
+    recurrence: &ContextRecurrenceV0,
+) -> (String, String) {
+    match (
+        current.path.associated_bssid.as_ref(),
+        recurrence.current_bssid_seen_before,
+        recurrence.distinct_prior_associated_bssids,
+        current.path.network_name.visibility,
+    ) {
+        (Some(_), Some(true), variants, _) => (
+            format!("known BSSID attachment · {variants} prior BSSID variant(s)"),
+            format!("known BSSID · {variants} variant(s)"),
+        ),
+        (Some(_), Some(false), variants, _) => (
+            format!("new BSSID attachment · {variants} prior BSSID variant(s)"),
+            format!("new BSSID · {variants} prior variant(s)"),
+        ),
+        (Some(_), None, _, _) => (
+            "first BSSID attachment evidence".into(),
+            "first BSSID evidence".into(),
+        ),
+        (None, _, _, NetworkNameVisibilityV0::Restricted) => (
+            "BSSID unavailable (macOS restricted)".into(),
+            "BSSID hidden".into(),
+        ),
+        (None, _, _, _) => (
+            "attachment identity unavailable".into(),
+            "attachment unknown".into(),
+        ),
+    }
+}
+
+fn age_since(current: &HostPathObservationV0, prior_unix_ms: Option<i64>) -> String {
+    prior_unix_ms
+        .map(|prior| human_age(current.order.event_time_unix_ms.saturating_sub(prior)))
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn compact_age(age: &str) -> &str {
+    age.strip_suffix(" ago").unwrap_or(age)
 }
 
 fn changed_suffix(dimensions: &str) -> String {
@@ -510,6 +574,18 @@ mod tests {
         app
     }
 
+    fn with_order(
+        mut record: HostPathObservationV0,
+        record_id: &str,
+        event_time_unix_ms: i64,
+    ) -> HostPathObservationV0 {
+        record.record_id = record_id.into();
+        record.order.event_time_unix_ms = event_time_unix_ms;
+        record.order.acquired_time_unix_ms = event_time_unix_ms;
+        record.order.source_sequence = event_time_unix_ms.max(0) as u64;
+        record
+    }
+
     #[test]
     fn maps_host_address_to_network_prefix() {
         assert_eq!(
@@ -520,25 +596,89 @@ mod tests {
 
     #[test]
     fn bssid_change_is_recurrence_evidence_not_a_new_context() {
-        let first = observation_from_app(&app("network-a", "192.0.2.1", "02:00:00:00:00:01"));
-        let second = observation_from_app(&app("network-a", "192.0.2.1", "02:00:00:00:00:02"));
+        let first = with_order(
+            observation_from_app(&app("network-a", "192.0.2.1", "02:00:00:00:00:01")),
+            "first",
+            1_000,
+        );
+        let second = with_order(
+            observation_from_app(&app("network-a", "192.0.2.1", "02:00:00:00:00:02")),
+            "second",
+            2_000,
+        );
         let summary = summarize(&[first], &second);
 
         assert_eq!(summary.kind, HistoryContextKind::Recurring);
         assert!(summary.summary.contains("recurring network context"));
-        assert!(summary.summary.contains("associated_bssid"));
-        assert!(summary.evidence.contains("no place asserted"));
+        assert!(summary.summary.contains("new BSSID attachment"));
+        assert!(summary.compact_summary.contains("new BSSID"));
+        assert!(summary.evidence.contains("place unknown"));
     }
 
     #[test]
     fn same_ssid_with_a_different_boundary_is_a_new_context() {
-        let first = observation_from_app(&app("common-name", "192.0.2.1", "02:00:00:00:00:01"));
-        let second = observation_from_app(&app("common-name", "198.51.100.1", "02:00:00:00:00:02"));
+        let first = with_order(
+            observation_from_app(&app("common-name", "192.0.2.1", "02:00:00:00:00:01")),
+            "first",
+            1_000,
+        );
+        let second = with_order(
+            observation_from_app(&app("common-name", "198.51.100.1", "02:00:00:00:00:02")),
+            "second",
+            2_000,
+        );
         let summary = summarize(&[first], &second);
 
         assert_eq!(summary.kind, HistoryContextKind::Changed);
         assert!(summary.summary.contains("new network context"));
         assert!(summary.summary.contains("next_hop"));
+    }
+
+    #[test]
+    fn known_bssid_is_attachment_evidence_not_place_identity() {
+        let first = with_order(
+            observation_from_app(&app("network-a", "192.0.2.1", "02:00:00:00:00:01")),
+            "first",
+            1_000,
+        );
+        let second = with_order(
+            observation_from_app(&app("network-a", "192.0.2.1", "02:00:00:00:00:01")),
+            "second",
+            2_000,
+        );
+
+        let summary = summarize(&[first], &second);
+
+        assert!(summary.summary.contains("known BSSID attachment"));
+        assert!(summary.compact_summary.contains("known BSSID"));
+        assert!(summary.evidence.contains("context anchor"));
+        assert!(summary.evidence.contains("assertion source not configured"));
+        assert_eq!(
+            summary.place_authority,
+            "unknown · assertion source not configured"
+        );
+    }
+
+    #[test]
+    fn loaded_history_discloses_that_current_assessment_is_pending() {
+        let path = std::env::temp_dir().join(format!(
+            "linktop-loaded-history-{}-{}.jsonl",
+            std::process::id(),
+            unix_millis()
+        ));
+        let record = with_order(
+            observation_from_app(&app("network-a", "192.0.2.1", "02:00:00:00:00:01")),
+            "first",
+            1_000,
+        );
+        append_jsonl(&path, &record).expect("append history fixture");
+
+        let session = HistorySession::open(path.clone());
+
+        assert_eq!(session.initial.kind, HistoryContextKind::Loaded);
+        assert!(session.initial.summary.contains("assessment pending"));
+        assert!(!session.initial.summary.contains("compatible record"));
+        std::fs::remove_file(path).expect("remove fixture");
     }
 
     #[test]
