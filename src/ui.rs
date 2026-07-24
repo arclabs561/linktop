@@ -293,6 +293,7 @@ pub(crate) struct OverviewDiagnosis {
     pub health: Health,
     pub summary: String,
     pub context: String,
+    pub context_is_salient: bool,
     pub coverage: String,
     pub action: &'static str,
 }
@@ -457,7 +458,7 @@ pub(crate) fn overview_diagnosis(app: &App) -> OverviewDiagnosis {
     };
     if let Some(history) = &app.history_context {
         coverage.push_str(" · history cited");
-        if history.summary.contains("unavailable") || history.summary.contains("failed") {
+        if history.kind.is_limited() {
             coverage.push_str("/limited");
         }
     }
@@ -497,10 +498,12 @@ pub(crate) fn overview_diagnosis(app: &App) -> OverviewDiagnosis {
             "next: no action; [2] link and [3] neighbor cache show supporting evidence"
         }
     };
+    let (context, context_is_salient) = salient_context(app);
     OverviewDiagnosis {
         health,
         summary,
-        context: salient_context(app),
+        context,
+        context_is_salient,
         coverage,
         action,
     }
@@ -514,9 +517,12 @@ pub(crate) fn overview_status_label(app: &App) -> &'static str {
     }
 }
 
-fn salient_context(app: &App) -> String {
+fn salient_context(app: &App) -> (String, bool) {
     if app.path_transition_pending {
-        return "change   default route settling; last confirmed path retained".into();
+        return (
+            "change   default route settling; last confirmed path retained".into(),
+            true,
+        );
     }
     let path_change = app.last_path_change.as_ref().map(|change| {
         (
@@ -544,17 +550,26 @@ fn salient_context(app: &App) -> String {
         .flatten()
         .max_by_key(|(elapsed, _)| *elapsed)
     {
-        return format!("change   +{} {message}", format_duration(elapsed));
+        return (
+            format!("change   +{} {message}", format_duration(elapsed)),
+            true,
+        );
     }
     if app.path_generation == 0 {
-        "context  waiting for the first confirmed default route".into()
+        (
+            "context  waiting for the first confirmed default route".into(),
+            false,
+        )
     } else if let Some(history) = &app.history_context {
-        format!("history  {}", history.summary)
+        (format!("history  {}", history.summary), true)
     } else {
-        format!(
-            "context  generation {} observed for {}; no transition seen this session",
-            app.path_generation,
-            format_duration(app.uptime().saturating_sub(app.path_observed_since))
+        (
+            format!(
+                "context  generation {} observed for {}; no transition seen this session",
+                app.path_generation,
+                format_duration(app.uptime().saturating_sub(app.path_observed_since))
+            ),
+            false,
         )
     }
 }
@@ -2068,9 +2083,7 @@ fn render_overview_compact(frame: &mut Frame<'_>, area: Rect, app: &App, can_nav
         ]),
         compact_local_path_line(app, area.width, &ssid),
     ];
-    let context_is_salient =
-        diagnosis.context.starts_with("change") || diagnosis.context.starts_with("history");
-    if context_is_salient {
+    if diagnosis.context_is_salient {
         lines.push(Line::from(Span::styled(
             fit(
                 &diagnosis.context,
@@ -2086,7 +2099,7 @@ fn render_overview_compact(frame: &mut Frame<'_>, area: Rect, app: &App, can_nav
     } else {
         lines.push(compact_workload_line(app, area.width));
     }
-    if context_is_salient {
+    if diagnosis.context_is_salient {
         lines.extend(compact_coverage_lines(&diagnosis.coverage, area.width));
     }
     lines.push(Line::from(vec![
@@ -2941,6 +2954,7 @@ mod tests {
             },
         });
         app.history_context = Some(HistoryContext {
+            kind: crate::model::HistoryContextKind::Recurring,
             summary: "recurring network context · 3 prior observations".into(),
             evidence: "netmon host-path v0 · gateway link binding observed; no place asserted"
                 .into(),
@@ -2955,6 +2969,21 @@ mod tests {
             assert!(rendered.contains("recurring network context"));
             assert!(!rendered.contains("location:"));
         }
+        assert!(overview_diagnosis(&app).context_is_salient);
+    }
+
+    #[test]
+    fn overview_marks_history_limitations_from_typed_state_not_prose() {
+        let mut app = App::new();
+        app.history_context = Some(HistoryContext {
+            kind: crate::model::HistoryContextKind::Unavailable,
+            summary: "archive could not be read".into(),
+            evidence: "current diagnosis unaffected".into(),
+        });
+
+        let diagnosis = overview_diagnosis(&app);
+
+        assert!(diagnosis.coverage.contains("history cited/limited"));
     }
 
     #[test]

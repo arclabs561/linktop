@@ -8,7 +8,9 @@ use netmon_evidence::{
 };
 use netmon_replay::{ContextRelationV0, append_jsonl, compare_contexts, read_jsonl};
 
-use crate::model::{App, EvidenceCoverage, HistoryContext, LinkSnapshot, MonitorUpdate};
+use crate::model::{
+    App, EvidenceCoverage, HistoryContext, HistoryContextKind, LinkSnapshot, MonitorUpdate,
+};
 
 pub struct HistorySession {
     path: PathBuf,
@@ -27,6 +29,7 @@ impl HistorySession {
                 recorded_generation: None,
                 writable: true,
                 initial: HistoryContext {
+                    kind: HistoryContextKind::Configured,
                     summary: "history configured; no prior evidence log".into(),
                     evidence: "private JSONL · retention explicitly enabled".into(),
                 },
@@ -41,6 +44,7 @@ impl HistorySession {
                     recorded_generation: None,
                     writable: true,
                     initial: HistoryContext {
+                        kind: HistoryContextKind::Loaded,
                         summary: format!("history loaded: {count} compatible record(s)"),
                         evidence: "netmon host-path v0 · private JSONL".into(),
                     },
@@ -52,6 +56,7 @@ impl HistorySession {
                 recorded_generation: None,
                 writable: false,
                 initial: HistoryContext {
+                    kind: HistoryContextKind::Unavailable,
                     summary: format!("history unavailable: {error}"),
                     evidence: "current live diagnosis is unaffected; log left unchanged".into(),
                 },
@@ -81,6 +86,7 @@ impl HistorySession {
         {
             self.writable = false;
             let status = HistoryContext {
+                kind: HistoryContextKind::AppendFailed,
                 summary: format!("history append failed: {error}"),
                 evidence: "current live diagnosis is unaffected; log left unchanged".into(),
             };
@@ -292,22 +298,35 @@ fn summarize(
         })
         .unwrap_or_default();
     let dimensions = comparison.changed_dimensions.join(", ");
-    let summary = match (comparison.relation, matching) {
-        (ContextRelationV0::FirstObservation, _) => {
-            "first observation for this host in the evidence log".into()
-        }
-        (ContextRelationV0::SameContext, _) => format!(
-            "recurring network context · {matching} prior observation(s) · last {age}{}",
-            changed_suffix(&dimensions)
+    let (kind, summary) = match (comparison.relation, matching) {
+        (ContextRelationV0::FirstObservation, _) => (
+            HistoryContextKind::FirstObservation,
+            "first observation for this host in the evidence log".into(),
         ),
-        (ContextRelationV0::CompatibleContext, _) => format!(
-            "compatible prior context · {compatible} candidate(s) · incomplete evidence prevents same/change claim · changed {dimensions} · prior {age}"
+        (ContextRelationV0::SameContext, _) => (
+            HistoryContextKind::Recurring,
+            format!(
+                "recurring network context · {matching} prior observation(s) · last {age}{}",
+                changed_suffix(&dimensions)
+            ),
         ),
-        (ContextRelationV0::ContextChanged, 0) => format!(
-            "new network context relative to the prior record · changed {dimensions} · prior {age}"
+        (ContextRelationV0::CompatibleContext, _) => (
+            HistoryContextKind::Compatible,
+            format!(
+                "compatible prior context · {compatible} candidate(s) · incomplete evidence prevents same/change claim · changed {dimensions} · prior {age}"
+            ),
         ),
-        (ContextRelationV0::ContextChanged, _) => format!(
-            "returned to a known network context · {matching} prior observation(s) · changed {dimensions} · prior {age}"
+        (ContextRelationV0::ContextChanged, 0) => (
+            HistoryContextKind::Changed,
+            format!(
+                "new network context relative to the prior record · changed {dimensions} · prior {age}"
+            ),
+        ),
+        (ContextRelationV0::ContextChanged, _) => (
+            HistoryContextKind::Returned,
+            format!(
+                "returned to a known network context · {matching} prior observation(s) · changed {dimensions} · prior {age}"
+            ),
         ),
     };
     let place = match (
@@ -325,6 +344,7 @@ fn summarize(
         (None, None, _) => "place candidate limited: no BSSID or gateway link binding",
     };
     HistoryContext {
+        kind,
         summary,
         evidence: format!("netmon host-path v0 · {place}"),
     }
@@ -486,6 +506,7 @@ mod tests {
         let second = observation_from_app(&app("network-a", "192.0.2.1", "02:00:00:00:00:02"));
         let summary = summarize(&[first], &second);
 
+        assert_eq!(summary.kind, HistoryContextKind::Recurring);
         assert!(summary.summary.contains("recurring network context"));
         assert!(summary.summary.contains("associated_bssid"));
         assert!(summary.evidence.contains("no place asserted"));
@@ -497,6 +518,7 @@ mod tests {
         let second = observation_from_app(&app("common-name", "198.51.100.1", "02:00:00:00:00:02"));
         let summary = summarize(&[first], &second);
 
+        assert_eq!(summary.kind, HistoryContextKind::Changed);
         assert!(summary.summary.contains("new network context"));
         assert!(summary.summary.contains("next_hop"));
     }
@@ -514,6 +536,7 @@ mod tests {
         let session = HistorySession::open(path.clone());
 
         assert!(!session.writable);
+        assert_eq!(session.initial.kind, HistoryContextKind::Unavailable);
         assert!(session.initial.summary.contains("history unavailable"));
         assert_eq!(std::fs::read(&path).expect("read fixture"), original);
         std::fs::remove_file(path).expect("remove fixture");

@@ -205,8 +205,28 @@ pub struct PathChange {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryContext {
+    pub kind: HistoryContextKind,
     pub summary: String,
     pub evidence: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryContextKind {
+    Configured,
+    Loaded,
+    FirstObservation,
+    Recurring,
+    Compatible,
+    Changed,
+    Returned,
+    Unavailable,
+    AppendFailed,
+}
+
+impl HistoryContextKind {
+    pub fn is_limited(self) -> bool {
+        matches!(self, Self::Unavailable | Self::AppendFailed)
+    }
 }
 
 impl LinkSnapshot {
