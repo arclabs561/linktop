@@ -758,6 +758,11 @@ fn slow_probe_summary(app: &App, kind: ProbeKind) -> String {
 
 fn render_diagnosis(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let diagnosis = overview_diagnosis(app);
+    let context = if area.width < 120 {
+        &diagnosis.compact_context
+    } else {
+        &diagnosis.context
+    };
     let lines = vec![
         Line::from(vec![
             Span::styled(
@@ -769,7 +774,10 @@ fn render_diagnosis(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Span::styled(diagnosis.summary, Style::default().fg(INK)),
         ]),
         Line::from(Span::styled(
-            format!(" {}", diagnosis.context),
+            format!(
+                " {}",
+                fit(context, usize::from(area.width.saturating_sub(3)))
+            ),
             Style::default().fg(INK),
         )),
         Line::from(Span::styled(
@@ -1146,69 +1154,100 @@ fn render_scope(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         format!("partial; missing {}", app.peers.failed_sources.join("+"))
     };
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(" local  ", Style::default().fg(MUTED)),
-            Span::styled(
-                format!(
-                    "{default_addresses} default / {} total address(es)",
-                    app.link.addresses.len()
+    let content_rows = usize::from(area.height.saturating_sub(2));
+    let value_width = usize::from(area.width.saturating_sub(10));
+    let history_lines = app.history_context.as_ref().map(|history| {
+        vec![
+            Line::from(vec![
+                Span::styled(" history", Style::default().fg(MUTED)),
+                Span::styled(
+                    format!(" {}", fit(&history.compact_summary, value_width)),
+                    Style::default().fg(INK),
                 ),
-                Style::default().fg(INK),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(" cache  ", Style::default().fg(MUTED)),
-            Span::styled(
-                format!(
-                    "{} via {source} / {completeness}",
-                    peer_session_summary(app)
+            ]),
+            Line::from(vec![
+                Span::styled(" place  ", Style::default().fg(MUTED)),
+                Span::styled(
+                    fit(&history.place_authority, value_width),
+                    Style::default().fg(INK),
                 ),
-                Style::default().fg(INK),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(" probes ", Style::default().fg(MUTED)),
-            Span::styled(
-                if app.probe_policy().is_active() {
-                    "active · next-hop periodic · DNS/HTTPS 60s · egress on demand"
-                } else {
-                    "off · next-hop/DNS/HTTPS/public egress untested"
-                },
-                Style::default().fg(INK),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(" sources", Style::default().fg(MUTED)),
-            Span::styled(
-                " route/DHCP · 802.11 · counters/nettop · ARP/NDP",
-                Style::default().fg(INK),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(" fence  ", Style::default().fg(MUTED)),
-            Span::styled(
-                format!(
-                    "generation {}; stale workers rejected; route gaps held 3s",
-                    app.path_generation
+            ]),
+            Line::from(vec![
+                Span::styled(" anchor ", Style::default().fg(MUTED)),
+                Span::styled(
+                    fit(&history.context_anchor, value_width),
+                    Style::default().fg(INK),
                 ),
-                Style::default().fg(INK),
-            ),
-        ]),
-    ];
-    if let Some(history) = &app.history_context {
-        lines.push(Line::from(vec![
-            Span::styled(" history", Style::default().fg(MUTED)),
-            Span::styled(
-                format!(" {} · {}", history.summary, history.evidence),
-                Style::default().fg(INK),
-            ),
-        ]));
+            ]),
+        ]
+    });
+    let mut lines = Vec::new();
+    if history_lines.is_some() && content_rows < 6 {
+        lines.extend(history_lines.into_iter().flatten());
+    } else {
+        lines.extend([
+            Line::from(vec![
+                Span::styled(" local  ", Style::default().fg(MUTED)),
+                Span::styled(
+                    format!(
+                        "{default_addresses} default / {} total address(es)",
+                        app.link.addresses.len()
+                    ),
+                    Style::default().fg(INK),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" cache  ", Style::default().fg(MUTED)),
+                Span::styled(
+                    format!(
+                        "{} via {source} / {completeness}",
+                        peer_session_summary(app)
+                    ),
+                    Style::default().fg(INK),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" probes ", Style::default().fg(MUTED)),
+                Span::styled(
+                    if app.probe_policy().is_active() {
+                        "active · next-hop periodic · DNS/HTTPS 60s · egress on demand"
+                    } else {
+                        "off · next-hop/DNS/HTTPS/public egress untested"
+                    },
+                    Style::default().fg(INK),
+                ),
+            ]),
+        ]);
+        if content_rows >= 9 {
+            lines.extend([
+                Line::from(vec![
+                    Span::styled(" sources", Style::default().fg(MUTED)),
+                    Span::styled(
+                        " route/DHCP · 802.11 · counters/nettop · ARP/NDP",
+                        Style::default().fg(INK),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled(" fence  ", Style::default().fg(MUTED)),
+                    Span::styled(
+                        format!(
+                            "generation {}; stale workers rejected; route gaps held 3s",
+                            app.path_generation
+                        ),
+                        Style::default().fg(INK),
+                    ),
+                ]),
+            ]);
+        }
+        lines.extend(history_lines.into_iter().flatten());
+        if lines.len() < content_rows {
+            lines.push(Line::from(Span::styled(
+                " [2] full link evidence   [3] neighbor details",
+                Style::default().fg(ACCENT),
+            )));
+        }
     }
-    lines.push(Line::from(Span::styled(
-        " [2] full link evidence   [3] neighbor details",
-        Style::default().fg(ACCENT),
-    )));
+    lines.truncate(content_rows);
     frame.render_widget(
         Paragraph::new(lines)
             .block(instrument_block(" EVIDENCE / ACTIVITY BOUNDARY "))
@@ -2964,11 +3003,12 @@ mod tests {
         app.history_context = Some(HistoryContext {
             kind: crate::model::HistoryContextKind::Recurring,
             summary: "recurring network context · 3 prior observations".into(),
-            compact_summary: "recurring · 3 prior · place candidate: gateway".into(),
-            evidence: "netmon host-path v0 · gateway link binding observed; no place asserted"
-                .into(),
+            compact_summary: "recurring · 3 prior · 2m · BSSID hidden · place unknown".into(),
+            context_anchor: "gateway link binding observed".into(),
+            place_authority: "unknown · assertion source not configured".into(),
+            evidence: "netmon host-path v0 · context anchor: gateway link binding observed · place unknown; assertion source not configured".into(),
         });
-        for (width, height) in [(100, 24), (70, 14)] {
+        for (width, height) in [(160, 30), (100, 24), (70, 14)] {
             let backend = TestBackend::new(width, height);
             let mut terminal = Terminal::new(backend).unwrap();
             terminal
@@ -2976,10 +3016,12 @@ mod tests {
                 .unwrap();
             let rendered = buffer_text(terminal.backend());
             assert!(rendered.contains("recurring"));
-            if width == 70 {
-                assert!(rendered.contains("place candidate: gateway"));
-            } else {
+            if width >= 120 {
                 assert!(rendered.contains("recurring network context"));
+                assert!(rendered.contains("gateway link binding observed"));
+                assert!(rendered.contains("assertion source not configured"));
+            } else {
+                assert!(rendered.contains("place unknown"));
             }
             assert!(!rendered.contains("location:"));
         }
@@ -2993,6 +3035,8 @@ mod tests {
             kind: crate::model::HistoryContextKind::Unavailable,
             summary: "archive could not be read".into(),
             compact_summary: "unavailable · live diagnosis unaffected".into(),
+            context_anchor: "unavailable".into(),
+            place_authority: "unknown · history unavailable".into(),
             evidence: "current diagnosis unaffected".into(),
         });
 

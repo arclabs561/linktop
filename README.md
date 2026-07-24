@@ -134,7 +134,10 @@ Linktop does not retain observations by default. `--history PATH` is an
 explicit private-retention choice for the live overview. It reads a Netmon
 `HostPathObservationV0` JSONL log, compares the completed current context with
 prior records from this host, cites exact recurrence, compatible/incomplete
-evidence, or conflicting context, and appends the new record. The
+evidence, or conflicting context, and appends the new record. Exact recurrence
+also distinguishes known, newly observed, and unavailable associated-BSSID
+attachment evidence. Compatibility is not clustered transitively, and an exact
+serialized key variant is not presented as a count of physical networks. The
 `LINKTOP_HISTORY` environment variable may supply the same opt-in path for a
 regular operator setup.
 
@@ -151,6 +154,9 @@ cached gateway binding, network boundary, recurrence, controller site evidence,
 and a private operator assertion can support a place candidate. Linktop reports
 the available evidence and explicitly says when no place is asserted. It does
 not perform an ambient Wi-Fi scan or attach a human location label on its own.
+A gateway link binding is reported as a context anchor, not a place candidate
+by itself; the ordinary history projection says `place unknown` until an
+operator or authoritative controller supplies that assertion.
 
 `linktop probe` is the automation-oriented active contract: it exits `1` when
 the tested path fails and `2` when no path verdict is available. Live TUI and

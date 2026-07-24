@@ -1309,7 +1309,7 @@ dependencies = [
 [[package]]
 name = "netmon-evidence"
 version = "0.0.1"
-source = "git+https://github.com/arclabs561/netmon.git?rev=6cab05cfbdf55c8dbc0b29fb3ff1f9732f0473a4#6cab05cfbdf55c8dbc0b29fb3ff1f9732f0473a4"
+source = "git+https://github.com/arclabs561/netmon.git?rev=daee13b59b3307acca0874759d8ce94a86df70eb#daee13b59b3307acca0874759d8ce94a86df70eb"
 dependencies = [
  "serde",
 ]
@@ -1317,7 +1317,7 @@ dependencies = [
 [[package]]
 name = "netmon-replay"
 version = "0.0.1"
-source = "git+https://github.com/arclabs561/netmon.git?rev=6cab05cfbdf55c8dbc0b29fb3ff1f9732f0473a4#6cab05cfbdf55c8dbc0b29fb3ff1f9732f0473a4"
+source = "git+https://github.com/arclabs561/netmon.git?rev=daee13b59b3307acca0874759d8ce94a86df70eb#daee13b59b3307acca0874759d8ce94a86df70eb"
 dependencies = [
  "netmon-evidence",
  "serde_json",
