@@ -1,3 +1,4 @@
+mod capture;
 mod metrics;
 mod model;
 mod net;
@@ -9,17 +10,18 @@ mod speed;
 mod ui;
 
 use std::io::{self, IsTerminal};
+use std::path::PathBuf;
 use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use model::{Health, MonitorControl, MonitorMode};
+use model::{Health, MonitorControl, MonitorMode, ProbePolicy};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -27,14 +29,14 @@ use ratatui::backend::CrosstermBackend;
 #[command(
     name = "linktop",
     version,
-    about = "Live terminal instrument for the active network path",
-    long_about = "Inspect the active interface, gateway, DNS, HTTPS reachability, public edge, and rolling gateway latency without scanning the LAN."
+    about = "Terminal instrument for the host's current network context",
+    long_about = "Observe the default route, interface, radio, counters, and native neighbor cache without transmitting by default. Active next-hop, DNS, HTTPS, and public-egress probes are explicit."
 )]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Seconds between gateway samples in the live monitor.
+    /// Seconds between live observations and, when enabled, next-hop RTT probes.
     #[arg(long, global = true, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..=60))]
     interval: u64,
 
@@ -45,13 +47,23 @@ struct Cli {
     /// Exit a live overview, link, or peers view after this many seconds.
     #[arg(long, global = true, value_parser = clap::value_parser!(u64).range(1..=86_400))]
     dwell: Option<u64>,
+
+    /// Enable next-hop, DNS, HTTPS, and public-egress probes in the overview.
+    #[arg(long)]
+    active: bool,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Print one bounded diagnostic report and exit.
-    #[command(alias = "diag")]
+    /// Print one passive host, route, radio, counter, and neighbor-cache report.
     Snapshot {
+        /// Emit stable machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run one bounded active path diagnosis and exit.
+    #[command(alias = "diag")]
+    Probe {
         /// Emit stable machine-readable JSON.
         #[arg(long)]
         json: bool,
@@ -82,6 +94,48 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run a live view headlessly and save styled screenshots at explicit elapsed times.
+    #[command(alias = "capture-ui")]
+    Screenshot {
+        /// Live subject to render.
+        #[arg(value_enum, default_value_t = CaptureView::Overview)]
+        view: CaptureView,
+        /// Elapsed seconds to capture; repeat the flag or separate values with commas.
+        #[arg(long = "at", required = true, value_delimiter = ',', value_parser = clap::value_parser!(u64).range(1..=86_400))]
+        at: Vec<u64>,
+        /// Fixed terminal width in columns.
+        #[arg(long, default_value_t = 140, value_parser = clap::value_parser!(u16).range(60..=300))]
+        columns: u16,
+        /// Fixed terminal height in rows.
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u16).range(10..=100))]
+        rows: u16,
+        /// Private directory for timestamped text and SVG or native ANSI/HTML frames.
+        #[arg(long, default_value = "linktop-captures")]
+        output_dir: PathBuf,
+        /// Exercise the real Crossterm TUI in a fixed-size tmux PTY and save ANSI and HTML.
+        #[arg(long)]
+        native: bool,
+        /// Enable active path probes in an overview capture.
+        #[arg(long)]
+        active: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CaptureView {
+    Overview,
+    Link,
+    Peers,
+}
+
+impl From<CaptureView> for MonitorMode {
+    fn from(view: CaptureView) -> Self {
+        match view {
+            CaptureView::Overview => Self::Overview,
+            CaptureView::Link => Self::Link,
+            CaptureView::Peers => Self::Peers,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,34 +150,55 @@ fn main() -> Result<()> {
     let interval = Duration::from_secs(cli.interval);
     let dwell = cli.dwell.map(Duration::from_secs);
     let plain = cli.plain;
+    let probe_policy = if cli.active {
+        ProbePolicy::Active
+    } else {
+        ProbePolicy::Passive
+    };
     let terminal_stdin = io::stdin().is_terminal();
     let terminal_stdout = io::stdout().is_terminal();
     let live_output = choose_live_output(terminal_stdin, terminal_stdout, plain, dwell);
     match cli.command {
         Some(Command::Snapshot { json }) => {
             reject_live_options("snapshot", plain, dwell)?;
+            reject_root_active("snapshot", cli.active)?;
             snapshot(json)
         }
+        Some(Command::Probe { json }) => {
+            reject_live_options("probe", plain, dwell)?;
+            reject_root_active("probe", cli.active)?;
+            probe(json)
+        }
         Some(Command::Link { json }) => {
+            reject_root_active("link", cli.active)?;
             if json {
                 reject_live_options("link --json", plain, dwell)?;
                 link(true)
             } else {
                 match live_output {
-                    LiveOutput::Tui => run_tui(interval, MonitorMode::Link, dwell),
-                    LiveOutput::Plain => run_plain(interval, MonitorMode::Link, dwell),
+                    LiveOutput::Tui => {
+                        run_tui(interval, MonitorMode::Link, dwell, ProbePolicy::Passive)
+                    }
+                    LiveOutput::Plain => {
+                        run_plain(interval, MonitorMode::Link, dwell, ProbePolicy::Passive)
+                    }
                     LiveOutput::Once => link(false),
                 }
             }
         }
         Some(Command::Peers { json }) => {
+            reject_root_active("peers", cli.active)?;
             if json {
                 reject_live_options("peers --json", plain, dwell)?;
                 peers(true)
             } else {
                 match live_output {
-                    LiveOutput::Tui => run_tui(interval, MonitorMode::Peers, dwell),
-                    LiveOutput::Plain => run_plain(interval, MonitorMode::Peers, dwell),
+                    LiveOutput::Tui => {
+                        run_tui(interval, MonitorMode::Peers, dwell, ProbePolicy::Passive)
+                    }
+                    LiveOutput::Plain => {
+                        run_plain(interval, MonitorMode::Peers, dwell, ProbePolicy::Passive)
+                    }
                     LiveOutput::Once => peers(false),
                 }
             }
@@ -135,11 +210,41 @@ fn main() -> Result<()> {
             json,
         }) => {
             reject_live_options("speed", plain, dwell)?;
+            reject_root_active("speed", cli.active)?;
             speed(&host, port, Duration::from_secs(duration), json)
         }
+        Some(Command::Screenshot {
+            view,
+            at,
+            columns,
+            rows,
+            output_dir,
+            native,
+            active,
+        }) => {
+            reject_live_options("screenshot", plain, dwell)?;
+            reject_root_active("screenshot", cli.active)?;
+            let mode = view.into();
+            anyhow::ensure!(
+                !active || mode == MonitorMode::Overview,
+                "screenshot --active is only valid for the overview"
+            );
+            let capture_policy = if active {
+                ProbePolicy::Active
+            } else {
+                ProbePolicy::Passive
+            };
+            let size = capture::CaptureSize { columns, rows };
+            if native {
+                capture::run_native(interval, mode, capture_policy, &at, size, &output_dir)
+            } else {
+                capture::run(interval, mode, capture_policy, &at, size, &output_dir)
+            }
+        }
         None => match live_output {
-            LiveOutput::Tui => run_tui(interval, MonitorMode::Overview, dwell),
-            LiveOutput::Plain => run_plain(interval, MonitorMode::Overview, dwell),
+            LiveOutput::Tui => run_tui(interval, MonitorMode::Overview, dwell, probe_policy),
+            LiveOutput::Plain => run_plain(interval, MonitorMode::Overview, dwell, probe_policy),
+            LiveOutput::Once if probe_policy.is_active() => probe(false),
             LiveOutput::Once => snapshot(false),
         },
     }
@@ -168,25 +273,118 @@ fn reject_live_options(subject: &str, plain: bool, dwell: Option<Duration>) -> R
     Ok(())
 }
 
+fn reject_root_active(subject: &str, active: bool) -> Result<()> {
+    anyhow::ensure!(
+        !active,
+        "--active applies to the live overview; use `linktop probe` for a bounded active diagnosis (not {subject})"
+    );
+    Ok(())
+}
+
 fn snapshot(json: bool) -> Result<()> {
-    let report = net::collect_snapshot(Duration::from_secs(15));
+    let report = net::collect_passive_snapshot();
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("LINKTOP  {}", report.summary.health.label());
         println!(
-            "path     {} → {} → {}",
+            "LINKTOP  PASSIVE SNAPSHOT / PATH UNTESTED / COVERAGE {}",
+            report.summary.evidence_coverage.label()
+        );
+        println!(
+            "route    default via {} dev {}",
+            report.link.gateway.as_deref().unwrap_or("unknown next hop"),
             report
                 .link
                 .interface
                 .as_deref()
-                .unwrap_or("unknown interface"),
-            report.link.gateway.as_deref().unwrap_or("unknown gateway"),
+                .unwrap_or("unknown interface")
+        );
+        if let Some(configuration) = network_configuration_text(&report.link) {
+            println!("config   {configuration}");
+        }
+        if let Some(wifi) = &report.link.wifi {
+            println!(
+                "802.11   RSSI {}  noise {}  channel {}  PHY {}  tx {}",
+                human_dbm(wifi.signal_dbm.or(wifi.signal_percent)),
+                human_dbm(wifi.noise_dbm),
+                wifi.channel
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "?".into()),
+                wifi.phy.as_deref().unwrap_or("?"),
+                speed::human_rate(wifi.tx_rate_mbps.map(|value| value * 1_000_000.0))
+            );
+        }
+        println!(
+            "resolvers {}",
+            if report.link.resolvers.is_empty() {
+                "unavailable".into()
+            } else {
+                report.link.resolvers.join(", ")
+            }
+        );
+        for address in report
+            .link
+            .addresses
+            .iter()
+            .filter(|address| address.is_default)
+        {
+            println!(
+                "address   IPv{} {}{}",
+                address.family,
+                address.address,
+                if address.is_temporary {
+                    " (temporary)"
+                } else {
+                    ""
+                }
+            );
+        }
+        println!(
+            "neighbors {:<9} {}",
+            report.neighbors.health.label(),
+            report.neighbors.detail
+        );
+        if let Some(counters) = &report.interface_counters {
+            println!(
+                "traffic   {} received / {} transmitted / {} errors / {} drops [{}]",
+                human_bytes(counters.received_bytes),
+                human_bytes(counters.transmitted_bytes),
+                counters.receive_errors + counters.transmit_errors,
+                counters.drops,
+                counters.interface
+            );
+        }
+        println!("active    off; run `linktop probe` for bounded path checks");
+    }
+    Ok(())
+}
+
+fn probe(json: bool) -> Result<()> {
+    let report = net::collect_snapshot(Duration::from_secs(15));
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "LINKTOP  ACTIVE PATH {} / COVERAGE {}",
+            report.summary.path_status.label(),
+            report.summary.evidence_coverage.label()
+        );
+        println!(
+            "route    default via {} dev {}",
+            report.link.gateway.as_deref().unwrap_or("unknown next hop"),
+            report
+                .link
+                .interface
+                .as_deref()
+                .unwrap_or("unknown interface")
+        );
+        println!(
+            "egress   {}",
             report
                 .link
                 .public_ip
                 .as_deref()
-                .unwrap_or("unknown public edge")
+                .unwrap_or("public egress unavailable")
         );
         for probe in &report.probes {
             let latency = probe
@@ -202,10 +400,10 @@ fn snapshot(json: bool) -> Result<()> {
             );
             if let Some(metrics) = &probe.metrics {
                 println!(
-                    "          p50 {}  p95 {}  jitter {}  loss {}",
+                    "          p50 {}  p95 {}  mean|ΔRTT| {}  loss {}",
                     human_ms(metrics.rtt_p50_ms),
                     human_ms(metrics.rtt_p95_ms),
-                    human_ms(metrics.rtt_ipdv_abs_mean_ms),
+                    human_ms(metrics.mean_abs_adjacent_rtt_delta_ms),
                     metrics
                         .loss_rate
                         .map(|value| format!("{:.0}%", value * 100.0))
@@ -213,24 +411,21 @@ fn snapshot(json: bool) -> Result<()> {
                 );
             }
         }
-        println!("neighbors {}", report.neighbors.detail);
-        if let Some(counters) = &report.interface_counters {
-            println!(
-                "traffic   {} received / {} transmitted / {} errors / {} drops [{}]",
-                human_bytes(counters.received_bytes),
-                human_bytes(counters.transmitted_bytes),
-                counters.receive_errors + counters.transmit_errors,
-                counters.drops,
-                counters.interface
-            );
-        }
         println!(
-            "completed {}/{} bounded probes",
-            report.summary.completed, report.summary.total
+            "neighbors {:<9} {}",
+            report.neighbors.health.label(),
+            report.neighbors.detail
+        );
+        println!(
+            "completed {}/{} bounded active probes",
+            report.summary.completed_probes, report.summary.total_probes
         );
     }
-    if report.summary.health == Health::Failed {
+    if report.summary.path_status.is_failed() {
         std::process::exit(1);
+    }
+    if report.summary.path_status.is_unavailable() {
+        std::process::exit(2);
     }
     Ok(())
 }
@@ -248,6 +443,9 @@ fn link(json: bool) -> Result<()> {
         link.link_type.as_deref().unwrap_or("unknown link"),
         link.gateway.as_deref().unwrap_or("unknown gateway")
     );
+    if let Some(configuration) = network_configuration_text(&link) {
+        println!("config   {configuration}");
+    }
     if let Some(ssid) = &link.ssid {
         println!("ssid     {ssid}");
     } else if link.ssid_restricted {
@@ -301,7 +499,7 @@ fn peers(json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         let gateway = link.gateway;
-        println!("LINKTOP  PASSIVE NEIGHBORS");
+        println!("LINKTOP  NEIGHBOR CACHE / PASSIVE");
         println!("{}", report.detail);
         println!(
             "evidence {}  OUI {}",
@@ -390,6 +588,42 @@ fn human_ms(value: Option<f64>) -> String {
         .unwrap_or_else(|| "?".into())
 }
 
+fn network_configuration_text(link: &model::LinkSnapshot) -> Option<String> {
+    let configuration = link.network_configuration.as_ref()?;
+    let mut parts = Vec::new();
+    if let Some(connection_id) = &configuration.connection_id {
+        parts.push(format!("association {connection_id}"));
+    }
+    if let Some(method) = &configuration.method {
+        parts.push(method.clone());
+    }
+    if let Some(state) = &configuration.state {
+        parts.push(state.to_ascii_lowercase());
+    }
+    if let Some(server) = &configuration.server {
+        parts.push(format!("server {server}"));
+    }
+    if let Some(mask) = &configuration.subnet_mask {
+        parts.push(format!("mask {mask}"));
+    }
+    if let Some(seconds) = configuration.lease_seconds {
+        parts.push(format!("lease {}h", seconds / 3_600));
+    }
+    if let (Some(start), Some(end)) = (
+        configuration.lease_started_at.as_deref(),
+        configuration.lease_expires_at.as_deref(),
+    ) {
+        parts.push(format!("{start} → {end}"));
+    }
+    if let Some(security) = &configuration.security {
+        parts.push(security.replace('_', "-"));
+    }
+    if configuration.router_arp_verified == Some(true) {
+        parts.push("router ARP verified".into());
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 fn human_dbm(value: Option<f64>) -> String {
     value
         .map(|value| format!("{value:.0}"))
@@ -407,7 +641,12 @@ fn human_bytes(bytes: u64) -> String {
     unreachable!()
 }
 
-fn run_tui(interval: Duration, mode: MonitorMode, dwell: Option<Duration>) -> Result<()> {
+fn run_tui(
+    interval: Duration,
+    mode: MonitorMode,
+    dwell: Option<Duration>,
+    probe_policy: ProbePolicy,
+) -> Result<()> {
     enable_raw_mode().context("enable terminal raw mode")?;
     let _guard = TerminalGuard;
     let mut stdout = io::stdout();
@@ -415,9 +654,11 @@ fn run_tui(interval: Duration, mode: MonitorMode, dwell: Option<Duration>) -> Re
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
-    let (updates, controls, monitor) = net::start_monitor(interval, mode);
-    let mut app = model::App::new();
+    let (updates, controls, monitor) = net::start_monitor(interval, mode, probe_policy);
+    let mut app = model::App::with_probe_policy(probe_policy);
+    let mut active_mode = mode;
     let mut peer_offset = 0_usize;
+    let can_navigate = mode == MonitorMode::Overview;
     let deadline = dwell.map(|duration| Instant::now() + duration);
     let result = (|| -> Result<()> {
         loop {
@@ -431,7 +672,8 @@ fn run_tui(interval: Duration, mode: MonitorMode, dwell: Option<Duration>) -> Re
                     }
                 }
             }
-            terminal.draw(|frame| ui::render(frame, &app, mode, peer_offset))?;
+            terminal
+                .draw(|frame| ui::render(frame, &app, active_mode, peer_offset, can_navigate))?;
 
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 break;
@@ -454,24 +696,45 @@ fn run_tui(interval: Duration, mode: MonitorMode, dwell: Option<Duration>) -> Re
                         controls.send(MonitorControl::Pause(paused)).ok();
                         app.set_paused(paused);
                     }
-                    KeyCode::Down | KeyCode::Char('j') if mode == MonitorMode::Peers => {
+                    KeyCode::Char('a') if can_navigate => {
+                        let policy = if app.probe_policy().is_active() {
+                            ProbePolicy::Passive
+                        } else {
+                            ProbePolicy::Active
+                        };
+                        controls.send(MonitorControl::SetProbePolicy(policy)).ok();
+                        app.set_probe_policy(policy);
+                    }
+                    KeyCode::Char('1') if can_navigate => {
+                        active_mode = MonitorMode::Overview;
+                    }
+                    KeyCode::Char('2') if can_navigate => {
+                        active_mode = MonitorMode::Link;
+                    }
+                    KeyCode::Char('3') if can_navigate => {
+                        active_mode = MonitorMode::Peers;
+                    }
+                    KeyCode::Tab if can_navigate => {
+                        active_mode = next_dashboard_view(active_mode);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') if active_mode == MonitorMode::Peers => {
                         peer_offset =
                             (peer_offset + 1).min(app.peers.peers.len().saturating_sub(1));
                     }
-                    KeyCode::Up | KeyCode::Char('k') if mode == MonitorMode::Peers => {
+                    KeyCode::Up | KeyCode::Char('k') if active_mode == MonitorMode::Peers => {
                         peer_offset = peer_offset.saturating_sub(1);
                     }
-                    KeyCode::PageDown if mode == MonitorMode::Peers => {
+                    KeyCode::PageDown if active_mode == MonitorMode::Peers => {
                         peer_offset =
                             (peer_offset + 10).min(app.peers.peers.len().saturating_sub(1));
                     }
-                    KeyCode::PageUp if mode == MonitorMode::Peers => {
+                    KeyCode::PageUp if active_mode == MonitorMode::Peers => {
                         peer_offset = peer_offset.saturating_sub(10);
                     }
-                    KeyCode::Home | KeyCode::Char('g') if mode == MonitorMode::Peers => {
+                    KeyCode::Home | KeyCode::Char('g') if active_mode == MonitorMode::Peers => {
                         peer_offset = 0;
                     }
-                    KeyCode::End | KeyCode::Char('G') if mode == MonitorMode::Peers => {
+                    KeyCode::End | KeyCode::Char('G') if active_mode == MonitorMode::Peers => {
                         peer_offset = app.peers.peers.len().saturating_sub(1);
                     }
                     _ => {}
@@ -486,11 +749,29 @@ fn run_tui(interval: Duration, mode: MonitorMode, dwell: Option<Duration>) -> Re
     result
 }
 
-fn run_plain(interval: Duration, mode: MonitorMode, dwell: Option<Duration>) -> Result<()> {
-    let (updates, controls, monitor) = net::start_monitor(interval, mode);
-    let mut app = model::App::new();
+fn next_dashboard_view(mode: MonitorMode) -> MonitorMode {
+    match mode {
+        MonitorMode::Overview => MonitorMode::Link,
+        MonitorMode::Link => MonitorMode::Peers,
+        MonitorMode::Peers => MonitorMode::Overview,
+    }
+}
+
+fn run_plain(
+    interval: Duration,
+    mode: MonitorMode,
+    dwell: Option<Duration>,
+    probe_policy: ProbePolicy,
+) -> Result<()> {
+    let (updates, controls, monitor) = net::start_monitor(interval, mode, probe_policy);
+    let mut app = model::App::with_probe_policy(probe_policy);
     let subject = match mode {
-        MonitorMode::Overview => "active path probes + passive neighbors / no LAN scan",
+        MonitorMode::Overview if probe_policy.is_active() => {
+            "active path probes + passive host/cache observation / no LAN scan"
+        }
+        MonitorMode::Overview => {
+            "passive host/cache observation / path reachability untested / no LAN scan"
+        }
         MonitorMode::Link => "local route + radio + interface counters / no Internet probes",
         MonitorMode::Peers => "passive neighbor-cache observation / no LAN scan",
     };
@@ -543,6 +824,21 @@ mod cli_tests {
     use super::*;
 
     #[test]
+    fn overview_is_passive_unless_active_is_explicit() {
+        let passive = Cli::try_parse_from(["linktop"]).unwrap();
+        assert!(!passive.active);
+
+        let active =
+            Cli::try_parse_from(["linktop", "--active", "--plain", "--dwell", "5"]).unwrap();
+        assert!(active.active);
+        assert!(active.plain);
+        assert_eq!(active.dwell, Some(5));
+
+        let probe = Cli::try_parse_from(["linktop", "probe", "--json"]).unwrap();
+        assert!(matches!(probe.command, Some(Command::Probe { json: true })));
+    }
+
+    #[test]
     fn live_options_work_after_a_focused_subcommand() {
         let cli = Cli::try_parse_from([
             "linktop",
@@ -558,6 +854,40 @@ mod cli_tests {
         assert_eq!(cli.dwell, Some(7));
         assert_eq!(cli.interval, 3);
         assert!(matches!(cli.command, Some(Command::Peers { json: false })));
+    }
+
+    #[test]
+    fn screenshot_parses_repeated_and_delimited_frame_times() {
+        let cli = Cli::try_parse_from([
+            "linktop",
+            "screenshot",
+            "peers",
+            "--at",
+            "2,5",
+            "--at",
+            "10",
+            "--columns",
+            "100",
+            "--rows",
+            "24",
+            "--native",
+        ])
+        .unwrap();
+        let Some(Command::Screenshot {
+            view,
+            at,
+            columns,
+            rows,
+            native,
+            ..
+        }) = cli.command
+        else {
+            panic!("screenshot command was not parsed");
+        };
+        assert_eq!(view, CaptureView::Peers);
+        assert_eq!(at, vec![2, 5, 10]);
+        assert_eq!((columns, rows), (100, 24));
+        assert!(native);
     }
 
     #[test]
@@ -597,6 +927,19 @@ mod cli_tests {
         assert_eq!(
             choose_live_output(false, true, false, dwell),
             LiveOutput::Plain
+        );
+    }
+
+    #[test]
+    fn dashboard_view_cycle_is_stable() {
+        assert_eq!(
+            next_dashboard_view(MonitorMode::Overview),
+            MonitorMode::Link
+        );
+        assert_eq!(next_dashboard_view(MonitorMode::Link), MonitorMode::Peers);
+        assert_eq!(
+            next_dashboard_view(MonitorMode::Peers),
+            MonitorMode::Overview
         );
     }
 }

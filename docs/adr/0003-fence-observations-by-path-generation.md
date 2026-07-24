@@ -86,3 +86,18 @@ boundary.
 
 Extends ADR-0001's live state model with an isolation boundary between active
 paths.
+
+## Route-settling refinement (2026-07-23)
+
+A transient loss of the default interface during Wi-Fi association no longer creates
+an immediate intermediate generation. When a previously confirmed path temporarily
+has no default interface, Linktop marks the path as switching, retains the last
+confirmed generation for up to three seconds, and starts no new probe, peer, radio, or
+counter work against that retained topology. A recovered route clears the settling
+state and is compared with the confirmed fingerprint normally.
+
+If the route remains absent through the grace period, the incomplete topology becomes
+a new generation and receives the same path-scoped reset as any other sustained
+transition. This refinement removes a known false transition during house-Wi-Fi and
+hotspot handoff without allowing old asynchronous results to cross into the next
+confirmed path.

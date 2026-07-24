@@ -1,6 +1,8 @@
 use serde::Serialize;
 
-use crate::model::Health;
+use crate::model::{Health, MIN_GATEWAY_ASSESSMENT_SAMPLES};
+
+pub const DEGRADED_MEAN_ABS_RTT_DELTA_MS: f64 = 15.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LatencyMetrics {
@@ -16,11 +18,11 @@ pub struct LatencyMetrics {
     pub rtt_max_ms: Option<f64>,
     pub rtt_sample_variance_ms2: Option<f64>,
     pub rtt_sample_stddev_ms: Option<f64>,
-    pub rtt_ipdv_abs_mean_ms: Option<f64>,
-    pub rtt_ipdv_positive_p95_ms: Option<f64>,
-    pub rtt_pdv_p95_ms: Option<f64>,
-    pub rtt_pdv_max_ms: Option<f64>,
-    pub rtt_ipdv_pairs: usize,
+    pub mean_abs_adjacent_rtt_delta_ms: Option<f64>,
+    pub positive_adjacent_rtt_delta_p95_ms: Option<f64>,
+    pub rtt_delta_from_min_p95_ms: Option<f64>,
+    pub rtt_delta_from_min_max_ms: Option<f64>,
+    pub adjacent_rtt_pairs: usize,
 }
 
 impl LatencyMetrics {
@@ -40,9 +42,14 @@ impl LatencyMetrics {
             ),
             _ => None,
         };
-        let ipdv: Vec<_> = samples.windows(2).map(|pair| pair[1] - pair[0]).collect();
-        let positive_ipdv: Vec<_> = ipdv.iter().copied().filter(|value| *value > 0.0).collect();
-        let pdv: Vec<_> = samples
+        let adjacent_rtt_deltas: Vec<_> =
+            samples.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        let positive_adjacent_rtt_deltas: Vec<_> = adjacent_rtt_deltas
+            .iter()
+            .copied()
+            .filter(|value| *value > 0.0)
+            .collect();
+        let rtt_deltas_from_min: Vec<_> = samples
             .iter()
             .copied()
             .reduce(f64::min)
@@ -62,12 +69,17 @@ impl LatencyMetrics {
             rtt_max_ms: samples.iter().copied().reduce(f64::max),
             rtt_sample_variance_ms2: variance,
             rtt_sample_stddev_ms: variance.map(f64::sqrt),
-            rtt_ipdv_abs_mean_ms: (!ipdv.is_empty())
-                .then(|| ipdv.iter().map(|value| value.abs()).sum::<f64>() / ipdv.len() as f64),
-            rtt_ipdv_positive_p95_ms: percentile(&positive_ipdv, 0.95),
-            rtt_pdv_p95_ms: percentile(&pdv, 0.95),
-            rtt_pdv_max_ms: pdv.iter().copied().reduce(f64::max),
-            rtt_ipdv_pairs: ipdv.len(),
+            mean_abs_adjacent_rtt_delta_ms: (!adjacent_rtt_deltas.is_empty()).then(|| {
+                adjacent_rtt_deltas
+                    .iter()
+                    .map(|value| value.abs())
+                    .sum::<f64>()
+                    / adjacent_rtt_deltas.len() as f64
+            }),
+            positive_adjacent_rtt_delta_p95_ms: percentile(&positive_adjacent_rtt_deltas, 0.95),
+            rtt_delta_from_min_p95_ms: percentile(&rtt_deltas_from_min, 0.95),
+            rtt_delta_from_min_max_ms: rtt_deltas_from_min.iter().copied().reduce(f64::max),
+            adjacent_rtt_pairs: adjacent_rtt_deltas.len(),
         }
     }
 
@@ -75,10 +87,14 @@ impl LatencyMetrics {
         let (Some(p50), Some(p95)) = (self.rtt_p50_ms, self.rtt_p95_ms) else {
             return Health::Unavailable;
         };
-        if self.loss_rate.is_some_and(|loss| loss > 0.0)
-            || p95 - p50 >= 20.0
-            || (p50 > 0.0 && p95 / p50 >= 3.0)
-        {
+        if self.lost > 0 {
+            return Health::Degraded;
+        }
+        let wide_spread = p95 - p50 >= 20.0 || (p50 > 0.0 && p95 / p50 >= 3.0);
+        let sustained_variation = self
+            .mean_abs_adjacent_rtt_delta_ms
+            .is_some_and(|delta| delta >= DEGRADED_MEAN_ABS_RTT_DELTA_MS);
+        if self.sent >= MIN_GATEWAY_ASSESSMENT_SAMPLES && wide_spread && sustained_variation {
             Health::Degraded
         } else {
             Health::Ok
@@ -116,7 +132,7 @@ mod tests {
         assert_eq!(metrics.loss_rate, Some(0.25));
         assert_eq!(metrics.rtt_p50_ms, Some(12.0));
         assert_eq!(metrics.rtt_sample_variance_ms2, Some(4.0));
-        assert_eq!(metrics.rtt_ipdv_abs_mean_ms, Some(2.0));
+        assert_eq!(metrics.mean_abs_adjacent_rtt_delta_ms, Some(2.0));
         assert_eq!(metrics.health(), Health::Degraded);
     }
 
@@ -125,6 +141,31 @@ mod tests {
         let metrics = LatencyMetrics::from_samples(&[10.0, 11.0, 12.0], 3);
         assert_eq!(metrics.health(), Health::Ok);
         assert_eq!(metrics.rtt_p95_ms, Some(11.9));
+    }
+
+    #[test]
+    fn sparse_samples_do_not_diagnose_latency_spread() {
+        let sparse = LatencyMetrics::from_samples(&[2.0, 3.0, 4.0, 60.0], 4);
+        assert_eq!(sparse.health(), Health::Ok);
+
+        let sufficient = LatencyMetrics::from_samples(&[2.0, 60.0, 2.0, 60.0, 2.0], 5);
+        assert_eq!(sufficient.health(), Health::Degraded);
+    }
+
+    #[test]
+    fn one_latency_spike_stays_visible_without_controlling_health() {
+        let metrics = LatencyMetrics::from_samples(&[5.0, 6.0, 5.0, 6.0, 33.0], 5);
+        assert!(metrics.rtt_p95_ms.unwrap() - metrics.rtt_p50_ms.unwrap() >= 20.0);
+        assert!(metrics.mean_abs_adjacent_rtt_delta_ms.unwrap() < DEGRADED_MEAN_ABS_RTT_DELTA_MS);
+        assert_eq!(metrics.health(), Health::Ok);
+    }
+
+    #[test]
+    fn any_loss_in_the_assessed_metrics_is_material() {
+        let samples = vec![10.0; 89];
+        let metrics = LatencyMetrics::from_samples(&samples, 90);
+        assert_eq!(metrics.loss_rate, Some(1.0 / 90.0));
+        assert_eq!(metrics.health(), Health::Degraded);
     }
 
     #[test]

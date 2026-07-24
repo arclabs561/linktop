@@ -1,6 +1,6 @@
 ---
 status: implemented
-decisions: ADR-0001, ADR-0002, ADR-0003
+decisions: ADR-0001, ADR-0002, ADR-0003, ADR-0004, ADR-0005
 ---
 
 # Design: focused view lifetimes
@@ -23,7 +23,8 @@ Linktop has three output contracts already: an alternate-screen TUI for a termin
 bounded report when stdout is redirected, and an explicit append-only `--plain`
 stream. It also has four different jobs:
 
-- overview: correlate local link state with bounded active path probes;
+- overview: observe local context passively by default and correlate it with
+  bounded path probes only after explicit active enablement;
 - link: observe local route, radio, resolver, addresses, and interface counters;
 - peers: observe the native neighbor cache without scanning;
 - speed: run one explicit bounded load experiment against an operator-selected host.
@@ -60,7 +61,7 @@ operator evidence with placeholders.
 
 ### Keep every subcommand one-shot
 
-This preserves a simple CLI but makes `peers` and `link` systematically less useful
+This keeps the CLI small but makes `peers` and `link` systematically less useful
 than the overview. It also gives users no focused interactive path when the overview
 cannot allocate enough space.
 
@@ -96,19 +97,46 @@ use an explicit `--json-stream` contract rather than overloading `--json`.
 
 Focused monitoring uses workload-specific schedules:
 
-- overview keeps gateway sampling and startup/manual-refresh Internet probes;
+- passive overview keeps route, DHCP/association, counter, radio,
+  process-accounting, and neighbor-cache observation;
+  active overview adds next-hop sampling plus startup, path-change,
+  manual-refresh, and sixty-second DNS/HTTPS checks;
 - link samples counters every interval and refreshes route/radio state more slowly;
 - peers rereads the bounded native cache every interval with single-flight protection,
   and uses local route/interface prefixes to exclude retained entries from a previous
   network on the same interface;
 - speed keeps its existing explicit duration and target.
 
+The live interval does not imply a full platform inventory on every tick. A
+lightweight route/interface/address check runs at the sample cadence so a
+house-Wi-Fi, hotspot, Ethernet, or VPN transition is detected promptly. Hostname,
+SSID, effective resolver, and other full topology evidence refresh at startup,
+manual refresh, a lightweight path change, or a ten-second ceiling. Gateway and
+interface counters remain on the fast cadence. On macOS the fast path check
+also reads `ipconfig getsummary`, while the slower Wi-Fi inventory, peer
+collector, and one-second `nettop` workload sample remain single-flight on
+their subject-specific schedules. Workload accounting is eligible every five
+seconds in the overview and resets on a path generation.
+
+Peer dwell keeps a process-local, path-generation-scoped observation ledger.
+For each interface/address binding it records first and last positive
+observation, count, latest and prior kernel state, state and MAC-binding
+changes, confirmed cache disappearance, and later return. Missing rows are
+marked cache-absent only after a complete native-source read; a partial ARP or
+NDP result may add positive evidence but cannot support negative evidence.
+
 The peers TUI devotes its main body to a scrollable table and keeps evidence source,
 cache semantics, gateway role, kernel state, MAC scope, and OUI registrant visible.
 It marks partial native-source completion as degraded and says which source failed.
 Disappearance is labelled as cache disappearance, never device departure. The overview
-shows only a summary and a few rows; every truncated list ends with an explicit
-`+N more` handoff to `linktop peers`.
+shows only cache count and evidence coverage; detailed rows belong to the focused peers
+view.
+
+The overview session also supports `1` overview, `2` link, `3` peers, and `Tab`
+cycling without restarting the monitor. Its collection plan remains the overview
+superset while a focused view is displayed. Direct `linktop link` and `linktop peers`
+sessions keep their narrower passive collection plans; presentation navigation must
+not silently change a command's activity boundary.
 
 Increase the overview's full-layout height threshold. At intermediate heights it uses
 the dense summary rather than constructing technically valid but unreadable panels.
@@ -117,12 +145,16 @@ and peers receive the remainder.
 
 ### Network transitions
 
-Treat the active path as a generation, identified by the default interface, link type,
-SSID, gateway, effective resolver set, IPv4 addresses, and IPv6 /64 prefixes on the
-default interface. Using a prefix instead of the full IPv6 address makes privacy-address
-rotation stable on every supported platform while still detecting an IPv6 network
-change. On macOS, use `scutil --dns` rather than the explicitly non-authoritative
-`/etc/resolv.conf`, and mark addresses reported as `temporary` in the operator view.
+Treat the active path as a generation, identified by the default interface,
+link type, SSID, macOS Wi-Fi connection ID, gateway, effective resolver set,
+IPv4 addresses, and IPv6 /64 prefixes on the default interface. The connection
+ID detects reassociation even when macOS privacy policy hides the SSID. DHCP
+lease timestamps remain context rather than identity so renewal does not create
+a false transition. Using a prefix instead of the full IPv6 address makes
+privacy-address rotation stable on every supported platform while still
+detecting an IPv6 network change. On macOS, use `scutil --dns` rather than the
+explicitly non-authoritative `/etc/resolv.conf`, and mark addresses reported as
+`temporary` in the operator view.
 Re-evaluate that
 fingerprint on every link refresh so a switch between house Wi-Fi, a phone hotspot,
 Ethernet, or a VPN path becomes an explicit transition rather than a collection of
@@ -138,7 +170,11 @@ current interface and address prefixes. Rows retained across two networks that r
 same prefixes cannot be distinguished passively, so they remain labelled as cache
 evidence rather than new-path presence. The event bus records the old and new path labels plus the
 fingerprint dimensions that changed. A temporarily incomplete route during association is a
-transition state, not immediate proof that the new network failed.
+transition state, not immediate proof that the new network failed. If a previously
+confirmed path temporarily has no default interface, retain that generation for up to
+three seconds, disclose `switching networks`, and launch no new collectors against the
+retained topology. A recovered route resumes normal fingerprint comparison; a route
+that remains absent after the grace period becomes a new incomplete generation.
 
 ### Self-contained visual QA
 
@@ -147,11 +183,20 @@ shallow, narrow, and tall terminal sizes. Tests assert the important content con
 the focused subject remains visible, truncation is declared, headers and footers fit,
 and no panel is selected merely because its border technically fits.
 
-A repository capture command runs each live view in a fixed-size pseudo-terminal with
-`--dwell`, captures its final terminal frame, renders that frame to a PNG, and stores
-the text and image under the ignored, private `.agents/reports/ui-captures/` directory.
-This gives development a repeatable screenshot loop without making the operator the
-manual QA bottleneck or committing observed network identifiers.
+The built-in `screenshot` transaction runs any live subject against the same monitor,
+model, and Ratatui renderer in a fixed-size headless terminal. Repeatable,
+comma-delimited `--at` values save private text and styled SVG frames at explicit
+elapsed times; the latest requested time is the bounded transaction lifetime. The
+portable lane needs no TTY, tmux, ImageMagick, or manual operator screenshot.
+
+An optional `--native` lane runs the current executable in a fixed-size tmux PTY and
+captures its real alternate-screen output at the same times. It writes plain text,
+ANSI, and self-contained HTML so QA can inspect terminal negotiation and colors as
+well as geometry. Native capture requires tmux but remains headless and does not
+foreground a terminal emulator. Timestamped names keep multiple frames and runs
+distinct. Repository development points both lanes at the ignored
+`.agents/reports/ui-captures/` directory so observed network identifiers are not
+committed.
 
 ## Tradeoffs
 
@@ -161,9 +206,9 @@ terminal one-shot must use `--json`, redirect output, or a future explicit snaps
 modifier. Repeated passive cache reads add small local process cost, bounded by the
 interval, command deadlines, and single-flight scheduling.
 
-The first focused views keep process-local history only. They do not persist first/last
-seen facts across runs. Durable evidence and replay belong to the optional future
-netmon integration, after its schema gate.
+The focused views keep process-local history only. Their first/last observations
+reset on every path generation and are not persisted across runs. Durable evidence
+and replay belong to the optional future netmon integration, after its schema gate.
 
 ## Implementation plan
 
@@ -175,8 +220,9 @@ netmon integration, after its schema gate.
    existing pipe and JSON behavior.
 4. Add generation-tagged path transitions so old asynchronous observations cannot
    cross a Wi-Fi, hotspot, Ethernet, or VPN switch.
-5. Add PTY-independent render and CLI-policy tests plus fixed-size private captures for
-   shallow terminals, overflow, focus selection, and lifetime validation.
+5. Add PTY-independent render and CLI-policy tests plus a built-in fixed-size,
+   multi-frame screenshot transaction for shallow terminals, overflow, focus
+   selection, and lifetime validation.
 6. Record the implemented behavior in ADR-0002 and ADR-0003, then update README
    examples and install the new binary.
 

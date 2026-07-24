@@ -10,3 +10,7 @@ network addresses, SSIDs, and other private observations out of these records.
 | [0001](0001-build-a-standalone-host-path-instrument.md) | Build a standalone host-path instrument | Accepted |
 | [0002](0002-make-focused-view-lifetimes-explicit.md) | Make focused view lifetimes explicit | Accepted |
 | [0003](0003-fence-observations-by-path-generation.md) | Fence observations by path generation | Accepted |
+| [0004](0004-make-ui-screenshots-a-bounded-transaction.md) | Make UI screenshots a bounded transaction | Accepted |
+| [0005](0005-rank-diagnosis-by-evidence-and-causal-scope.md) | Rank diagnosis by evidence and causal scope | Accepted |
+| [0006](0006-make-active-network-operations-explicit.md) | Make active network operations explicit | Accepted |
+| [0007](0007-prioritize-change-context-and-consequential-workload.md) | Prioritize change, context, and consequential workload | Accepted |
