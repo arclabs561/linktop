@@ -207,6 +207,7 @@ pub struct PathChange {
 pub struct HistoryContext {
     pub kind: HistoryContextKind,
     pub summary: String,
+    pub compact_summary: String,
     pub evidence: String,
 }
 
