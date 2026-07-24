@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -8,7 +8,11 @@ use serde::Serialize;
 use crate::metrics::LatencyMetrics;
 
 pub const MAX_GATEWAY_SAMPLES: usize = 90;
+pub const GATEWAY_ASSESSMENT_WINDOW: usize = 20;
+pub const MIN_GATEWAY_ASSESSMENT_SAMPLES: usize = 5;
 pub const MAX_EVENTS: usize = 64;
+pub const MAX_PATH_PROBE_EVIDENCE_AGE: Duration = Duration::from_secs(75);
+pub const MAX_PUBLIC_EGRESS_EVIDENCE_AGE: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +42,26 @@ impl Health {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceCoverage {
+    Collecting,
+    Complete,
+    Partial,
+    Unavailable,
+}
+
+impl EvidenceCoverage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Collecting => "COLLECTING",
+            Self::Complete => "COMPLETE",
+            Self::Partial => "PARTIAL",
+            Self::Unavailable => "NONE",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeKind {
@@ -49,14 +73,28 @@ pub enum ProbeKind {
 
 impl ProbeKind {
     pub const ALL: [Self; 4] = [Self::Gateway, Self::Dns, Self::Https, Self::PublicIp];
+    pub const PATH: [Self; 3] = [Self::Gateway, Self::Dns, Self::Https];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Gateway => "gateway RTT",
-            Self::Dns => "DNS resolve",
-            Self::Https => "HTTPS edge",
-            Self::PublicIp => "public edge",
+            Self::Gateway => "next-hop RTT",
+            Self::Dns => "DNS lookup",
+            Self::Https => "HTTPS target",
+            Self::PublicIp => "public egress",
         }
+    }
+
+    pub const fn degraded_after_ms(self) -> Option<f64> {
+        match self {
+            Self::Gateway => None,
+            Self::Dns => Some(500.0),
+            Self::Https => Some(1_000.0),
+            Self::PublicIp => None,
+        }
+    }
+
+    pub const fn affects_path_health(self) -> bool {
+        matches!(self, Self::Gateway | Self::Dns | Self::Https)
     }
 }
 
@@ -87,6 +125,7 @@ pub struct LinkSnapshot {
     pub public_ip: Option<String>,
     pub resolvers: Vec<String>,
     pub addresses: Vec<Address>,
+    pub network_configuration: Option<Box<NetworkConfiguration>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -111,6 +150,57 @@ pub struct InterfaceRate {
     pub drop_delta: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NetworkConfiguration {
+    pub connection_id: Option<String>,
+    pub method: Option<String>,
+    pub state: Option<String>,
+    pub server: Option<String>,
+    pub subnet_mask: Option<String>,
+    pub lease_seconds: Option<u64>,
+    pub lease_started_at: Option<String>,
+    pub lease_expires_at: Option<String>,
+    pub router_arp_verified: Option<bool>,
+    pub security: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessTraffic {
+    pub process: String,
+    pub processes: usize,
+    pub received_bytes_per_second: u64,
+    pub transmitted_bytes_per_second: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkloadSnapshot {
+    pub health: Health,
+    pub detail: String,
+    pub source: Option<String>,
+    pub interval: Duration,
+    pub processes: Vec<ProcessTraffic>,
+}
+
+impl WorkloadSnapshot {
+    pub fn pending() -> Self {
+        Self {
+            health: Health::Queued,
+            detail: "waiting for per-process traffic accounting".into(),
+            source: None,
+            interval: Duration::from_secs(1),
+            processes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PathChange {
+    pub elapsed: Duration,
+    pub dimensions: Vec<&'static str>,
+    pub previous: String,
+    pub current: String,
+}
+
 impl LinkSnapshot {
     pub fn empty() -> Self {
         Self {
@@ -124,7 +214,14 @@ impl LinkSnapshot {
             public_ip: None,
             resolvers: Vec::new(),
             addresses: Vec::new(),
+            network_configuration: None,
         }
+    }
+
+    fn requires_radio_evidence(&self) -> bool {
+        self.link_type
+            .as_deref()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("wifi"))
     }
 
     pub(crate) fn path_fingerprint(&self) -> PathFingerprint {
@@ -147,6 +244,10 @@ impl LinkSnapshot {
             link_type: self.link_type.clone(),
             ssid: self.ssid.clone(),
             ssid_restricted: self.ssid_restricted,
+            connection_id: self
+                .network_configuration
+                .as_ref()
+                .and_then(|configuration| configuration.connection_id.clone()),
             gateway: self.gateway.clone(),
             resolvers,
             addresses,
@@ -175,6 +276,7 @@ pub(crate) struct PathFingerprint {
     link_type: Option<String>,
     ssid: Option<String>,
     ssid_restricted: bool,
+    connection_id: Option<String>,
     gateway: Option<String>,
     resolvers: Vec<String>,
     addresses: Vec<(String, String)>,
@@ -191,6 +293,9 @@ impl PathFingerprint {
         }
         if self.ssid != current.ssid || self.ssid_restricted != current.ssid_restricted {
             changed.push("SSID");
+        }
+        if self.connection_id != current.connection_id {
+            changed.push("Wi-Fi association");
         }
         if self.gateway != current.gateway {
             changed.push("gateway");
@@ -256,8 +361,46 @@ pub struct Peer {
     pub mac: Option<String>,
     pub interface: Option<String>,
     pub state: Option<String>,
+    pub binding_conflict: bool,
     pub mac_scope: Option<MacScope>,
     pub registrant: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeerDwell {
+    pub first_observed: Duration,
+    pub last_observed: Duration,
+    pub observations: u64,
+    pub previous_state: Option<String>,
+    pub state_changes: u64,
+    pub binding_changes: u64,
+    pub cache_disappearances: u64,
+    pub cache_returns: u64,
+    pub currently_cached: bool,
+    pub latest: Peer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerDwellSummary {
+    pub current: usize,
+    pub observed: usize,
+    pub changed: usize,
+    pub disappeared: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PeerKey {
+    interface: Option<String>,
+    address: String,
+}
+
+impl PeerKey {
+    fn from_peer(peer: &Peer) -> Self {
+        Self {
+            interface: peer.interface.clone(),
+            address: peer.address.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -348,6 +491,17 @@ impl ProbeView {
             updated_at: None,
         }
     }
+
+    fn disabled(kind: ProbeKind) -> Self {
+        Self {
+            kind,
+            health: Health::Unavailable,
+            detail: "active check disabled".into(),
+            latency_ms: None,
+            metrics: None,
+            updated_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -355,6 +509,44 @@ pub struct Event {
     pub elapsed: Duration,
     pub message: String,
     pub health: Health,
+    pub kind: EventKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventKind {
+    Session,
+    Path,
+    Probe,
+    Policy,
+    Peer,
+    Notice,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SituationKind {
+    Paused,
+    PathTransition,
+    GatewayFailure,
+    InterfaceLoss,
+    PassiveObservation,
+    UnlocalizedFailure,
+    DnsFailure,
+    HttpsFailure,
+    GatewayLoss,
+    GatewayVariation,
+    SlowDns,
+    SlowHttps,
+    StalePathEvidence,
+    Collecting,
+    WarmingBaseline,
+    EvidenceGap,
+    Ready,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Situation {
+    pub health: Health,
+    pub kind: SituationKind,
 }
 
 #[derive(Debug, Clone)]
@@ -363,8 +555,12 @@ pub enum MonitorUpdate {
         generation: u64,
         snapshot: LinkSnapshot,
     },
+    PathSettling {
+        generation: u64,
+    },
     Wifi {
         generation: u64,
+        ssid: Option<String>,
         telemetry: Option<WifiTelemetry>,
     },
     Peers {
@@ -374,6 +570,10 @@ pub enum MonitorUpdate {
     Traffic {
         generation: u64,
         counters: Option<InterfaceCounters>,
+    },
+    Workload {
+        generation: u64,
+        snapshot: WorkloadSnapshot,
     },
     ProbeStarted {
         generation: u64,
@@ -394,9 +594,23 @@ pub enum MonitorMode {
     Peers,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbePolicy {
+    Passive,
+    Active,
+}
+
+impl ProbePolicy {
+    pub const fn is_active(self) -> bool {
+        matches!(self, Self::Active)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum MonitorControl {
     Refresh,
+    SetProbePolicy(ProbePolicy),
     Pause(bool),
     Stop,
 }
@@ -414,19 +628,40 @@ pub struct App {
     pub interface_counters: Option<InterfaceCounters>,
     pub interface_rate: Option<InterfaceRate>,
     interface_counters_at: Option<Instant>,
+    pub workload: WorkloadSnapshot,
     pub events: VecDeque<Event>,
     pub paused: bool,
     pub cycles: u64,
     pub path_generation: u64,
+    pub path_observed_since: Duration,
+    pub last_path_change: Option<PathChange>,
+    pub path_transition_pending: bool,
+    probe_policy: ProbePolicy,
+    peer_dwell: BTreeMap<PeerKey, PeerDwell>,
+    peer_baseline_seen: bool,
 }
 
 impl App {
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_probe_policy(ProbePolicy::Passive)
+    }
+
+    pub fn with_probe_policy(probe_policy: ProbePolicy) -> Self {
         let started_at = Instant::now();
         let mut app = Self {
             started_at,
             link: LinkSnapshot::empty(),
-            probes: ProbeKind::ALL.into_iter().map(ProbeView::queued).collect(),
+            probes: ProbeKind::ALL
+                .into_iter()
+                .map(|kind| {
+                    if probe_policy.is_active() {
+                        ProbeView::queued(kind)
+                    } else {
+                        ProbeView::disabled(kind)
+                    }
+                })
+                .collect(),
             gateway_samples: VecDeque::with_capacity(MAX_GATEWAY_SAMPLES),
             gateway_outcomes: VecDeque::with_capacity(MAX_GATEWAY_SAMPLES),
             gateway_attempts: 0,
@@ -435,12 +670,19 @@ impl App {
             interface_counters: None,
             interface_rate: None,
             interface_counters_at: None,
+            workload: WorkloadSnapshot::pending(),
             events: VecDeque::with_capacity(MAX_EVENTS),
             paused: false,
             cycles: 0,
             path_generation: 0,
+            path_observed_since: Duration::ZERO,
+            last_path_change: None,
+            path_transition_pending: false,
+            probe_policy,
+            peer_dwell: BTreeMap::new(),
+            peer_baseline_seen: false,
         };
-        app.push_event(Health::Running, "instrument started");
+        app.push_event(EventKind::Session, Health::Running, "instrument started");
         app
     }
 
@@ -454,9 +696,17 @@ impl App {
                     return;
                 }
                 if generation == self.path_generation {
+                    if link.ssid_restricted
+                        && self.link.ssid.is_some()
+                        && !self.link.ssid_restricted
+                    {
+                        link.ssid.clone_from(&self.link.ssid);
+                        link.ssid_restricted = false;
+                    }
                     link.public_ip = self.link.public_ip.clone();
                     link.wifi = self.link.wifi.clone();
                     self.link = link;
+                    self.path_transition_pending = false;
                     return;
                 }
 
@@ -465,6 +715,7 @@ impl App {
                 let current_fingerprint = link.path_fingerprint();
                 let previous = self.link.path_label();
                 self.path_generation = generation;
+                self.path_transition_pending = false;
                 self.link = link;
                 self.gateway_samples.clear();
                 self.gateway_outcomes.clear();
@@ -473,12 +724,30 @@ impl App {
                 self.interface_counters = None;
                 self.interface_counters_at = None;
                 self.interface_rate = None;
+                self.workload = WorkloadSnapshot::pending();
                 self.peers = PeerSnapshot::pending();
+                self.peer_dwell.clear();
+                self.peer_baseline_seen = false;
                 for probe in &mut self.probes {
-                    *probe = ProbeView::queued(probe.kind);
+                    *probe = if self.probe_policy.is_active() {
+                        ProbeView::queued(probe.kind)
+                    } else {
+                        ProbeView::disabled(probe.kind)
+                    };
                 }
                 let current = self.link.path_label();
+                let observed_at = self.uptime();
+                self.path_observed_since = observed_at;
+                if !initial {
+                    self.last_path_change = Some(PathChange {
+                        elapsed: observed_at,
+                        dimensions: previous_fingerprint.changed_dimensions(&current_fingerprint),
+                        previous: previous.clone(),
+                        current: current.clone(),
+                    });
+                }
                 self.push_event(
+                    EventKind::Path,
                     Health::Running,
                     if initial {
                         format!("path: {current}")
@@ -490,27 +759,51 @@ impl App {
                     },
                 );
             }
+            MonitorUpdate::PathSettling { generation } => {
+                if generation == self.path_generation && !self.path_transition_pending {
+                    self.path_transition_pending = true;
+                    self.push_event(
+                        EventKind::Path,
+                        Health::Running,
+                        "default route is settling; retaining the last confirmed path",
+                    );
+                }
+            }
             MonitorUpdate::Wifi {
                 generation,
+                ssid,
                 telemetry,
             } => {
                 if generation == self.path_generation {
+                    if let Some(ssid) = ssid
+                        && (self.link.ssid.as_deref() != Some(ssid.as_str())
+                            || self.link.ssid_restricted)
+                    {
+                        self.link.ssid = Some(ssid);
+                        self.link.ssid_restricted = false;
+                        let current = self.link.path_label();
+                        if let Some(change) = self.last_path_change.as_mut()
+                            && change.elapsed == self.path_observed_since
+                        {
+                            change.current = current.clone();
+                        }
+                        self.push_event(
+                            EventKind::Path,
+                            Health::Ok,
+                            format!("Wi-Fi network identity resolved: {current}"),
+                        );
+                    }
                     self.link.wifi = telemetry;
                 }
             }
             MonitorUpdate::Peers {
                 generation,
-                snapshot: peers,
+                snapshot,
             } => {
                 if generation != self.path_generation {
                     return;
                 }
-                let previous = self.peers.peers.len();
-                let current = peers.peers.len();
-                self.peers = peers;
-                if previous != current {
-                    self.push_event(Health::Ok, format!("neighbor cache: {current} peer(s)"));
-                }
+                self.apply_peer_snapshot(snapshot);
             }
             MonitorUpdate::Traffic {
                 generation,
@@ -531,8 +824,16 @@ impl App {
                 self.interface_counters = counters;
                 self.interface_counters_at = Some(now);
             }
+            MonitorUpdate::Workload {
+                generation,
+                snapshot,
+            } => {
+                if generation == self.path_generation {
+                    self.workload = snapshot;
+                }
+            }
             MonitorUpdate::ProbeStarted { generation, kind } => {
-                if generation != self.path_generation {
+                if generation != self.path_generation || !self.probe_policy.is_active() {
                     return;
                 }
                 let probe = self.probe_mut(kind);
@@ -550,7 +851,7 @@ impl App {
                 kind,
                 result,
             } => {
-                if generation != self.path_generation {
+                if generation != self.path_generation || !self.probe_policy.is_active() {
                     return;
                 }
                 self.cycles += u64::from(kind == ProbeKind::Gateway);
@@ -594,64 +895,472 @@ impl App {
                 probe.updated_at = Some(Instant::now());
 
                 if previous != health && (previous != Health::Running || health.is_problem()) {
-                    self.push_event(health, format!("{}: {}", kind.label(), detail));
+                    self.push_event(
+                        EventKind::Probe,
+                        health,
+                        format!("{}: {}", kind.label(), detail),
+                    );
                 }
             }
-            MonitorUpdate::Notice(message) => self.push_event(Health::Running, message),
+            MonitorUpdate::Notice(message) => {
+                self.push_event(EventKind::Notice, Health::Running, message)
+            }
         }
     }
 
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
         self.push_event(
+            EventKind::Policy,
             Health::Running,
             if paused {
-                "probes paused"
+                "observation paused"
             } else {
-                "probes resumed"
+                "observation resumed"
             },
         );
     }
 
+    pub fn set_probe_policy(&mut self, probe_policy: ProbePolicy) {
+        if self.probe_policy == probe_policy {
+            return;
+        }
+        self.probe_policy = probe_policy;
+        self.gateway_samples.clear();
+        self.gateway_outcomes.clear();
+        self.gateway_attempts = 0;
+        self.gateway_metrics = None;
+        self.link.public_ip = None;
+        for probe in &mut self.probes {
+            *probe = if probe_policy.is_active() {
+                ProbeView::queued(probe.kind)
+            } else {
+                ProbeView::disabled(probe.kind)
+            };
+        }
+        self.push_event(
+            EventKind::Policy,
+            Health::Running,
+            if probe_policy.is_active() {
+                "active path probes enabled by operator"
+            } else {
+                "active path probes disabled"
+            },
+        );
+    }
+
+    pub const fn probe_policy(&self) -> ProbePolicy {
+        self.probe_policy
+    }
+
     pub fn overall_health(&self) -> Health {
+        self.situation().health
+    }
+
+    pub fn situation(&self) -> Situation {
         if self.paused {
-            return Health::Unavailable;
+            return Situation {
+                health: Health::Unavailable,
+                kind: SituationKind::Paused,
+            };
         }
+        if self.path_transition_pending {
+            return Situation {
+                health: Health::Running,
+                kind: SituationKind::PathTransition,
+            };
+        }
+
+        if self.probe_policy.is_active() && self.probe(ProbeKind::Gateway).health == Health::Failed
+        {
+            return Situation {
+                health: Health::Failed,
+                kind: SituationKind::GatewayFailure,
+            };
+        }
+
         if self
-            .probes
-            .iter()
-            .any(|probe| probe.health == Health::Failed)
+            .interface_rate
+            .as_ref()
+            .is_some_and(|rate| rate.error_delta > 0 || rate.drop_delta > 0)
         {
-            Health::Failed
-        } else if self
-            .probes
-            .iter()
-            .any(|probe| probe.health == Health::Degraded)
-            || self
-                .gateway_metrics
-                .as_ref()
-                .is_some_and(|metrics| metrics.health() == Health::Degraded)
-        {
-            Health::Degraded
-        } else if self
-            .probes
-            .iter()
-            .any(|probe| matches!(probe.health, Health::Queued | Health::Running))
-        {
-            Health::Running
-        } else if self
-            .probes
-            .iter()
-            .all(|probe| probe.health == Health::Unavailable)
-        {
-            Health::Unavailable
-        } else {
-            Health::Ok
+            return Situation {
+                health: Health::Degraded,
+                kind: SituationKind::InterfaceLoss,
+            };
         }
+
+        if !self.probe_policy.is_active() {
+            return Situation {
+                health: Health::Unavailable,
+                kind: SituationKind::PassiveObservation,
+            };
+        }
+
+        if matches!(
+            self.probe(ProbeKind::Gateway).health,
+            Health::Queued | Health::Running
+        ) {
+            return Situation {
+                health: Health::Running,
+                kind: SituationKind::Collecting,
+            };
+        }
+
+        if [ProbeKind::Dns, ProbeKind::Https]
+            .into_iter()
+            .any(|kind| self.probe_is_stale(kind))
+        {
+            return Situation {
+                health: Health::Unavailable,
+                kind: SituationKind::StalePathEvidence,
+            };
+        }
+
+        let gateway_unavailable = self.probe(ProbeKind::Gateway).health == Health::Unavailable;
+        let downstream_failed = [ProbeKind::Dns, ProbeKind::Https]
+            .into_iter()
+            .any(|kind| self.probe(kind).health == Health::Failed);
+        if gateway_unavailable && downstream_failed {
+            return Situation {
+                health: Health::Failed,
+                kind: SituationKind::UnlocalizedFailure,
+            };
+        }
+
+        if self.probe(ProbeKind::Dns).health == Health::Failed {
+            return Situation {
+                health: Health::Failed,
+                kind: SituationKind::DnsFailure,
+            };
+        }
+        if matches!(
+            self.probe(ProbeKind::Dns).health,
+            Health::Queued | Health::Running
+        ) {
+            return Situation {
+                health: Health::Running,
+                kind: SituationKind::Collecting,
+            };
+        }
+        if self.probe(ProbeKind::Dns).health == Health::Unavailable
+            && self.probe(ProbeKind::Https).health == Health::Failed
+        {
+            return Situation {
+                health: Health::Failed,
+                kind: SituationKind::UnlocalizedFailure,
+            };
+        }
+        if self.probe(ProbeKind::Https).health == Health::Failed {
+            return Situation {
+                health: Health::Failed,
+                kind: SituationKind::HttpsFailure,
+            };
+        }
+
+        if let Some(metrics) = self
+            .gateway_assessment_metrics()
+            .filter(|metrics| metrics.health() == Health::Degraded)
+        {
+            return Situation {
+                health: Health::Degraded,
+                kind: if metrics.lost > 0 {
+                    SituationKind::GatewayLoss
+                } else {
+                    SituationKind::GatewayVariation
+                },
+            };
+        }
+
+        if self.probe(ProbeKind::Dns).health == Health::Degraded {
+            return Situation {
+                health: Health::Degraded,
+                kind: SituationKind::SlowDns,
+            };
+        }
+        if self.probe(ProbeKind::Https).health == Health::Degraded {
+            return Situation {
+                health: Health::Degraded,
+                kind: SituationKind::SlowHttps,
+            };
+        }
+        if matches!(
+            self.probe(ProbeKind::Https).health,
+            Health::Queued | Health::Running
+        ) {
+            return Situation {
+                health: Health::Running,
+                kind: SituationKind::Collecting,
+            };
+        }
+
+        let gateway = self.probe(ProbeKind::Gateway);
+        if gateway.health == Health::Ok && self.gateway_attempts < MIN_GATEWAY_ASSESSMENT_SAMPLES {
+            return Situation {
+                health: Health::Running,
+                kind: SituationKind::WarmingBaseline,
+            };
+        }
+
+        if ProbeKind::PATH
+            .iter()
+            .all(|kind| self.probe(*kind).health == Health::Unavailable)
+        {
+            return Situation {
+                health: Health::Unavailable,
+                kind: SituationKind::EvidenceGap,
+            };
+        }
+
+        if self.evidence_coverage() != EvidenceCoverage::Complete {
+            Situation {
+                health: Health::Ok,
+                kind: SituationKind::EvidenceGap,
+            }
+        } else {
+            Situation {
+                health: Health::Ok,
+                kind: SituationKind::Ready,
+            }
+        }
+    }
+
+    pub fn evidence_coverage(&self) -> EvidenceCoverage {
+        if self.path_transition_pending {
+            return EvidenceCoverage::Collecting;
+        }
+        let active_probe_pending = self.probe_policy.is_active()
+            && self
+                .probes
+                .iter()
+                .any(|probe| matches!(probe.health, Health::Queued | Health::Running));
+        if active_probe_pending || self.peers.health == Health::Queued {
+            return EvidenceCoverage::Collecting;
+        }
+
+        let link_available = self.link.interface.is_some()
+            || self.link.gateway.is_some()
+            || !self.link.resolvers.is_empty()
+            || !self.link.addresses.is_empty();
+        let link_incomplete = self.link.interface.is_none()
+            || self.link.resolvers.is_empty()
+            || self.link.addresses.is_empty()
+            || self.interface_counters.is_none();
+        let radio_missing = self.link.requires_radio_evidence() && self.link.wifi.is_none();
+        let active_evidence_unavailable = !self.probe_policy.is_active()
+            || self
+                .probes
+                .iter()
+                .all(|probe| probe.health == Health::Unavailable);
+        let all_evidence_unavailable = !link_available
+            && active_evidence_unavailable
+            && self.peers.health == Health::Unavailable
+            && self.link.wifi.is_none();
+        if all_evidence_unavailable {
+            return EvidenceCoverage::Unavailable;
+        }
+        let active_evidence_incomplete = self.probe_policy.is_active()
+            && self.probes.iter().any(|probe| {
+                probe.health == Health::Unavailable || self.probe_is_stale(probe.kind)
+            });
+        if active_evidence_incomplete
+            || matches!(
+                self.peers.health,
+                Health::Degraded | Health::Failed | Health::Unavailable
+            )
+            || !self.peers.failed_sources.is_empty()
+            || link_incomplete
+            || radio_missing
+        {
+            EvidenceCoverage::Partial
+        } else {
+            EvidenceCoverage::Complete
+        }
+    }
+
+    pub fn gateway_assessment_metrics(&self) -> Option<LatencyMetrics> {
+        if self.gateway_attempts < MIN_GATEWAY_ASSESSMENT_SAMPLES {
+            return None;
+        }
+        let outcomes: Vec<_> = self
+            .gateway_outcomes
+            .iter()
+            .rev()
+            .take(GATEWAY_ASSESSMENT_WINDOW)
+            .rev()
+            .copied()
+            .collect();
+        let samples: Vec<_> = outcomes
+            .iter()
+            .flatten()
+            .map(|sample| *sample as f64)
+            .collect();
+        Some(LatencyMetrics::from_samples(&samples, outcomes.len()))
+    }
+
+    pub fn probe_age(&self, kind: ProbeKind) -> Option<Duration> {
+        self.probe(kind)
+            .updated_at
+            .map(|observed_at| Instant::now().saturating_duration_since(observed_at))
+    }
+
+    pub fn probe_view(&self, kind: ProbeKind) -> &ProbeView {
+        self.probe(kind)
+    }
+
+    fn probe_is_stale(&self, kind: ProbeKind) -> bool {
+        let max_age = match kind {
+            ProbeKind::Gateway => return false,
+            ProbeKind::Dns | ProbeKind::Https => MAX_PATH_PROBE_EVIDENCE_AGE,
+            ProbeKind::PublicIp => MAX_PUBLIC_EGRESS_EVIDENCE_AGE,
+        };
+        self.probe_age(kind).is_some_and(|age| age > max_age)
     }
 
     pub fn uptime(&self) -> Duration {
         self.started_at.elapsed()
+    }
+
+    pub fn peer_dwell(&self, peer: &Peer) -> Option<&PeerDwell> {
+        self.peer_dwell.get(&PeerKey::from_peer(peer))
+    }
+
+    pub fn peer_dwell_summary(&self) -> PeerDwellSummary {
+        PeerDwellSummary {
+            current: self.peers.peers.len(),
+            observed: self.peer_dwell.len(),
+            changed: self
+                .peer_dwell
+                .values()
+                .filter(|peer| {
+                    peer.state_changes > 0 || peer.binding_changes > 0 || peer.cache_returns > 0
+                })
+                .count(),
+            disappeared: self
+                .peer_dwell
+                .values()
+                .filter(|peer| !peer.currently_cached && peer.cache_disappearances > 0)
+                .count(),
+        }
+    }
+
+    fn apply_peer_snapshot(&mut self, snapshot: PeerSnapshot) {
+        let observed_at = self.uptime();
+        let previous_count = self.peers.peers.len();
+        let current_count = snapshot.peers.len();
+        let baseline_seen = self.peer_baseline_seen;
+        let complete = snapshot.failed_sources.is_empty()
+            && !matches!(snapshot.health, Health::Queued | Health::Unavailable);
+        let observed_keys: BTreeSet<_> = snapshot.peers.iter().map(PeerKey::from_peer).collect();
+        let mut events = Vec::new();
+
+        for peer in &snapshot.peers {
+            let key = PeerKey::from_peer(peer);
+            if let Some(dwell) = self.peer_dwell.get_mut(&key) {
+                let was_cached = dwell.currently_cached;
+                if !dwell.latest.binding_conflict
+                    && !peer.binding_conflict
+                    && dwell.latest.mac != peer.mac
+                {
+                    dwell.binding_changes += 1;
+                    events.push((
+                        Health::Degraded,
+                        format!(
+                            "neighbor binding changed: {} {} → {}",
+                            peer.address,
+                            dwell.latest.mac.as_deref().unwrap_or("unknown MAC"),
+                            peer.mac.as_deref().unwrap_or("unknown MAC")
+                        ),
+                    ));
+                }
+                if peer.binding_conflict && !dwell.latest.binding_conflict {
+                    events.push((
+                        Health::Running,
+                        format!(
+                            "neighbor sources disagree about the binding for {}",
+                            peer.address
+                        ),
+                    ));
+                }
+                if dwell.latest.state != peer.state {
+                    dwell.previous_state = dwell.latest.state.clone();
+                    dwell.state_changes += 1;
+                    events.push((
+                        Health::Running,
+                        format!(
+                            "neighbor state: {} {} → {}",
+                            peer.address,
+                            dwell.latest.state.as_deref().unwrap_or("cached"),
+                            peer.state.as_deref().unwrap_or("cached")
+                        ),
+                    ));
+                }
+                if !was_cached {
+                    dwell.cache_returns += 1;
+                    events.push((
+                        Health::Ok,
+                        format!("neighbor cache returned: {}", peer.address),
+                    ));
+                }
+                dwell.last_observed = observed_at;
+                dwell.observations += 1;
+                dwell.currently_cached = true;
+                dwell.latest = peer.clone();
+            } else {
+                self.peer_dwell.insert(
+                    key,
+                    PeerDwell {
+                        first_observed: observed_at,
+                        last_observed: observed_at,
+                        observations: 1,
+                        previous_state: None,
+                        state_changes: 0,
+                        binding_changes: 0,
+                        cache_disappearances: 0,
+                        cache_returns: 0,
+                        currently_cached: true,
+                        latest: peer.clone(),
+                    },
+                );
+                if baseline_seen {
+                    events.push((
+                        Health::Ok,
+                        format!("neighbor cache added: {}", peer.address),
+                    ));
+                }
+            }
+        }
+
+        if complete {
+            for (key, dwell) in &mut self.peer_dwell {
+                if dwell.currently_cached && !observed_keys.contains(key) {
+                    dwell.currently_cached = false;
+                    dwell.cache_disappearances += 1;
+                    if baseline_seen {
+                        events.push((
+                            Health::Running,
+                            format!(
+                                "neighbor cache absent: {} (not proof of departure)",
+                                dwell.latest.address
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        self.peers = snapshot;
+        self.peer_baseline_seen = true;
+        if previous_count != current_count {
+            self.push_event(
+                EventKind::Peer,
+                Health::Ok,
+                format!("neighbor cache: {current_count} entries"),
+            );
+        }
+        for (health, message) in events {
+            self.push_event(EventKind::Peer, health, message);
+        }
     }
 
     fn probe(&self, kind: ProbeKind) -> &ProbeView {
@@ -668,7 +1377,7 @@ impl App {
             .expect("all probe kinds are initialized")
     }
 
-    fn push_event(&mut self, health: Health, message: impl Into<String>) {
+    fn push_event(&mut self, kind: EventKind, health: Health, message: impl Into<String>) {
         if self.events.len() == MAX_EVENTS {
             self.events.pop_front();
         }
@@ -676,6 +1385,7 @@ impl App {
             elapsed: self.started_at.elapsed(),
             message: message.into(),
             health,
+            kind,
         });
     }
 }
@@ -700,9 +1410,41 @@ pub struct SnapshotProbe {
 
 #[derive(Debug, Serialize)]
 pub struct SnapshotSummary {
-    pub health: Health,
-    pub completed: usize,
-    pub total: usize,
+    pub probe_policy: ProbePolicy,
+    pub path_status: PathStatus,
+    pub evidence_coverage: EvidenceCoverage,
+    pub completed_probes: usize,
+    pub total_probes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathStatus {
+    Untested,
+    Ok,
+    Degraded,
+    Failed,
+    Unavailable,
+}
+
+impl PathStatus {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Untested => "UNTESTED",
+            Self::Ok => "OK",
+            Self::Degraded => "DEGRADED",
+            Self::Failed => "FAILED",
+            Self::Unavailable => "N/A",
+        }
+    }
+
+    pub const fn is_failed(self) -> bool {
+        matches!(self, Self::Failed)
+    }
+
+    pub const fn is_unavailable(self) -> bool {
+        matches!(self, Self::Unavailable)
+    }
 }
 
 impl SnapshotReport {
@@ -722,25 +1464,60 @@ impl SnapshotReport {
                 metrics: result.metrics,
             })
             .collect();
-        let health = if probes.iter().any(|probe| probe.health == Health::Failed) {
-            Health::Failed
-        } else if probes.iter().any(|probe| probe.health == Health::Degraded)
-            || neighbors.health == Health::Degraded
+        let path_probes = probes
+            .iter()
+            .filter(|probe| probe.kind.affects_path_health())
+            .collect::<Vec<_>>();
+        let path_status = if path_probes
+            .iter()
+            .any(|probe| probe.health == Health::Failed)
         {
-            Health::Degraded
-        } else if probes
+            PathStatus::Failed
+        } else if path_probes
+            .iter()
+            .any(|probe| probe.health == Health::Degraded)
+        {
+            PathStatus::Degraded
+        } else if path_probes
             .iter()
             .all(|probe| probe.health == Health::Unavailable)
         {
-            Health::Unavailable
+            PathStatus::Unavailable
         } else {
-            Health::Ok
+            PathStatus::Ok
+        };
+        let radio_missing = link.requires_radio_evidence() && link.wifi.is_none();
+        let local_evidence_incomplete =
+            link_evidence_incomplete(&link, interface_counters.as_ref());
+        let evidence_unavailable = probes
+            .iter()
+            .all(|probe| probe.health == Health::Unavailable)
+            && neighbors.health == Health::Unavailable
+            && (!link.requires_radio_evidence() || radio_missing);
+        let evidence_coverage = if evidence_unavailable {
+            EvidenceCoverage::Unavailable
+        } else if probes
+            .iter()
+            .any(|probe| probe.health == Health::Unavailable)
+            || matches!(
+                neighbors.health,
+                Health::Degraded | Health::Failed | Health::Unavailable
+            )
+            || !neighbors.failed_sources.is_empty()
+            || radio_missing
+            || local_evidence_incomplete
+        {
+            EvidenceCoverage::Partial
+        } else {
+            EvidenceCoverage::Complete
         };
         Self {
             summary: SnapshotSummary {
-                health,
-                completed: probes.len(),
-                total: ProbeKind::ALL.len(),
+                probe_policy: ProbePolicy::Active,
+                path_status,
+                evidence_coverage,
+                completed_probes: probes.len(),
+                total_probes: ProbeKind::ALL.len(),
             },
             link,
             interface_counters,
@@ -748,6 +1525,59 @@ impl SnapshotReport {
             probes,
         }
     }
+
+    pub fn from_passive(
+        link: LinkSnapshot,
+        interface_counters: Option<InterfaceCounters>,
+        neighbors: PeerSnapshot,
+    ) -> Self {
+        let link_available = link.interface.is_some()
+            || link.gateway.is_some()
+            || !link.resolvers.is_empty()
+            || !link.addresses.is_empty();
+        let radio_missing = link.requires_radio_evidence() && link.wifi.is_none();
+        let local_evidence_incomplete =
+            link_evidence_incomplete(&link, interface_counters.as_ref());
+        let evidence_coverage =
+            if !link_available && neighbors.health == Health::Unavailable && link.wifi.is_none() {
+                EvidenceCoverage::Unavailable
+            } else if link.interface.is_none()
+                || local_evidence_incomplete
+                || matches!(
+                    neighbors.health,
+                    Health::Degraded | Health::Failed | Health::Unavailable
+                )
+                || !neighbors.failed_sources.is_empty()
+                || radio_missing
+            {
+                EvidenceCoverage::Partial
+            } else {
+                EvidenceCoverage::Complete
+            };
+        Self {
+            summary: SnapshotSummary {
+                probe_policy: ProbePolicy::Passive,
+                path_status: PathStatus::Untested,
+                evidence_coverage,
+                completed_probes: 0,
+                total_probes: 0,
+            },
+            link,
+            interface_counters,
+            neighbors,
+            probes: Vec::new(),
+        }
+    }
+}
+
+fn link_evidence_incomplete(
+    link: &LinkSnapshot,
+    interface_counters: Option<&InterfaceCounters>,
+) -> bool {
+    link.interface.is_none()
+        || link.resolvers.is_empty()
+        || link.addresses.is_empty()
+        || interface_counters.is_none()
 }
 
 fn interface_rate(
@@ -788,8 +1618,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gateway_samples_are_bounded() {
+    fn passive_policy_is_default_and_rejects_late_probe_results() {
         let mut app = App::new();
+        assert_eq!(app.probe_policy(), ProbePolicy::Passive);
+        assert_eq!(app.situation().kind, SituationKind::PassiveObservation);
+        assert!(
+            app.probes
+                .iter()
+                .all(|probe| probe.detail == "active check disabled")
+        );
+
+        finish_probe(&mut app, ProbeKind::Gateway, Health::Ok, Some(4.0));
+        assert!(app.gateway_samples.is_empty());
+        assert_eq!(app.cycles, 0);
+        assert_eq!(app.situation().kind, SituationKind::PassiveObservation);
+    }
+
+    #[test]
+    fn operator_can_enable_and_disable_active_path_probes() {
+        let mut app = App::new();
+        app.set_probe_policy(ProbePolicy::Active);
+        assert_eq!(app.probe_policy(), ProbePolicy::Active);
+        assert!(
+            app.probes
+                .iter()
+                .all(|probe| probe.health == Health::Queued)
+        );
+        assert_eq!(app.situation().kind, SituationKind::Collecting);
+
+        finish_probe(&mut app, ProbeKind::Gateway, Health::Ok, Some(4.0));
+        assert_eq!(app.gateway_samples.back(), Some(&4));
+
+        app.set_probe_policy(ProbePolicy::Passive);
+        assert!(app.gateway_samples.is_empty());
+        assert!(app.link.public_ip.is_none());
+        assert_eq!(app.situation().kind, SituationKind::PassiveObservation);
+    }
+
+    #[test]
+    fn gateway_samples_are_bounded() {
+        let mut app = App::with_probe_policy(ProbePolicy::Active);
         for latency in 1..=MAX_GATEWAY_SAMPLES + 5 {
             app.apply(MonitorUpdate::ProbeFinished {
                 generation: 0,
@@ -808,7 +1676,7 @@ mod tests {
 
     #[test]
     fn failed_probe_controls_overall_health() {
-        let mut app = App::new();
+        let mut app = App::with_probe_policy(ProbePolicy::Active);
         for kind in ProbeKind::ALL {
             app.apply(MonitorUpdate::ProbeFinished {
                 generation: 0,
@@ -826,6 +1694,160 @@ mod tests {
             });
         }
         assert_eq!(app.overall_health(), Health::Failed);
+    }
+
+    #[test]
+    fn supporting_public_identity_does_not_control_path_health() {
+        let mut app = App::with_probe_policy(ProbePolicy::Active);
+        for _ in 0..MIN_GATEWAY_ASSESSMENT_SAMPLES {
+            finish_probe(&mut app, ProbeKind::Gateway, Health::Ok, Some(4.0));
+        }
+        finish_probe(&mut app, ProbeKind::Dns, Health::Ok, Some(12.0));
+        finish_probe(&mut app, ProbeKind::Https, Health::Ok, Some(80.0));
+        finish_probe(&mut app, ProbeKind::PublicIp, Health::Unavailable, None);
+
+        assert_eq!(
+            app.situation(),
+            Situation {
+                health: Health::Ok,
+                kind: SituationKind::EvidenceGap,
+            }
+        );
+        assert_eq!(app.evidence_coverage(), EvidenceCoverage::Collecting);
+    }
+
+    #[test]
+    fn gateway_distribution_warms_before_it_controls_health() {
+        let mut app = App::with_probe_policy(ProbePolicy::Active);
+        for _ in 0..MIN_GATEWAY_ASSESSMENT_SAMPLES - 1 {
+            finish_probe(&mut app, ProbeKind::Gateway, Health::Ok, Some(4.0));
+        }
+        finish_probe(&mut app, ProbeKind::Dns, Health::Ok, Some(12.0));
+        finish_probe(&mut app, ProbeKind::Https, Health::Ok, Some(80.0));
+
+        assert_eq!(
+            app.situation(),
+            Situation {
+                health: Health::Running,
+                kind: SituationKind::WarmingBaseline,
+            }
+        );
+
+        finish_probe(&mut app, ProbeKind::Gateway, Health::Ok, Some(4.0));
+        assert_eq!(app.overall_health(), Health::Ok);
+    }
+
+    #[test]
+    fn diagnosis_waits_for_an_earlier_dependency_before_blame() {
+        let mut app = App::with_probe_policy(ProbePolicy::Active);
+        finish_probe(&mut app, ProbeKind::Dns, Health::Failed, None);
+        assert_eq!(app.situation().kind, SituationKind::Collecting);
+
+        finish_probe(&mut app, ProbeKind::Gateway, Health::Ok, Some(4.0));
+        assert_eq!(app.situation().kind, SituationKind::DnsFailure);
+    }
+
+    #[test]
+    fn unavailable_dependency_prevents_false_downstream_localization() {
+        let mut gateway_unknown = App::with_probe_policy(ProbePolicy::Active);
+        finish_probe(
+            &mut gateway_unknown,
+            ProbeKind::Gateway,
+            Health::Unavailable,
+            None,
+        );
+        finish_probe(&mut gateway_unknown, ProbeKind::Dns, Health::Failed, None);
+        assert_eq!(
+            gateway_unknown.situation(),
+            Situation {
+                health: Health::Failed,
+                kind: SituationKind::UnlocalizedFailure,
+            }
+        );
+
+        let mut dns_unknown = App::with_probe_policy(ProbePolicy::Active);
+        finish_probe(&mut dns_unknown, ProbeKind::Gateway, Health::Ok, Some(4.0));
+        finish_probe(&mut dns_unknown, ProbeKind::Dns, Health::Unavailable, None);
+        finish_probe(&mut dns_unknown, ProbeKind::Https, Health::Failed, None);
+        assert_eq!(
+            dns_unknown.situation().kind,
+            SituationKind::UnlocalizedFailure
+        );
+    }
+
+    #[test]
+    fn icmp_silence_does_not_override_successful_downstream_path() {
+        let mut app = App::with_probe_policy(ProbePolicy::Active);
+        finish_probe(&mut app, ProbeKind::Gateway, Health::Unavailable, None);
+        finish_probe(&mut app, ProbeKind::Dns, Health::Ok, Some(12.0));
+        finish_probe(&mut app, ProbeKind::Https, Health::Ok, Some(80.0));
+        finish_probe(&mut app, ProbeKind::PublicIp, Health::Unavailable, None);
+
+        assert_eq!(
+            app.situation(),
+            Situation {
+                health: Health::Ok,
+                kind: SituationKind::EvidenceGap,
+            }
+        );
+    }
+
+    #[test]
+    fn aged_internet_probes_stop_supporting_a_current_verdict() {
+        let mut app = App::with_probe_policy(ProbePolicy::Active);
+        let mut link = test_link("en0", "house", "192.168.1.1");
+        link.link_type = Some("ethernet".into());
+        link.ssid = None;
+        app.link = link;
+        app.interface_counters = Some(InterfaceCounters {
+            interface: "en0".into(),
+            received_bytes: 1,
+            transmitted_bytes: 2,
+            received_packets: 3,
+            transmitted_packets: 4,
+            receive_errors: 0,
+            transmit_errors: 0,
+            drops: 0,
+        });
+        app.peers = PeerSnapshot {
+            health: Health::Ok,
+            detail: "complete native cache".into(),
+            sources: vec!["arp -an".into(), "ndp -an".into()],
+            failed_sources: Vec::new(),
+            oui_source: None,
+            peers: Vec::new(),
+        };
+        for _ in 0..MIN_GATEWAY_ASSESSMENT_SAMPLES {
+            finish_probe(&mut app, ProbeKind::Gateway, Health::Ok, Some(4.0));
+        }
+        finish_probe(&mut app, ProbeKind::Dns, Health::Ok, Some(12.0));
+        finish_probe(&mut app, ProbeKind::Https, Health::Ok, Some(80.0));
+        finish_probe(&mut app, ProbeKind::PublicIp, Health::Ok, Some(90.0));
+        app.probe_mut(ProbeKind::Dns).updated_at =
+            Some(Instant::now() - MAX_PATH_PROBE_EVIDENCE_AGE - Duration::from_secs(1));
+
+        assert_eq!(
+            app.situation(),
+            Situation {
+                health: Health::Unavailable,
+                kind: SituationKind::StalePathEvidence,
+            }
+        );
+        assert_eq!(app.evidence_coverage(), EvidenceCoverage::Partial);
+    }
+
+    #[test]
+    fn failed_path_stage_outranks_degraded_upstream_distribution() {
+        let mut app = App::with_probe_policy(ProbePolicy::Active);
+        for latency_ms in [4.0, 40.0, 4.0, 40.0, 4.0] {
+            finish_probe(&mut app, ProbeKind::Gateway, Health::Ok, Some(latency_ms));
+        }
+        finish_probe(&mut app, ProbeKind::Dns, Health::Failed, None);
+        assert_eq!(app.situation().kind, SituationKind::DnsFailure);
+
+        finish_probe(&mut app, ProbeKind::Dns, Health::Degraded, Some(700.0));
+        finish_probe(&mut app, ProbeKind::Https, Health::Failed, None);
+        assert_eq!(app.situation().kind, SituationKind::HttpsFailure);
     }
 
     #[test]
@@ -861,7 +1883,7 @@ mod tests {
 
     #[test]
     fn rolling_gateway_metrics_count_failed_attempts() {
-        let mut app = App::new();
+        let mut app = App::with_probe_policy(ProbePolicy::Active);
         for latency in [Some(10.0), None, Some(12.0)] {
             app.apply(MonitorUpdate::ProbeFinished {
                 generation: 0,
@@ -879,6 +1901,21 @@ mod tests {
         assert_eq!(metrics.received, 2);
         assert_eq!(metrics.lost, 1);
         assert_eq!(metrics.loss_rate, Some(1.0 / 3.0));
+    }
+
+    #[test]
+    fn gateway_health_uses_the_recent_assessment_window() {
+        let mut app = App::with_probe_policy(ProbePolicy::Active);
+        finish_probe(&mut app, ProbeKind::Gateway, Health::Failed, None);
+        for _ in 0..GATEWAY_ASSESSMENT_WINDOW {
+            finish_probe(&mut app, ProbeKind::Gateway, Health::Ok, Some(4.0));
+        }
+
+        let metrics = app.gateway_assessment_metrics().unwrap();
+        assert_eq!(metrics.sent, GATEWAY_ASSESSMENT_WINDOW);
+        assert_eq!(metrics.lost, 0);
+        assert_eq!(metrics.health(), Health::Ok);
+        assert_eq!(app.gateway_metrics.as_ref().unwrap().lost, 1);
     }
 
     #[test]
@@ -922,6 +1959,78 @@ mod tests {
         assert_eq!(app.peers.health, Health::Queued);
         assert!(app.events.back().unwrap().message.contains("house"));
         assert!(app.events.back().unwrap().message.contains("phone-hotspot"));
+        let change = app.last_path_change.as_ref().unwrap();
+        assert!(change.dimensions.contains(&"SSID"));
+        assert!(change.dimensions.contains(&"gateway"));
+        assert!(change.previous.contains("house"));
+        assert!(change.current.contains("phone-hotspot"));
+    }
+
+    #[test]
+    fn stale_workload_sample_cannot_cross_a_path_generation() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: test_link("en0", "house", "192.168.1.1"),
+        });
+        app.apply(MonitorUpdate::Link {
+            generation: 2,
+            snapshot: test_link("en0", "phone-hotspot", "172.20.10.1"),
+        });
+        app.apply(MonitorUpdate::Workload {
+            generation: 1,
+            snapshot: WorkloadSnapshot {
+                health: Health::Ok,
+                detail: "one process".into(),
+                source: Some("nettop".into()),
+                interval: Duration::from_secs(1),
+                processes: vec![ProcessTraffic {
+                    process: "stale-process".into(),
+                    processes: 1,
+                    received_bytes_per_second: 100,
+                    transmitted_bytes_per_second: 200,
+                }],
+            },
+        });
+
+        assert!(app.workload.processes.is_empty());
+        assert_eq!(app.workload.health, Health::Queued);
+    }
+
+    #[test]
+    fn route_settling_retains_the_confirmed_generation_until_link_recovers() {
+        let mut app = App::new();
+        let link = test_link("en0", "house", "192.168.1.1");
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: link.clone(),
+        });
+        app.apply(MonitorUpdate::PathSettling { generation: 1 });
+        app.apply(MonitorUpdate::PathSettling { generation: 1 });
+
+        assert!(app.path_transition_pending);
+        assert_eq!(app.path_generation, 1);
+        assert_eq!(app.overall_health(), Health::Running);
+        assert!(
+            app.events
+                .back()
+                .unwrap()
+                .message
+                .contains("retaining the last confirmed path")
+        );
+        assert_eq!(
+            app.events
+                .iter()
+                .filter(|event| event.message.contains("retaining the last confirmed path"))
+                .count(),
+            1
+        );
+
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: link,
+        });
+        assert!(!app.path_transition_pending);
     }
 
     #[test]
@@ -947,6 +2056,7 @@ mod tests {
         });
         app.apply(MonitorUpdate::Wifi {
             generation: 1,
+            ssid: Some("stale-network".into()),
             telemetry: Some(WifiTelemetry {
                 signal_dbm: Some(-30.0),
                 noise_dbm: None,
@@ -968,6 +2078,40 @@ mod tests {
     }
 
     #[test]
+    fn platform_wifi_evidence_can_resolve_an_os_hidden_ssid() {
+        let mut app = App::new();
+        let mut link = test_link("en0", "placeholder", "192.168.1.1");
+        link.ssid = None;
+        link.ssid_restricted = true;
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: link.clone(),
+        });
+        app.apply(MonitorUpdate::Wifi {
+            generation: 1,
+            ssid: Some("house-wifi".into()),
+            telemetry: None,
+        });
+
+        assert_eq!(app.link.ssid.as_deref(), Some("house-wifi"));
+        assert!(!app.link.ssid_restricted);
+        assert!(
+            app.events
+                .back()
+                .unwrap()
+                .message
+                .contains("network identity resolved")
+        );
+
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: link,
+        });
+        assert_eq!(app.link.ssid.as_deref(), Some("house-wifi"));
+        assert!(!app.link.ssid_restricted);
+    }
+
+    #[test]
     fn temporary_address_rotation_does_not_change_path_identity() {
         let before = test_link("en0", "house", "192.168.1.1");
         let mut after = before.clone();
@@ -985,6 +2129,32 @@ mod tests {
 
         rotated.addresses.last_mut().unwrap().address = "2001:db8:abcd:2::9876".into();
         assert_ne!(after.path_fingerprint(), rotated.path_fingerprint());
+    }
+
+    #[test]
+    fn wifi_association_change_is_path_identity_when_ssid_is_hidden() {
+        let mut before = test_link("en0", "placeholder", "192.168.1.1");
+        before.ssid = None;
+        before.ssid_restricted = true;
+        before.network_configuration = Some(Box::new(NetworkConfiguration {
+            connection_id: Some("101".into()),
+            method: Some("DHCP".into()),
+            state: Some("BOUND".into()),
+            server: Some("192.168.1.1".into()),
+            subnet_mask: Some("255.255.255.0".into()),
+            lease_seconds: Some(43_200),
+            lease_started_at: None,
+            lease_expires_at: None,
+            router_arp_verified: Some(true),
+            security: Some("WPA2_PSK".into()),
+        }));
+        let mut after = before.clone();
+        after.network_configuration.as_mut().unwrap().connection_id = Some("102".into());
+
+        let before = before.path_fingerprint();
+        let after = after.path_fingerprint();
+        assert_ne!(before, after);
+        assert_eq!(before.changed_dimensions(&after), vec!["Wi-Fi association"]);
     }
 
     #[test]
@@ -1049,7 +2219,233 @@ mod tests {
             neighbors,
             results,
         );
-        assert_eq!(report.summary.health, Health::Degraded);
+        assert_eq!(report.summary.path_status, PathStatus::Ok);
+        assert_eq!(report.summary.evidence_coverage, EvidenceCoverage::Partial);
+    }
+
+    #[test]
+    fn passive_snapshot_reports_untested_instead_of_unavailable_path() {
+        let report = SnapshotReport::from_passive(
+            test_link("en0", "house", "192.168.1.1"),
+            None,
+            PeerSnapshot {
+                health: Health::Ok,
+                detail: "native neighbor cache read".into(),
+                sources: vec!["arp -an".into(), "ndp -an".into()],
+                failed_sources: Vec::new(),
+                oui_source: None,
+                peers: Vec::new(),
+            },
+        );
+
+        assert_eq!(report.summary.probe_policy, ProbePolicy::Passive);
+        assert_eq!(report.summary.path_status, PathStatus::Untested);
+        assert!(report.probes.is_empty());
+    }
+
+    #[test]
+    fn passive_complete_requires_every_expected_host_local_source() {
+        let mut link = test_link("en0", "house", "192.168.1.1");
+        link.link_type = Some("ethernet".into());
+        link.ssid = None;
+        let counters = InterfaceCounters {
+            interface: "en0".into(),
+            received_bytes: 1,
+            transmitted_bytes: 2,
+            received_packets: 3,
+            transmitted_packets: 4,
+            receive_errors: 0,
+            transmit_errors: 0,
+            drops: 0,
+        };
+        let neighbors = PeerSnapshot {
+            health: Health::Ok,
+            detail: "complete native cache".into(),
+            sources: vec!["arp -an".into(), "ndp -an".into()],
+            failed_sources: Vec::new(),
+            oui_source: None,
+            peers: Vec::new(),
+        };
+
+        let complete =
+            SnapshotReport::from_passive(link.clone(), Some(counters.clone()), neighbors.clone());
+        assert_eq!(
+            complete.summary.evidence_coverage,
+            EvidenceCoverage::Complete
+        );
+
+        let mut without_resolvers = link.clone();
+        without_resolvers.resolvers.clear();
+        let missing_resolvers = SnapshotReport::from_passive(
+            without_resolvers,
+            Some(counters.clone()),
+            neighbors.clone(),
+        );
+        assert_eq!(
+            missing_resolvers.summary.evidence_coverage,
+            EvidenceCoverage::Partial
+        );
+
+        let mut without_addresses = link.clone();
+        without_addresses.addresses.clear();
+        let missing_addresses =
+            SnapshotReport::from_passive(without_addresses, Some(counters), neighbors.clone());
+        assert_eq!(
+            missing_addresses.summary.evidence_coverage,
+            EvidenceCoverage::Partial
+        );
+
+        let missing_counters = SnapshotReport::from_passive(link, None, neighbors);
+        assert_eq!(
+            missing_counters.summary.evidence_coverage,
+            EvidenceCoverage::Partial
+        );
+    }
+
+    #[test]
+    fn missing_wifi_radio_evidence_makes_snapshot_coverage_partial() {
+        let results = ProbeKind::ALL
+            .into_iter()
+            .map(|kind| {
+                (
+                    kind,
+                    ProbeResult {
+                        health: Health::Ok,
+                        detail: "complete".into(),
+                        latency_ms: Some(1.0),
+                        metrics: None,
+                    },
+                )
+            })
+            .collect();
+        let report = SnapshotReport::from_results(
+            test_link("en0", "house", "192.168.1.1"),
+            None,
+            PeerSnapshot {
+                health: Health::Ok,
+                detail: "complete native cache".into(),
+                sources: vec!["arp -an".into(), "ndp -an".into()],
+                failed_sources: Vec::new(),
+                oui_source: None,
+                peers: Vec::new(),
+            },
+            results,
+        );
+
+        assert_eq!(report.summary.path_status, PathStatus::Ok);
+        assert_eq!(report.summary.evidence_coverage, EvidenceCoverage::Partial);
+    }
+
+    #[test]
+    fn peer_dwell_records_state_and_binding_changes_at_constant_count() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: test_link("en0", "house", "192.168.1.1"),
+        });
+        app.apply(MonitorUpdate::Peers {
+            generation: 1,
+            snapshot: test_peers(Some("02:00:00:00:00:01"), Some("STALE")),
+        });
+        app.apply(MonitorUpdate::Peers {
+            generation: 1,
+            snapshot: test_peers(Some("02:00:00:00:00:02"), Some("REACHABLE")),
+        });
+
+        let peer = &app.peers.peers[0];
+        let dwell = app.peer_dwell(peer).unwrap();
+        assert_eq!(dwell.observations, 2);
+        assert_eq!(dwell.binding_changes, 1);
+        assert_eq!(dwell.state_changes, 1);
+        assert_eq!(dwell.previous_state.as_deref(), Some("STALE"));
+        assert_eq!(
+            app.peer_dwell_summary(),
+            PeerDwellSummary {
+                current: 1,
+                observed: 1,
+                changed: 1,
+                disappeared: 0,
+            }
+        );
+        assert!(
+            app.events
+                .iter()
+                .any(|event| event.message.contains("binding changed"))
+        );
+        assert!(
+            app.events
+                .iter()
+                .any(|event| event.message.contains("STALE → REACHABLE"))
+        );
+    }
+
+    #[test]
+    fn same_snapshot_binding_conflict_is_not_temporal_churn() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Peers {
+            generation: 0,
+            snapshot: test_peers(Some("02:00:00:00:00:01"), Some("STALE")),
+        });
+        let mut conflicted = test_peers(None, Some("STALE"));
+        conflicted.health = Health::Degraded;
+        conflicted.peers[0].binding_conflict = true;
+        app.apply(MonitorUpdate::Peers {
+            generation: 0,
+            snapshot: conflicted,
+        });
+
+        let peer = &app.peers.peers[0];
+        let dwell = app.peer_dwell(peer).unwrap();
+        assert_eq!(dwell.binding_changes, 0);
+        assert!(
+            app.events
+                .iter()
+                .any(|event| event.message.contains("sources disagree"))
+        );
+        assert!(
+            app.events
+                .iter()
+                .all(|event| !event.message.contains("binding changed"))
+        );
+    }
+
+    #[test]
+    fn partial_peer_sources_do_not_invent_cache_disappearance() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Peers {
+            generation: 0,
+            snapshot: test_peers(Some("02:00:00:00:00:01"), Some("STALE")),
+        });
+        app.apply(MonitorUpdate::Peers {
+            generation: 0,
+            snapshot: PeerSnapshot {
+                health: Health::Degraded,
+                detail: "IPv6 cache unavailable".into(),
+                sources: vec!["arp -an".into()],
+                failed_sources: vec!["ndp -an".into()],
+                oui_source: None,
+                peers: Vec::new(),
+            },
+        });
+        assert_eq!(app.peer_dwell_summary().disappeared, 0);
+
+        app.apply(MonitorUpdate::Peers {
+            generation: 0,
+            snapshot: PeerSnapshot {
+                health: Health::Ok,
+                detail: "empty complete cache".into(),
+                sources: vec!["arp -an".into(), "ndp -an".into()],
+                failed_sources: Vec::new(),
+                oui_source: None,
+                peers: Vec::new(),
+            },
+        });
+        assert_eq!(app.peer_dwell_summary().disappeared, 1);
+        assert!(
+            app.events
+                .iter()
+                .any(|event| event.message.contains("not proof of departure"))
+        );
     }
 
     fn test_link(interface: &str, ssid: &str, gateway: &str) -> LinkSnapshot {
@@ -1070,6 +2466,39 @@ mod tests {
                 is_default: true,
                 is_temporary: false,
             }],
+            network_configuration: None,
         }
+    }
+
+    fn test_peers(mac: Option<&str>, state: Option<&str>) -> PeerSnapshot {
+        PeerSnapshot {
+            health: Health::Ok,
+            detail: "1 cached peer".into(),
+            sources: vec!["arp -an".into(), "ndp -an".into()],
+            failed_sources: Vec::new(),
+            oui_source: None,
+            peers: vec![Peer {
+                address: "192.168.1.42".into(),
+                mac: mac.map(str::to_owned),
+                interface: Some("en0".into()),
+                state: state.map(str::to_owned),
+                binding_conflict: false,
+                mac_scope: Some(MacScope::Local),
+                registrant: None,
+            }],
+        }
+    }
+
+    fn finish_probe(app: &mut App, kind: ProbeKind, health: Health, latency_ms: Option<f64>) {
+        app.apply(MonitorUpdate::ProbeFinished {
+            generation: app.path_generation,
+            kind,
+            result: ProbeResult {
+                health,
+                detail: "test evidence".into(),
+                latency_ms,
+                metrics: None,
+            },
+        });
     }
 }

@@ -37,7 +37,17 @@ stdin and stdout are terminals. The link view refreshes local route, radio, addr
 counters without Internet probes. The peers view rereads only native neighbor
 caches, never scans, restricts rows to the active interface and current address
 prefixes, and supports keyboard scrolling through the complete current-path cache.
-It reports partial native-source completion as degraded evidence.
+It reports partial native-source completion as degraded evidence. During the
+current path generation it also retains process-local first/last observation,
+observation count, kernel-state changes, MAC binding changes, confirmed cache
+disappearance, and later cache return. An incomplete native-source read may add
+positive observations but cannot prove that an unseen row disappeared.
+
+An overview TUI may switch its display in-process with `1` overview, `2` link,
+`3` peers, or `Tab`. That session retains the overview collection plan while a
+focused display is selected because it already owns the superset of evidence.
+The direct `link` and `peers` entry points keep their narrower passive plans and
+do not silently widen collection merely to enable every display.
 
 Keep noninteractive `link` and `peers` output as one bounded snapshot when neither
 `--plain` nor `--dwell` requests an observation lifetime. `--plain` explicitly
@@ -66,8 +76,13 @@ is an explicit export mode rather than the default display.
 An operator running `linktop link` or `linktop peers` now quits explicitly or
 uses `--dwell`; a script receiving redirected stdout still gets one report.
 Focused monitoring has workload-specific schedules and single-flight cache or
-platform readers. The overview declares truncated peers with a handoff to the
-focused command instead of silently hiding them.
+platform readers. The overview summarizes peer evidence with a handoff to the
+focused view instead of squeezing inventory into its diagnostic surface. An
+operator can drill down without restarting an overview session, while direct
+focused invocations still make their lower-activity boundary explicit.
+Peer dwell now exposes cache evolution that a one-shot row cannot show, but it
+remains path-generation-scoped and disappears when the process exits. A cache
+absence is labelled as such, never as device or person departure.
 
 The CLI now has a policy matrix that must be tested as a contract. Adding an
 NDJSON stream, a one-shot terminal modifier, or a new focused subject crosses

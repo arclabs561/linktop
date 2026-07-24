@@ -4,10 +4,15 @@ check:
     cargo +1.88 test
     cargo +1.88 clippy --all-targets -- -D warnings
 
-# Capture a real fixed-size TUI frame to a private ignored text file and PNG.
-capture-ui view="overview" columns="140" rows="30":
-    cargo build --quiet --bin linktop
-    cargo run --quiet --example capture_ui -- {{view}} {{columns}} {{rows}}
+# Run a real live view headlessly and save private, styled frames at the
+# requested elapsed seconds. Comma-separated times produce several frames.
+capture-ui view="overview" columns="140" rows="30" at="5":
+    cargo run --quiet -- screenshot {{view}} --at {{at}} --columns {{columns}} --rows {{rows}} --output-dir .agents/reports/ui-captures
+
+# Exercise the installed TUI path inside a real fixed-size PTY. This requires
+# tmux and emits plain text, ANSI, and a self-contained HTML view.
+capture-native view="overview" columns="140" rows="30" at="5":
+    cargo run --quiet -- screenshot {{view}} --native --at {{at}} --columns {{columns}} --rows {{rows}} --output-dir .agents/reports/ui-captures
 
 # Install the release binary in Cargo's PATH directory and retain the old names
 # as compatibility aliases. Refuse to replace user-owned regular files.

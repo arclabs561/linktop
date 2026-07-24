@@ -27,6 +27,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ansi-to-html"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1747e9bde0e06cdfa780fcba909df1fa220f82421ead1fd4a93427763d2cbda6"
+dependencies = [
+ "memchr",
+ "regex",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1183,6 +1193,7 @@ dependencies = [
 name = "linktop"
 version = "0.1.0"
 dependencies = [
+ "ansi-to-html",
  "anyhow",
  "chrono",
  "clap",

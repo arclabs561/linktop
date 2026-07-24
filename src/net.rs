@@ -1,11 +1,11 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -17,22 +17,37 @@ use serde_json::Value;
 use crate::metrics::LatencyMetrics;
 use crate::model::{
     Address, Health, InterfaceCounters, LinkSnapshot, MonitorControl, MonitorMode, MonitorUpdate,
-    ProbeKind, ProbeResult, SnapshotReport, WifiTelemetry,
+    NetworkConfiguration, ProbeKind, ProbePolicy, ProbeResult, ProcessTraffic, SnapshotReport,
+    WifiTelemetry, WorkloadSnapshot,
 };
 use crate::{peers, process};
 
 const HTTPS_TARGET: &str = "https://example.com/";
 const DNS_TARGET: &str = "example.com:443";
+const DNS_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const SNAPSHOT_GATEWAY_ATTEMPTS: usize = 10;
+const FULL_LINK_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+const PATH_TRANSITION_GRACE: Duration = Duration::from_secs(3);
+const ACTIVE_PATH_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const WORKLOAD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const WORKLOAD_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const PUBLIC_ENDPOINTS: [&str; 3] = [
     "https://api.ipify.org",
     "https://icanhazip.com",
     "https://wtfismyip.com/text",
 ];
+static DNS_RESOLUTION_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Default)]
+struct WifiObservation {
+    ssid: Option<String>,
+    telemetry: Option<WifiTelemetry>,
+}
 
 pub fn start_monitor(
     interval: Duration,
     mode: MonitorMode,
+    probe_policy: ProbePolicy,
 ) -> (
     Receiver<MonitorUpdate>,
     Sender<MonitorControl>,
@@ -40,28 +55,39 @@ pub fn start_monitor(
 ) {
     let (update_tx, update_rx) = mpsc::channel();
     let (control_tx, control_rx) = mpsc::channel();
-    let handle = thread::spawn(move || monitor_loop(interval, mode, update_tx, control_rx));
+    let handle =
+        thread::spawn(move || monitor_loop(interval, mode, probe_policy, update_tx, control_rx));
     (update_rx, control_tx, handle)
 }
 
 fn monitor_loop(
     interval: Duration,
     mode: MonitorMode,
+    mut probe_policy: ProbePolicy,
     update_tx: Sender<MonitorUpdate>,
     control_rx: Receiver<MonitorControl>,
 ) {
     let mut paused = false;
     let mut stopped = false;
-    let mut internet_refresh_pending = [true; 3];
+    let mut internet_refresh_pending = [probe_policy.is_active(); 3];
+    let mut internet_last_started = [None; 3];
+    let mut workload_refresh_pending = true;
+    let mut workload_last_started = None;
     let mut peers_refresh_pending = true;
     let mut wifi_refresh_pending = true;
+    let mut full_link_refresh_pending = true;
+    let mut full_link_refreshed_at = None;
+    let mut current_link = None;
     let mut tick = 0_u64;
     let mut gateway = None;
     let mut interface = None;
     let mut path_generation = 0_u64;
     let mut path_fingerprint = None;
+    let mut incomplete_route_since = None;
     let probe_in_flight = Arc::new(std::array::from_fn::<_, 4, _>(|_| AtomicBool::new(false)));
+    let probe_epoch = Arc::new(AtomicU64::new(0));
     let traffic_in_flight = Arc::new(AtomicBool::new(false));
+    let workload_in_flight = Arc::new(AtomicBool::new(false));
     let peers_in_flight = Arc::new(AtomicBool::new(false));
     let wifi_in_flight = Arc::new(AtomicBool::new(false));
     let sleep_step = Duration::from_millis(100);
@@ -71,9 +97,19 @@ fn monitor_loop(
         while let Ok(control) = control_rx.try_recv() {
             match control {
                 MonitorControl::Refresh => {
-                    internet_refresh_pending.fill(true);
+                    internet_refresh_pending.fill(probe_policy.is_active());
+                    workload_refresh_pending = true;
                     peers_refresh_pending = true;
                     wifi_refresh_pending = true;
+                    full_link_refresh_pending = true;
+                }
+                MonitorControl::SetProbePolicy(policy) => {
+                    if probe_policy != policy {
+                        probe_policy = policy;
+                        probe_epoch.fetch_add(1, Ordering::AcqRel);
+                        internet_refresh_pending.fill(policy.is_active());
+                        internet_last_started.fill(None);
+                    }
                 }
                 MonitorControl::Pause(value) => paused = value,
                 MonitorControl::Stop => stopped = true,
@@ -84,59 +120,125 @@ fn monitor_loop(
         }
 
         if !paused {
-            let link = collect_link();
+            let now = Instant::now();
+            let periodic_full_refresh = full_link_refreshed_at.is_none_or(|last| {
+                now.saturating_duration_since(last) >= FULL_LINK_REFRESH_INTERVAL
+            });
+            let full_refresh_due =
+                full_link_refresh_pending || periodic_full_refresh || current_link.is_none();
+            let mut link = if full_refresh_due {
+                full_link_refresh_pending = false;
+                full_link_refreshed_at = Some(now);
+                collect_link()
+            } else {
+                collect_light_link(
+                    current_link
+                        .as_ref()
+                        .expect("monitor link exists after its first full refresh"),
+                )
+            };
+            if current_link
+                .as_ref()
+                .is_some_and(|previous| previous.path_fingerprint() != link.path_fingerprint())
+                && !full_refresh_due
+            {
+                link = collect_link();
+                full_link_refreshed_at = Some(now);
+            }
+            let path_settling = should_hold_incomplete_route(
+                current_link.as_ref(),
+                &link,
+                &mut incomplete_route_since,
+                now,
+            );
+            if path_settling {
+                link = current_link
+                    .clone()
+                    .expect("route settling requires a previous confirmed path");
+            }
+            current_link = Some(link.clone());
             let fingerprint = link.path_fingerprint();
             if path_fingerprint.as_ref() != Some(&fingerprint) {
                 path_generation = path_generation.wrapping_add(1).max(1);
                 path_fingerprint = Some(fingerprint);
-                internet_refresh_pending.fill(true);
+                internet_refresh_pending.fill(probe_policy.is_active());
+                internet_last_started.fill(None);
+                workload_refresh_pending = true;
+                workload_last_started = None;
                 peers_refresh_pending = true;
                 wifi_refresh_pending = true;
             }
             gateway.clone_from(&link.gateway);
             interface.clone_from(&link.interface);
-            let _ = update_tx.send(MonitorUpdate::Link {
-                generation: path_generation,
-                snapshot: link.clone(),
-            });
-
-            match mode {
-                MonitorMode::Overview => {
-                    spawn_probe(
-                        ProbeKind::Gateway,
-                        gateway.clone(),
-                        update_tx.clone(),
-                        1,
-                        path_generation,
-                        probe_in_flight.clone(),
-                    );
-                    spawn_traffic(
-                        interface.clone(),
-                        update_tx.clone(),
-                        path_generation,
-                        traffic_in_flight.clone(),
-                    );
-                }
-                MonitorMode::Link => {
-                    spawn_traffic(
-                        interface.clone(),
-                        update_tx.clone(),
-                        path_generation,
-                        traffic_in_flight.clone(),
-                    );
-                }
-                MonitorMode::Peers => {}
+            if path_settling {
+                let _ = update_tx.send(MonitorUpdate::PathSettling {
+                    generation: path_generation,
+                });
+            } else {
+                let _ = update_tx.send(MonitorUpdate::Link {
+                    generation: path_generation,
+                    snapshot: link.clone(),
+                });
             }
 
-            // Internet probes are a bounded startup, transition, or manual
-            // refresh diagnostic rather than background traffic coupled to
-            // the gateway sample rate.
-            if mode == MonitorMode::Overview {
-                for (pending, kind) in internet_refresh_pending.iter_mut().zip([
-                    ProbeKind::Dns,
-                    ProbeKind::Https,
-                    ProbeKind::PublicIp,
-                ]) {
+            match (mode, path_settling) {
+                (MonitorMode::Overview, false) => {
+                    if permits_active_probes(mode, probe_policy) {
+                        spawn_probe(
+                            ProbeKind::Gateway,
+                            gateway.clone(),
+                            update_tx.clone(),
+                            1,
+                            path_generation,
+                            probe_in_flight.clone(),
+                            probe_epoch.clone(),
+                        );
+                    }
+                    spawn_traffic(
+                        interface.clone(),
+                        update_tx.clone(),
+                        path_generation,
+                        traffic_in_flight.clone(),
+                    );
+                }
+                (MonitorMode::Link, false) => {
+                    spawn_traffic(
+                        interface.clone(),
+                        update_tx.clone(),
+                        path_generation,
+                        traffic_in_flight.clone(),
+                    );
+                }
+                (MonitorMode::Peers, false)
+                | (MonitorMode::Overview | MonitorMode::Link | MonitorMode::Peers, true) => {}
+            }
+
+            let workload_due = workload_last_started.is_none_or(|last| {
+                now.saturating_duration_since(last) >= WORKLOAD_REFRESH_INTERVAL
+            });
+            if mode == MonitorMode::Overview
+                && !path_settling
+                && (workload_refresh_pending || workload_due)
+                && spawn_workload(
+                    update_tx.clone(),
+                    path_generation,
+                    workload_in_flight.clone(),
+                )
+            {
+                workload_refresh_pending = false;
+                workload_last_started = Some(now);
+            }
+
+            // Internet probes are bounded startup, transition, manual, or
+            // disclosed low-cadence diagnostics rather than traffic coupled
+            // to the gateway sample rate.
+            if permits_active_probes(mode, probe_policy) && !path_settling {
+                let internet_kinds = [ProbeKind::Dns, ProbeKind::Https, ProbeKind::PublicIp];
+                for (index, kind) in internet_kinds.into_iter().enumerate() {
+                    if periodic_internet_probe_due(kind, internet_last_started[index], now) {
+                        internet_refresh_pending[index] = true;
+                    }
+                    let pending = &mut internet_refresh_pending[index];
                     if *pending
                         && spawn_probe(
                             kind,
@@ -145,68 +247,72 @@ fn monitor_loop(
                             1,
                             path_generation,
                             probe_in_flight.clone(),
+                            probe_epoch.clone(),
                         )
                     {
                         *pending = false;
+                        internet_last_started[index] = Some(now);
                     }
                 }
             }
 
-            if tick.is_multiple_of(15) && mode == MonitorMode::Overview {
+            if !path_settling && tick.is_multiple_of(15) && mode == MonitorMode::Overview {
                 peers_refresh_pending = true;
                 wifi_refresh_pending = true;
             }
-            if tick.is_multiple_of(3) && mode == MonitorMode::Link {
+            if !path_settling && tick.is_multiple_of(3) && mode == MonitorMode::Link {
                 wifi_refresh_pending = true;
             }
-            if mode == MonitorMode::Peers {
+            if !path_settling && mode == MonitorMode::Peers {
                 peers_refresh_pending = true;
             }
-            match mode {
-                MonitorMode::Overview => {
-                    if peers_refresh_pending
-                        && spawn_peers(
-                            link.clone(),
-                            update_tx.clone(),
-                            path_generation,
-                            peers_in_flight.clone(),
-                        )
-                    {
-                        peers_refresh_pending = false;
+            if !path_settling {
+                match mode {
+                    MonitorMode::Overview => {
+                        if peers_refresh_pending
+                            && spawn_peers(
+                                link.clone(),
+                                update_tx.clone(),
+                                path_generation,
+                                peers_in_flight.clone(),
+                            )
+                        {
+                            peers_refresh_pending = false;
+                        }
+                        if wifi_refresh_pending
+                            && spawn_wifi(
+                                interface.clone(),
+                                update_tx.clone(),
+                                path_generation,
+                                wifi_in_flight.clone(),
+                            )
+                        {
+                            wifi_refresh_pending = false;
+                        }
                     }
-                    if wifi_refresh_pending
-                        && spawn_wifi(
-                            interface.clone(),
-                            update_tx.clone(),
-                            path_generation,
-                            wifi_in_flight.clone(),
-                        )
-                    {
-                        wifi_refresh_pending = false;
+                    MonitorMode::Link => {
+                        if wifi_refresh_pending
+                            && spawn_wifi(
+                                interface.clone(),
+                                update_tx.clone(),
+                                path_generation,
+                                wifi_in_flight.clone(),
+                            )
+                        {
+                            wifi_refresh_pending = false;
+                        }
                     }
-                }
-                MonitorMode::Link => {
-                    if wifi_refresh_pending
-                        && spawn_wifi(
-                            interface.clone(),
-                            update_tx.clone(),
-                            path_generation,
-                            wifi_in_flight.clone(),
-                        )
-                    {
-                        wifi_refresh_pending = false;
-                    }
-                }
-                MonitorMode::Peers => {
-                    if peers_refresh_pending
-                        && spawn_peers(
-                            link.clone(),
-                            update_tx.clone(),
-                            path_generation,
-                            peers_in_flight.clone(),
-                        )
-                    {
-                        peers_refresh_pending = false;
+                    MonitorMode::Peers => {
+                        if peers_refresh_pending
+                            && spawn_peers(
+                                link.clone(),
+                                update_tx.clone(),
+                                path_generation,
+                                peers_in_flight.clone(),
+                            )
+                        {
+                            peers_refresh_pending = false;
+                        }
                     }
                 }
             }
@@ -216,9 +322,20 @@ fn monitor_loop(
         for _ in 0..steps_per_tick {
             match control_rx.recv_timeout(sleep_step) {
                 Ok(MonitorControl::Refresh) => {
-                    internet_refresh_pending.fill(true);
+                    internet_refresh_pending.fill(probe_policy.is_active());
+                    workload_refresh_pending = true;
                     peers_refresh_pending = true;
                     wifi_refresh_pending = true;
+                    full_link_refresh_pending = true;
+                    break;
+                }
+                Ok(MonitorControl::SetProbePolicy(policy)) => {
+                    if probe_policy != policy {
+                        probe_policy = policy;
+                        probe_epoch.fetch_add(1, Ordering::AcqRel);
+                        internet_refresh_pending.fill(policy.is_active());
+                        internet_last_started.fill(None);
+                    }
                     break;
                 }
                 Ok(MonitorControl::Pause(value)) => {
@@ -239,6 +356,20 @@ fn monitor_loop(
     }
 }
 
+fn permits_active_probes(mode: MonitorMode, probe_policy: ProbePolicy) -> bool {
+    mode == MonitorMode::Overview && probe_policy.is_active()
+}
+
+fn periodic_internet_probe_due(
+    kind: ProbeKind,
+    last_started: Option<Instant>,
+    now: Instant,
+) -> bool {
+    matches!(kind, ProbeKind::Dns | ProbeKind::Https)
+        && last_started
+            .is_some_and(|last| now.saturating_duration_since(last) >= ACTIVE_PATH_REFRESH_INTERVAL)
+}
+
 fn spawn_probe(
     kind: ProbeKind,
     gateway: Option<String>,
@@ -246,19 +377,23 @@ fn spawn_probe(
     gateway_attempts: usize,
     generation: u64,
     in_flight: Arc<[AtomicBool; 4]>,
+    probe_epoch: Arc<AtomicU64>,
 ) -> bool {
     let slot = probe_slot(kind);
     if in_flight[slot].swap(true, Ordering::AcqRel) {
         return false;
     }
+    let epoch = probe_epoch.load(Ordering::Acquire);
     let _ = tx.send(MonitorUpdate::ProbeStarted { generation, kind });
     thread::spawn(move || {
         let result = run_probe(kind, gateway.as_deref(), gateway_attempts);
-        let _ = tx.send(MonitorUpdate::ProbeFinished {
-            generation,
-            kind,
-            result,
-        });
+        if probe_epoch.load(Ordering::Acquire) == epoch {
+            let _ = tx.send(MonitorUpdate::ProbeFinished {
+                generation,
+                kind,
+                result,
+            });
+        }
         in_flight[slot].store(false, Ordering::Release);
     });
     true
@@ -302,10 +437,11 @@ fn spawn_wifi(
         return false;
     }
     thread::spawn(move || {
-        let telemetry = collect_wifi_telemetry(interface.as_deref());
+        let observation = collect_wifi(interface.as_deref());
         let _ = tx.send(MonitorUpdate::Wifi {
             generation,
-            telemetry,
+            ssid: observation.ssid,
+            telemetry: observation.telemetry,
         });
         in_flight.store(false, Ordering::Release);
     });
@@ -331,10 +467,172 @@ fn spawn_traffic(
     });
 }
 
+fn spawn_workload(tx: Sender<MonitorUpdate>, generation: u64, in_flight: Arc<AtomicBool>) -> bool {
+    if in_flight.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    thread::spawn(move || {
+        let _ = tx.send(MonitorUpdate::Workload {
+            generation,
+            snapshot: collect_workload(),
+        });
+        in_flight.store(false, Ordering::Release);
+    });
+    true
+}
+
+fn collect_workload() -> WorkloadSnapshot {
+    if !cfg!(target_os = "macos") {
+        return WorkloadSnapshot {
+            health: Health::Unavailable,
+            detail: "per-process external-interface accounting has no platform backend".into(),
+            source: None,
+            interval: WORKLOAD_SAMPLE_INTERVAL,
+            processes: Vec::new(),
+        };
+    }
+    let mut command = Command::new("nettop");
+    command.args([
+        "-P",
+        "-L",
+        "2",
+        "-d",
+        "-n",
+        "-x",
+        "-s",
+        "1",
+        "-t",
+        "external",
+        "-J",
+        "bytes_in,bytes_out",
+    ]);
+    let output = match process::run_bounded(&mut command, Duration::from_secs(3)) {
+        Ok(Some(output)) if output.status.success() => output,
+        Ok(Some(output)) => {
+            return WorkloadSnapshot {
+                health: Health::Unavailable,
+                detail: format!(
+                    "nettop exited {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+                source: Some("nettop".into()),
+                interval: WORKLOAD_SAMPLE_INTERVAL,
+                processes: Vec::new(),
+            };
+        }
+        Ok(None) => {
+            return WorkloadSnapshot {
+                health: Health::Unavailable,
+                detail: "nettop sample deadline exceeded".into(),
+                source: Some("nettop".into()),
+                interval: WORKLOAD_SAMPLE_INTERVAL,
+                processes: Vec::new(),
+            };
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return WorkloadSnapshot {
+                health: Health::Unavailable,
+                detail: "nettop command not found".into(),
+                source: None,
+                interval: WORKLOAD_SAMPLE_INTERVAL,
+                processes: Vec::new(),
+            };
+        }
+        Err(error) => {
+            return WorkloadSnapshot {
+                health: Health::Unavailable,
+                detail: format!("nettop failed: {error}"),
+                source: Some("nettop".into()),
+                interval: WORKLOAD_SAMPLE_INTERVAL,
+                processes: Vec::new(),
+            };
+        }
+    };
+    let processes = parse_nettop_process_traffic(&String::from_utf8_lossy(&output.stdout));
+    WorkloadSnapshot {
+        health: Health::Ok,
+        detail: if processes.is_empty() {
+            "no per-process external-interface traffic in the latest 1s sample".into()
+        } else {
+            format!(
+                "{} process group(s) with external-interface traffic over 1s",
+                processes.len()
+            )
+        },
+        source: Some("nettop -P -L 2 -d -n -x -s 1 -t external".into()),
+        interval: WORKLOAD_SAMPLE_INTERVAL,
+        processes,
+    }
+}
+
+fn parse_nettop_process_traffic(output: &str) -> Vec<ProcessTraffic> {
+    let mut current: BTreeMap<String, (usize, u64, u64)> = BTreeMap::new();
+    let mut in_sample = false;
+    for line in output.lines() {
+        let line = line.trim();
+        if line.starts_with(",bytes_in,bytes_out") {
+            current.clear();
+            in_sample = true;
+            continue;
+        }
+        if !in_sample || line.is_empty() {
+            continue;
+        }
+        let mut fields = line.split(',');
+        let identity = fields.next().unwrap_or_default();
+        let received = fields.next().and_then(|value| value.parse::<u64>().ok());
+        let transmitted = fields.next().and_then(|value| value.parse::<u64>().ok());
+        let (Some(received), Some(transmitted)) = (received, transmitted) else {
+            continue;
+        };
+        if received == 0 && transmitted == 0 {
+            continue;
+        }
+        let process = identity
+            .rsplit_once('.')
+            .filter(|(_, suffix)| suffix.chars().all(|character| character.is_ascii_digit()))
+            .map_or(identity, |(process, _)| process)
+            .to_string();
+        if process.is_empty() {
+            continue;
+        }
+        let entry = current.entry(process).or_insert((0, 0, 0));
+        entry.0 += 1;
+        entry.1 = entry.1.saturating_add(received);
+        entry.2 = entry.2.saturating_add(transmitted);
+    }
+    let mut processes: Vec<_> = current
+        .into_iter()
+        .map(
+            |(process, (processes, received_bytes_per_second, transmitted_bytes_per_second))| {
+                ProcessTraffic {
+                    process,
+                    processes,
+                    received_bytes_per_second,
+                    transmitted_bytes_per_second,
+                }
+            },
+        )
+        .collect();
+    processes.sort_by(|left, right| {
+        let left_total = left
+            .received_bytes_per_second
+            .saturating_add(left.transmitted_bytes_per_second);
+        let right_total = right
+            .received_bytes_per_second
+            .saturating_add(right.transmitted_bytes_per_second);
+        right_total
+            .cmp(&left_total)
+            .then_with(|| left.process.cmp(&right.process))
+    });
+    processes
+}
+
 pub fn collect_snapshot(timeout: Duration) -> SnapshotReport {
     let mut link = collect_link();
     let wifi_interface = link.interface.clone();
-    let wifi = thread::spawn(move || collect_wifi_telemetry(wifi_interface.as_deref()));
+    let wifi = thread::spawn(move || collect_wifi(wifi_interface.as_deref()));
     let neighbor_link = link.clone();
     let neighbors = thread::spawn(move || peers::collect(&neighbor_link));
     let gateway = link.gateway.clone();
@@ -368,17 +666,24 @@ pub fn collect_snapshot(timeout: Duration) -> SnapshotReport {
 
     for kind in ProbeKind::ALL {
         if !results.iter().any(|(completed, _)| *completed == kind) {
-            results.push((kind, ProbeResult::failed("snapshot deadline exceeded")));
+            results.push((
+                kind,
+                if kind.affects_path_health() {
+                    ProbeResult::failed("snapshot deadline exceeded")
+                } else {
+                    ProbeResult::unavailable("snapshot deadline exceeded")
+                },
+            ));
         }
     }
     results.sort_by_key(|(kind, _)| ProbeKind::ALL.iter().position(|item| item == kind));
     if let Some((_, result)) = results
         .iter()
-        .find(|(kind, result)| *kind == ProbeKind::PublicIp && !result.health.is_problem())
+        .find(|(kind, result)| *kind == ProbeKind::PublicIp && result.health == Health::Ok)
     {
         link.public_ip = Some(result.detail.clone());
     }
-    link.wifi = wifi.join().unwrap_or(None);
+    apply_wifi_observation(&mut link, wifi.join().unwrap_or_default());
     let neighbors = neighbors
         .join()
         .unwrap_or_else(|_| crate::model::PeerSnapshot {
@@ -394,6 +699,30 @@ pub fn collect_snapshot(timeout: Duration) -> SnapshotReport {
         .as_deref()
         .and_then(collect_interface_counters);
     SnapshotReport::from_results(link, interface_counters, neighbors, results)
+}
+
+pub fn collect_passive_snapshot() -> SnapshotReport {
+    let mut link = collect_link();
+    let wifi_interface = link.interface.clone();
+    let wifi = thread::spawn(move || collect_wifi(wifi_interface.as_deref()));
+    let neighbor_link = link.clone();
+    let neighbors = thread::spawn(move || peers::collect(&neighbor_link));
+    let interface_counters = link
+        .interface
+        .as_deref()
+        .and_then(collect_interface_counters);
+    apply_wifi_observation(&mut link, wifi.join().unwrap_or_default());
+    let neighbors = neighbors
+        .join()
+        .unwrap_or_else(|_| crate::model::PeerSnapshot {
+            health: Health::Unavailable,
+            detail: "neighbor-cache worker panicked".into(),
+            sources: Vec::new(),
+            failed_sources: Vec::new(),
+            oui_source: None,
+            peers: Vec::new(),
+        });
+    SnapshotReport::from_passive(link, interface_counters, neighbors)
 }
 
 pub(crate) fn collect_interface_counters(interface: &str) -> Option<InterfaceCounters> {
@@ -457,7 +786,8 @@ pub fn collect_link() -> LinkSnapshot {
     let interface = route.as_ref().and_then(|value| value.0.clone());
     let gateway = route.and_then(|value| value.1);
     let addresses = local_addresses(interface.as_deref());
-    let (ssid, ssid_restricted) = wifi_ssid(interface.as_deref());
+    let (ssid, ssid_restricted, network_configuration) =
+        network_configuration(interface.as_deref());
     LinkSnapshot {
         host: short_hostname(),
         link_type: interface.as_deref().map(link_type),
@@ -469,13 +799,59 @@ pub fn collect_link() -> LinkSnapshot {
         public_ip: None,
         resolvers: resolver_servers(),
         addresses,
+        network_configuration,
     }
+}
+
+fn collect_light_link(previous: &LinkSnapshot) -> LinkSnapshot {
+    let route = default_route();
+    let interface = route.as_ref().and_then(|value| value.0.clone());
+    let gateway = route.and_then(|value| value.1);
+    let addresses = local_addresses(interface.as_deref());
+    let (ssid, ssid_restricted, network_configuration) =
+        network_configuration(interface.as_deref());
+    let mut link = previous.clone();
+    link.link_type = interface.as_deref().map(link_type);
+    link.interface = interface;
+    link.ssid = ssid;
+    link.ssid_restricted = ssid_restricted;
+    link.gateway = gateway;
+    link.addresses = addresses;
+    link.network_configuration = network_configuration;
+    link.public_ip = None;
+    link.wifi = None;
+    link
+}
+
+fn should_hold_incomplete_route(
+    previous: Option<&LinkSnapshot>,
+    candidate: &LinkSnapshot,
+    incomplete_since: &mut Option<Instant>,
+    observed_at: Instant,
+) -> bool {
+    let route_became_incomplete =
+        previous.is_some_and(|link| link.interface.is_some()) && candidate.interface.is_none();
+    if !route_became_incomplete {
+        *incomplete_since = None;
+        return false;
+    }
+    let first_incomplete = *incomplete_since.get_or_insert(observed_at);
+    observed_at.saturating_duration_since(first_incomplete) < PATH_TRANSITION_GRACE
 }
 
 pub fn collect_link_snapshot() -> LinkSnapshot {
     let mut link = collect_link();
-    link.wifi = collect_wifi_telemetry(link.interface.as_deref());
+    let observation = collect_wifi(link.interface.as_deref());
+    apply_wifi_observation(&mut link, observation);
     link
+}
+
+fn apply_wifi_observation(link: &mut LinkSnapshot, observation: WifiObservation) {
+    if let Some(ssid) = observation.ssid {
+        link.ssid = Some(ssid);
+        link.ssid_restricted = false;
+    }
+    link.wifi = observation.telemetry;
 }
 
 fn run_probe(kind: ProbeKind, gateway: Option<&str>, gateway_attempts: usize) -> ProbeResult {
@@ -517,7 +893,7 @@ pub(crate) fn probe_gateway(gateway: Option<&str>, attempts: usize) -> ProbeResu
     let samples = parse_ping_latencies(&combined);
     let metrics = LatencyMetrics::from_samples(&samples, attempts);
     let health = if samples.is_empty() {
-        Health::Failed
+        Health::Unavailable
     } else {
         metrics.health()
     };
@@ -527,23 +903,54 @@ pub(crate) fn probe_gateway(gateway: Option<&str>, attempts: usize) -> ProbeResu
     );
     ProbeResult {
         health,
-        detail: format!("{gateway}, {attempts} attempt(s), {loss}"),
+        detail: if samples.is_empty() {
+            format!("{gateway}: no ICMP echo replies; filtering or reachability unknown")
+        } else if attempts == 1 {
+            format!("{gateway}, reply, {loss}")
+        } else {
+            format!("{gateway}, {attempts} attempts, {loss}")
+        },
         latency_ms: metrics.rtt_p50_ms,
         metrics: Some(metrics),
     }
 }
 
 fn probe_dns() -> ProbeResult {
+    if DNS_RESOLUTION_IN_FLIGHT.swap(true, Ordering::AcqRel) {
+        return ProbeResult::unavailable(
+            "example.com: previous system-resolver lookup is still in flight",
+        );
+    }
     let started = Instant::now();
-    let addresses = match DNS_TARGET.to_socket_addrs() {
-        Ok(addresses) => addresses
-            .map(|address| address.ip())
-            .collect::<BTreeSet<_>>(),
-        Err(error) => return ProbeResult::failed(format!("example.com: {error}")),
+    let result = run_task_with_deadline(DNS_PROBE_TIMEOUT, || {
+        let result = DNS_TARGET
+            .to_socket_addrs()
+            .map(|addresses| {
+                addresses
+                    .map(|address| address.ip())
+                    .collect::<BTreeSet<_>>()
+            })
+            .map_err(|error| error.to_string());
+        DNS_RESOLUTION_IN_FLIGHT.store(false, Ordering::Release);
+        result
+    });
+    let addresses = match result {
+        Some(Ok(addresses)) => addresses,
+        Some(Err(error)) => return ProbeResult::failed(format!("example.com: {error}")),
+        None => {
+            return ProbeResult::failed(format!(
+                "example.com: system-resolver deadline exceeded ({:.0}s)",
+                DNS_PROBE_TIMEOUT.as_secs_f64()
+            ));
+        }
     };
     let latency = started.elapsed().as_secs_f64() * 1_000.0;
     ProbeResult {
-        health: if latency >= 500.0 {
+        health: if latency
+            >= ProbeKind::Dns
+                .degraded_after_ms()
+                .expect("DNS has a latency threshold")
+        {
             Health::Degraded
         } else {
             Health::Ok
@@ -552,6 +959,18 @@ fn probe_dns() -> ProbeResult {
         latency_ms: Some(latency),
         metrics: None,
     }
+}
+
+fn run_task_with_deadline<T, F>(timeout: Duration, task: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(task());
+    });
+    rx.recv_timeout(timeout).ok()
 }
 
 fn probe_https() -> ProbeResult {
@@ -569,7 +988,11 @@ fn probe_https() -> ProbeResult {
     ProbeResult {
         health: if !status.is_success() {
             Health::Failed
-        } else if latency >= 1_000.0 {
+        } else if latency
+            >= ProbeKind::Https
+                .degraded_after_ms()
+                .expect("HTTPS has a latency threshold")
+        {
             Health::Degraded
         } else {
             Health::Ok
@@ -586,18 +1009,14 @@ fn probe_public_ip() -> ProbeResult {
         if let Ok(address) = fetch_public_ip(endpoint) {
             let latency = started.elapsed().as_secs_f64() * 1_000.0;
             return ProbeResult {
-                health: if latency >= 1_500.0 {
-                    Health::Degraded
-                } else {
-                    Health::Ok
-                },
+                health: Health::Ok,
                 detail: address.to_string(),
                 latency_ms: Some(latency),
                 metrics: None,
             };
         }
     }
-    ProbeResult::failed("all public-IP endpoints failed or timed out")
+    ProbeResult::unavailable("all public-IP endpoints failed or timed out")
 }
 
 fn fetch_public_ip(endpoint: &str) -> Result<IpAddr> {
@@ -812,23 +1231,33 @@ fn parse_macos_temporary_addresses(output: &str) -> BTreeSet<String> {
         .collect()
 }
 
-fn wifi_ssid(interface: Option<&str>) -> (Option<String>, bool) {
+fn network_configuration(
+    interface: Option<&str>,
+) -> (Option<String>, bool, Option<Box<NetworkConfiguration>>) {
     let Some(interface) = interface else {
-        return (None, false);
+        return (None, false, None);
     };
-    let value = if cfg!(target_os = "macos") {
-        command_output("ipconfig", &["getsummary", interface]).and_then(|output| {
-            output.lines().find_map(|line| {
-                let line = line.trim();
-                (line.starts_with("SSID") && !line.starts_with("BSSID"))
-                    .then(|| {
-                        line.split_once(':')
-                            .map(|(_, value)| value.trim().to_string())
-                    })
-                    .flatten()
-            })
-        })
-    } else if cfg!(target_os = "linux") {
+    if cfg!(target_os = "macos") {
+        let Some(output) = command_output("ipconfig", &["getsummary", interface]) else {
+            return (None, false, None);
+        };
+        let value = output.lines().find_map(|line| {
+            let line = line.trim();
+            (line.starts_with("SSID") && !line.starts_with("BSSID"))
+                .then(|| {
+                    line.split_once(':')
+                        .map(|(_, value)| value.trim().to_string())
+                })
+                .flatten()
+        });
+        let restricted = value.as_deref() == Some("<redacted>");
+        return (
+            (!restricted).then_some(value).flatten(),
+            restricted,
+            parse_macos_network_configuration(&output).map(Box::new),
+        );
+    }
+    let value = if cfg!(target_os = "linux") {
         command_output("iwgetid", &["-r", "-i", interface])
     } else if cfg!(target_os = "windows") {
         command_output("netsh", &["wlan", "show", "interfaces"]).and_then(|output| {
@@ -841,11 +1270,40 @@ fn wifi_ssid(interface: Option<&str>) -> (Option<String>, bool) {
     } else {
         None
     };
-    if cfg!(target_os = "macos") && value.as_deref() == Some("<redacted>") {
-        (None, true)
-    } else {
-        (value, false)
-    }
+    (value, false, None)
+}
+
+fn parse_macos_network_configuration(output: &str) -> Option<NetworkConfiguration> {
+    let value = |key: &str| {
+        output.lines().find_map(|line| {
+            let (candidate, value) = line.trim().split_once(':')?;
+            (candidate.trim() == key).then(|| value.trim().to_string())
+        })
+    };
+    let lease_seconds = value("lease_time (uint32)").and_then(|value| {
+        value
+            .strip_prefix("0x")
+            .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+            .or_else(|| value.parse().ok())
+    });
+    let configuration = NetworkConfiguration {
+        connection_id: value("ConnectionID"),
+        method: value("ConfigMethod"),
+        state: value("State"),
+        server: value("server_identifier (ip)"),
+        subnet_mask: value("subnet_mask (ip)"),
+        lease_seconds,
+        lease_started_at: value("LeaseStartTime"),
+        lease_expires_at: value("LeaseExpirationTime"),
+        router_arp_verified: value("RouterARPVerified")
+            .map(|value| value.eq_ignore_ascii_case("true")),
+        security: value("Security"),
+    };
+    (configuration.method.is_some()
+        || configuration.state.is_some()
+        || configuration.server.is_some()
+        || configuration.security.is_some())
+    .then_some(configuration)
 }
 
 fn link_type(interface: &str) -> String {
@@ -891,32 +1349,42 @@ fn macos_link_type(interface: &str) -> Option<String> {
     None
 }
 
-fn collect_wifi_telemetry(interface: Option<&str>) -> Option<WifiTelemetry> {
-    let interface = interface?;
+fn collect_wifi(interface: Option<&str>) -> WifiObservation {
+    let Some(interface) = interface else {
+        return WifiObservation::default();
+    };
     if link_type(interface) != "wifi" {
-        return None;
+        return WifiObservation::default();
     }
     if cfg!(target_os = "macos") {
         let mut command = Command::new("system_profiler");
         command.args(["SPAirPortDataType", "-json"]);
-        let output = process::run_bounded(&mut command, Duration::from_secs(12))
+        let Some(output) = process::run_bounded(&mut command, Duration::from_secs(12))
             .ok()
-            .flatten()?;
-        output
-            .status
-            .success()
-            .then(|| parse_macos_wifi(&String::from_utf8_lossy(&output.stdout), interface))
             .flatten()
+        else {
+            return WifiObservation::default();
+        };
+        if !output.status.success() {
+            return WifiObservation::default();
+        }
+        parse_macos_wifi(&String::from_utf8_lossy(&output.stdout), interface).unwrap_or_default()
     } else if cfg!(target_os = "windows") {
-        command_output("netsh", &["wlan", "show", "interfaces"])
-            .and_then(|output| parse_windows_wifi(&output))
+        WifiObservation {
+            telemetry: command_output("netsh", &["wlan", "show", "interfaces"])
+                .and_then(|output| parse_windows_wifi(&output)),
+            ..WifiObservation::default()
+        }
     } else {
-        command_output("iw", &["dev", interface, "link"])
-            .and_then(|output| parse_linux_wifi(&output))
+        WifiObservation {
+            telemetry: command_output("iw", &["dev", interface, "link"])
+                .and_then(|output| parse_linux_wifi(&output)),
+            ..WifiObservation::default()
+        }
     }
 }
 
-fn parse_macos_wifi(output: &str, interface: &str) -> Option<WifiTelemetry> {
+fn parse_macos_wifi(output: &str, interface: &str) -> Option<WifiObservation> {
     let payload: Value = serde_json::from_str(output).ok()?;
     let interfaces = payload
         .get("SPAirPortDataType")?
@@ -963,7 +1431,15 @@ fn parse_macos_wifi(output: &str, interface: &str) -> Option<WifiTelemetry> {
                 .and_then(Value::as_u64)
                 .map(|value| value as u32),
         };
-        return (!telemetry.is_empty()).then_some(telemetry);
+        let ssid = current
+            .get("_name")
+            .and_then(Value::as_str)
+            .filter(|value| *value != "<redacted>")
+            .map(str::to_string);
+        return (ssid.is_some() || !telemetry.is_empty()).then_some(WifiObservation {
+            ssid,
+            telemetry: (!telemetry.is_empty()).then_some(telemetry),
+        });
     }
     None
 }
@@ -1079,6 +1555,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn active_probe_scheduler_requires_explicit_overview_policy() {
+        for mode in [MonitorMode::Overview, MonitorMode::Link, MonitorMode::Peers] {
+            assert!(!permits_active_probes(mode, ProbePolicy::Passive));
+        }
+        assert!(permits_active_probes(
+            MonitorMode::Overview,
+            ProbePolicy::Active
+        ));
+        assert!(!permits_active_probes(
+            MonitorMode::Link,
+            ProbePolicy::Active
+        ));
+        assert!(!permits_active_probes(
+            MonitorMode::Peers,
+            ProbePolicy::Active
+        ));
+    }
+
+    #[test]
+    fn task_deadline_returns_completed_work() {
+        assert_eq!(
+            run_task_with_deadline(Duration::from_secs(1), || 42),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn task_deadline_releases_the_caller_when_work_stalls() {
+        let started = Instant::now();
+        let result = run_task_with_deadline(Duration::from_millis(5), || {
+            thread::sleep(Duration::from_millis(200));
+            42
+        });
+        assert_eq!(result, None);
+        assert!(started.elapsed() < Duration::from_millis(150));
+    }
+
+    #[test]
+    fn active_live_refreshes_core_path_checks_but_not_public_identity() {
+        let started = Instant::now();
+        let due = started + ACTIVE_PATH_REFRESH_INTERVAL;
+        for kind in [ProbeKind::Dns, ProbeKind::Https] {
+            assert!(!periodic_internet_probe_due(
+                kind,
+                Some(started),
+                due - Duration::from_millis(1)
+            ));
+            assert!(periodic_internet_probe_due(kind, Some(started), due));
+        }
+        assert!(!periodic_internet_probe_due(
+            ProbeKind::PublicIp,
+            Some(started),
+            due
+        ));
+    }
+
+    #[test]
     fn parses_platform_default_routes() {
         assert_eq!(
             parse_macos_route("gateway: 192.168.1.1\ninterface: en0\n"),
@@ -1092,6 +1625,44 @@ mod tests {
             parse_windows_route("0.0.0.0  0.0.0.0  192.0.2.1  192.0.2.2  25"),
             (Some("192.0.2.2".into()), Some("192.0.2.1".into()))
         );
+    }
+
+    #[test]
+    fn transient_missing_route_is_held_before_a_sustained_disconnect() {
+        let mut previous = LinkSnapshot::empty();
+        previous.interface = Some("en0".into());
+        let candidate = LinkSnapshot::empty();
+        let started = Instant::now();
+        let mut incomplete_since = None;
+
+        assert!(should_hold_incomplete_route(
+            Some(&previous),
+            &candidate,
+            &mut incomplete_since,
+            started,
+        ));
+        assert!(should_hold_incomplete_route(
+            Some(&previous),
+            &candidate,
+            &mut incomplete_since,
+            started + PATH_TRANSITION_GRACE - Duration::from_millis(1),
+        ));
+        assert!(!should_hold_incomplete_route(
+            Some(&previous),
+            &candidate,
+            &mut incomplete_since,
+            started + PATH_TRANSITION_GRACE,
+        ));
+
+        let mut settled = candidate;
+        settled.interface = Some("en0".into());
+        assert!(!should_hold_incomplete_route(
+            Some(&previous),
+            &settled,
+            &mut incomplete_since,
+            started + Duration::from_secs(1),
+        ));
+        assert!(incomplete_since.is_none());
     }
 
     #[test]
@@ -1117,6 +1688,57 @@ mod tests {
              resolver #1\n  nameserver[0] : 192.168.1.1\n",
         );
         assert_eq!(resolvers, vec!["100.100.100.100", "192.168.1.1"]);
+    }
+
+    #[test]
+    fn parses_macos_dhcp_context_without_requiring_identifiers() {
+        let configuration = parse_macos_network_configuration(
+            "ConnectionID : 101\n\
+             ConfigMethod : DHCP\n\
+             LeaseExpirationTime : 07/25/2026 02:55:49\n\
+             LeaseStartTime : 07/24/2026 14:55:49\n\
+             State : BOUND\n\
+             server_identifier (ip): 192.168.1.1\n\
+             lease_time (uint32): 0xa8c0\n\
+             subnet_mask (ip): 255.255.255.0\n\
+             RouterARPVerified : TRUE\n\
+             Security : WPA2_PSK\n",
+        )
+        .unwrap();
+        assert_eq!(configuration.connection_id.as_deref(), Some("101"));
+        assert_eq!(configuration.method.as_deref(), Some("DHCP"));
+        assert_eq!(configuration.state.as_deref(), Some("BOUND"));
+        assert_eq!(configuration.server.as_deref(), Some("192.168.1.1"));
+        assert_eq!(configuration.lease_seconds, Some(43_200));
+        assert_eq!(
+            configuration.lease_started_at.as_deref(),
+            Some("07/24/2026 14:55:49")
+        );
+        assert_eq!(
+            configuration.lease_expires_at.as_deref(),
+            Some("07/25/2026 02:55:49")
+        );
+        assert_eq!(configuration.router_arp_verified, Some(true));
+        assert_eq!(configuration.security.as_deref(), Some("WPA2_PSK"));
+    }
+
+    #[test]
+    fn parses_latest_nettop_delta_and_aggregates_processes() {
+        let processes = parse_nettop_process_traffic(
+            ",bytes_in,bytes_out,\n\
+             codex.10,1000,2000,\n\
+             mDNSResponder.20,5000,100,\n\
+             ,bytes_in,bytes_out,\n\
+             codex.10,100,200,\n\
+             codex.11,300,400,\n\
+             mDNSResponder.20,10,0,\n",
+        );
+        assert_eq!(processes.len(), 2);
+        assert_eq!(processes[0].process, "codex");
+        assert_eq!(processes[0].processes, 2);
+        assert_eq!(processes[0].received_bytes_per_second, 400);
+        assert_eq!(processes[0].transmitted_bytes_per_second, 600);
+        assert_eq!(processes[1].process, "mDNSResponder");
     }
 
     #[test]
@@ -1172,11 +1794,12 @@ mod tests {
 
     #[test]
     fn parses_system_profiler_wifi() {
-        let telemetry = parse_macos_wifi(
+        let observation = parse_macos_wifi(
             r#"{
               "SPAirPortDataType": [{"spairport_airport_interfaces": [{
                 "_name": "en0",
                 "spairport_current_network_information": {
+                  "_name": "house-wifi",
                   "spairport_network_channel": "157 (5GHz, 80MHz)",
                   "spairport_network_mcs": 7,
                   "spairport_network_phymode": "802.11ac",
@@ -1188,6 +1811,8 @@ mod tests {
             "en0",
         )
         .unwrap();
+        assert_eq!(observation.ssid.as_deref(), Some("house-wifi"));
+        let telemetry = observation.telemetry.unwrap();
         assert_eq!(telemetry.signal_dbm, Some(-55.0));
         assert_eq!(telemetry.noise_dbm, Some(-95.0));
         assert_eq!(telemetry.channel, Some(157));

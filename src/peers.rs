@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::process::Command;
 use std::str::FromStr;
@@ -107,8 +107,7 @@ pub fn collect(link: &LinkSnapshot) -> PeerSnapshot {
         .collect();
     let mut sources = Vec::new();
     let mut failed_sources = Vec::new();
-    let mut peers = Vec::new();
-    let mut seen = BTreeSet::new();
+    let mut peers_by_key = BTreeMap::new();
 
     for (program, arguments) in commands {
         let mut command = Command::new(program);
@@ -125,17 +124,12 @@ pub fn collect(link: &LinkSnapshot) -> PeerSnapshot {
         let parsed =
             parse_neighbor_output(&String::from_utf8_lossy(&output.stdout), &local_addresses);
         for peer in parsed.into_iter().filter(|peer| scope.contains(peer)) {
-            let key = (
-                peer.address.clone(),
-                peer.mac.clone(),
-                peer.interface.clone(),
-            );
-            if seen.insert(key) {
-                peers.push(peer);
-            }
+            insert_peer_evidence(&mut peers_by_key, peer);
         }
     }
 
+    let mut peers: Vec<_> = peers_by_key.into_values().collect();
+    let binding_conflicts = peers.iter().filter(|peer| peer.binding_conflict).count();
     let oui_registry = oui::system_registry();
     for peer in &mut peers {
         let Some(mac) = peer.mac.as_deref() else {
@@ -153,7 +147,13 @@ pub fn collect(link: &LinkSnapshot) -> PeerSnapshot {
     }
     let oui_source = oui_registry.map(|registry| registry.source().to_string());
 
-    let health = evidence_health(commands.len(), sources.len());
+    let health = match (
+        evidence_health(commands.len(), sources.len()),
+        binding_conflicts,
+    ) {
+        (Health::Ok, 1..) => Health::Degraded,
+        (health, _) => health,
+    };
     if health == Health::Unavailable {
         PeerSnapshot {
             health,
@@ -188,10 +188,15 @@ pub fn collect(link: &LinkSnapshot) -> PeerSnapshot {
                 failed_sources.join(" + ")
             )
         };
+        let conflict_note = if binding_conflicts == 0 {
+            String::new()
+        } else {
+            format!("; {binding_conflicts} conflicting native binding row(s)")
+        };
         PeerSnapshot {
             health,
             detail: format!(
-                "{} cached peer(s); no liveness scan{scope_note}{failure_note}",
+                "{} neighbor-cache entries; no active discovery{scope_note}{failure_note}{conflict_note}",
                 peers.len()
             ),
             sources,
@@ -199,6 +204,31 @@ pub fn collect(link: &LinkSnapshot) -> PeerSnapshot {
             oui_source,
             peers,
         }
+    }
+}
+
+fn insert_peer_evidence(peers: &mut BTreeMap<(Option<String>, String), Peer>, peer: Peer) {
+    let key = (peer.interface.clone(), peer.address.clone());
+    if let Some(existing) = peers.get_mut(&key) {
+        merge_peer_evidence(existing, peer);
+    } else {
+        peers.insert(key, peer);
+    }
+}
+
+fn merge_peer_evidence(existing: &mut Peer, incoming: Peer) {
+    if !existing.binding_conflict {
+        match (&existing.mac, incoming.mac) {
+            (None, Some(mac)) => existing.mac = Some(mac),
+            (Some(left), Some(right)) if *left != right => {
+                existing.mac = None;
+                existing.binding_conflict = true;
+            }
+            _ => {}
+        }
+    }
+    if existing.state.is_none() {
+        existing.state = incoming.state;
     }
 }
 
@@ -270,6 +300,7 @@ fn parse_neighbor_output(output: &str, local_addresses: &BTreeSet<IpAddr>) -> Ve
             mac,
             interface,
             state,
+            binding_conflict: false,
             mac_scope: None,
             registrant: None,
         });
@@ -381,6 +412,24 @@ mod tests {
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].interface.as_deref(), Some("en0"));
         assert_eq!(peers[0].mac.as_deref(), Some("aa:bb:cc:dd:ee:fe"));
+    }
+
+    #[test]
+    fn same_snapshot_binding_disagreement_is_one_conflicted_peer() {
+        let mut peers = BTreeMap::new();
+        for output in [
+            "? (192.168.1.1) at aa:bb:cc:dd:ee:01 on en0 ifscope [ethernet]\n",
+            "? (192.168.1.1) at aa:bb:cc:dd:ee:02 on en0 ifscope [ethernet]\n",
+        ] {
+            for peer in parse_neighbor_output(output, &BTreeSet::new()) {
+                insert_peer_evidence(&mut peers, peer);
+            }
+        }
+
+        assert_eq!(peers.len(), 1);
+        let peer = peers.into_values().next().unwrap();
+        assert!(peer.binding_conflict);
+        assert_eq!(peer.mac, None);
     }
 
     #[test]
