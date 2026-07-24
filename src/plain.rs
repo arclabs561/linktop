@@ -214,8 +214,16 @@ fn path_lines(elapsed: &str, link: &LinkSnapshot) -> Vec<String> {
     ));
     if let Some(configuration) = &link.network_configuration {
         lines.push(format!(
-            "+{elapsed} config   association={} method={} state={} server={} mask={} lease={} start={} expires={} security={} router_arp_verified={} [source: macOS ipconfig getsummary]",
+            "+{elapsed} config   association={} BSSID={} method={} state={} server={} mask={} lease={} start={} expires={} security={} router_arp_verified={} [source: macOS ipconfig getsummary]",
             configuration.connection_id.as_deref().unwrap_or("unknown"),
+            configuration
+                .associated_bssid
+                .as_deref()
+                .unwrap_or(if configuration.bssid_restricted {
+                    "hidden by macOS"
+                } else {
+                    "unknown"
+                }),
             configuration.method.as_deref().unwrap_or("unknown"),
             configuration.state.as_deref().unwrap_or("unknown"),
             configuration.server.as_deref().unwrap_or("unknown"),
@@ -365,7 +373,7 @@ fn human_dbm(value: Option<f64>) -> String {
         .unwrap_or_else(|| "?".into())
 }
 
-fn format_elapsed(duration: Duration) -> String {
+pub(crate) fn format_elapsed(duration: Duration) -> String {
     let seconds = duration.as_secs();
     format!(
         "{} +{:02}:{:02}",

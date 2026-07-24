@@ -1286,8 +1286,12 @@ fn parse_macos_network_configuration(output: &str) -> Option<NetworkConfiguratio
             .and_then(|hex| u64::from_str_radix(hex, 16).ok())
             .or_else(|| value.parse().ok())
     });
+    let bssid = value("BSSID");
+    let bssid_restricted = bssid.as_deref() == Some("<redacted>");
     let configuration = NetworkConfiguration {
         connection_id: value("ConnectionID"),
+        associated_bssid: (!bssid_restricted).then_some(bssid).flatten(),
+        bssid_restricted,
         method: value("ConfigMethod"),
         state: value("State"),
         server: value("server_identifier (ip)"),
@@ -1694,6 +1698,7 @@ mod tests {
     fn parses_macos_dhcp_context_without_requiring_identifiers() {
         let configuration = parse_macos_network_configuration(
             "ConnectionID : 101\n\
+             BSSID : 02:00:00:00:00:01\n\
              ConfigMethod : DHCP\n\
              LeaseExpirationTime : 07/25/2026 02:55:49\n\
              LeaseStartTime : 07/24/2026 14:55:49\n\
@@ -1706,6 +1711,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(configuration.connection_id.as_deref(), Some("101"));
+        assert_eq!(
+            configuration.associated_bssid.as_deref(),
+            Some("02:00:00:00:00:01")
+        );
+        assert!(!configuration.bssid_restricted);
         assert_eq!(configuration.method.as_deref(), Some("DHCP"));
         assert_eq!(configuration.state.as_deref(), Some("BOUND"));
         assert_eq!(configuration.server.as_deref(), Some("192.168.1.1"));
@@ -1720,6 +1730,20 @@ mod tests {
         );
         assert_eq!(configuration.router_arp_verified, Some(true));
         assert_eq!(configuration.security.as_deref(), Some("WPA2_PSK"));
+    }
+
+    #[test]
+    fn macos_bssid_redaction_is_a_coverage_state_not_an_identifier() {
+        let configuration = parse_macos_network_configuration(
+            "ConnectionID : 101\n\
+             BSSID : <redacted>\n\
+             ConfigMethod : DHCP\n\
+             State : BOUND\n",
+        )
+        .unwrap();
+
+        assert!(configuration.associated_bssid.is_none());
+        assert!(configuration.bssid_restricted);
     }
 
     #[test]

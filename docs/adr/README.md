@@ -14,3 +14,4 @@ network addresses, SSIDs, and other private observations out of these records.
 | [0005](0005-rank-diagnosis-by-evidence-and-causal-scope.md) | Rank diagnosis by evidence and causal scope | Accepted |
 | [0006](0006-make-active-network-operations-explicit.md) | Make active network operations explicit | Accepted |
 | [0007](0007-prioritize-change-context-and-consequential-workload.md) | Prioritize change, context, and consequential workload | Accepted |
+| [0008](0008-consume-versioned-netmon-evidence-without-cli-coupling.md) | Consume versioned Netmon evidence without CLI coupling | Accepted |
