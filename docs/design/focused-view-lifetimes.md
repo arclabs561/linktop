@@ -1,6 +1,6 @@
 ---
 status: implemented
-decisions: ADR-0001, ADR-0002, ADR-0003, ADR-0004, ADR-0005
+decisions: ADR-0001, ADR-0002, ADR-0003, ADR-0004, ADR-0005, ADR-0006, ADR-0007, ADR-0008
 ---
 
 # Design: focused view lifetimes
@@ -33,9 +33,10 @@ These jobs should not all have the same lifetime. Snapshot and speed are transac
 Link and peers become more useful when they dwell. Machine-readable output must remain
 bounded unless the caller explicitly asks for a stream.
 
-Netmon is a separate, future Rust evidence/replay library. Linktop may eventually use
-its policy-neutral records or replay explanations, but local diagnosis must remain
-available without netmon, its stores, or its live fusion deployment.
+Netmon is a separate product whose policy-neutral Rust evidence/replay crates Linktop
+imports at an exact Git revision for optional prior-context comparison. Local
+diagnosis remains available without the Netmon executable, stores, controller, or live
+fusion deployment.
 
 Linktop is an operator instrument, so the live and ordinary text views show the full
 locally observed evidence: SSID, interface and peer addresses, gateways, MAC addresses,
@@ -50,10 +51,10 @@ operator evidence with placeholders.
 - Do not populate the neighbor cache with ARP, ICMP, mDNS, or subnet scans. Dwell means
   repeated passive observation, not active discovery.
 - Do not turn speed into a persistent monitor or run it without an explicit target.
-- Do not add controller credentials, historical stores, private identity, or the live
-  fusion plane to Linktop.
-- Do not make netmon a required dependency before its Rust schema and replay gates
-  pass.
+- Do not add controller credentials, a Linktop-owned historical store, private
+  identity policy, or the live fusion plane to Linktop.
+- Do not make a Netmon process, store, controller, or deployment a Linktop runtime
+  requirement.
 - Do not redact the local operator view. Keep automated capture artifacts private by
   default instead of weakening the instrument.
 
@@ -206,9 +207,10 @@ terminal one-shot must use `--json`, redirect output, or a future explicit snaps
 modifier. Repeated passive cache reads add small local process cost, bounded by the
 interval, command deadlines, and single-flight scheduling.
 
-The focused views keep process-local history only. Their first/last observations
-reset on every path generation and are not persisted across runs. Durable evidence
-and replay belong to the optional future netmon integration, after its schema gate.
+The focused link and peers views keep process-local history only. Their first/last
+observations reset on every path generation and are not persisted across runs. The
+overview can explicitly read and append a private Netmon v0 host-path JSONL log; it
+does not make focused cache rows into a durable peer inventory.
 
 ## Implementation plan
 
@@ -230,8 +232,9 @@ and replay belong to the optional future netmon integration, after its schema ga
 
 - If passive peer polling exceeds its interval or overlaps, stop and reduce cadence;
   never stack cache-reader processes.
-- If users need durable peer history or cross-source explanations, require a versioned
-  netmon Rust API and a separate integration ADR rather than adding a local database.
+- If users need durable peer history or cross-source explanations, extend the
+  versioned Netmon contract under a separate decision rather than adding a Linktop
+  database.
 - If a second machine consumer needs live structured events, add explicit NDJSON with
   a schema version; do not make `--json` continuous.
 - If TTY auto-interactivity breaks a real one-shot human workflow, add an explicit
@@ -244,8 +247,8 @@ and replay belong to the optional future netmon integration, after its schema ga
 
 - Whether the focused link view should later include optional gateway RTT is deferred;
   the first version remains local/passive so its activity boundary is unambiguous.
-- Netmon crate names and versioned record types remain open until the empirical schema
-  gate passes.
+- Netmon's experimental crate names and v0 host-path records may still change until
+  the stable multi-modal schema gate passes.
 
 ---
 Decided: 2026-07-22

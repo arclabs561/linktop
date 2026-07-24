@@ -8,7 +8,7 @@ supersedes: none
 superseded_by: none
 extends: 0001, 0002, 0003, 0004, 0005
 confidence: high
-review_trigger: revisit if a platform source transmits as a side effect, an acquisition backend adds packet or RF capture, active probe targets become configurable, or netmon supplies a versioned collection-policy contract.
+review_trigger: revisit if a platform source transmits as a side effect, an acquisition backend adds packet or RF capture, or active probe targets become configurable.
 ---
 
 # ADR-0006: Make active network operations explicit
@@ -208,3 +208,11 @@ and a structured representation that cannot be confused with passive evidence.
 Extends ADR-0001's host-path boundary, ADR-0002's shared output semantics,
 ADR-0003's path-generation fence, ADR-0004's bounded capture transaction, and
 ADR-0005's separation of path health from evidence coverage.
+
+## Update (2026-07-24): imported policy remains non-acquiring
+
+ADR-0008 fired the Netmon collection-policy review trigger. The imported v0
+record can describe passive or active provenance, but the libraries initiate no
+collection. Linktop writes only its passive host-local context to history; live
+active probe results remain separate episode evidence. The existing acquisition
+boundary therefore remains accepted.

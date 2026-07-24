@@ -8,7 +8,7 @@ supersedes: none
 superseded_by: none
 extends: none
 confidence: high
-review_trigger: revisit if linktop consumes controller or capture evidence, becomes a persistent collector, retains history, owns credentials, or publishes telemetry.
+review_trigger: revisit if linktop consumes controller or capture evidence, becomes a persistent or implicit collector, owns credentials, or publishes telemetry.
 ---
 
 # ADR-0001: Build a standalone host-path instrument
@@ -115,3 +115,13 @@ MAC prefix, not a device identity; locally administered addresses are labelled
 The TUI is responsive by available height as well as width. Shallow terminals render
 one dense summary instead of compressing the event, address, and peer panels into
 unreadable rows.
+
+## Update (2026-07-24): opt-in history preserves the standalone boundary
+
+The history review trigger fired when ADR-0008 added explicit private
+cross-session context. The standalone decision remains accepted: Linktop imports
+policy-neutral Netmon Rust types at build time, but it does not require the
+Netmon executable, daemon, controller, store, credentials, or deployment at
+runtime. No history is retained unless the operator supplies a path. Automatic
+or service-owned collection would be a different lifecycle and remains a review
+trigger.

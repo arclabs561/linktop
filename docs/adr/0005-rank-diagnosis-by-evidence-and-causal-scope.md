@@ -2,13 +2,13 @@
 id: 0005
 status: accepted
 governs: src/metrics.rs, src/model.rs, src/net.rs, src/plain.rs, src/ui.rs, README.md, docs/design/focused-view-lifetimes.md
-why: a single health color currently treats supporting lookups and partial peer coverage as path failures, judges latency spread from too few samples, and makes the operator reconstruct cause from equally weighted rows.
+why: path verdicts, supporting enrichment, acquisition coverage, and sparse distributions have different causal weight, so renderers need one typed evidence ranking instead of independently flattening them into a health color.
 rejected: remain a raw telemetry viewer (honest but leaves the main diagnostic work to the operator); keep one scalar health heuristic and tune thresholds (cannot represent coverage or supporting evidence); add opaque confidence scores or learned labels before durable ground truth exists (false precision without calibration).
 supersedes: none
 superseded_by: none
 extends: 0001, 0002, 0003
 confidence: high
-review_trigger: revisit when purpose-specific readiness profiles, durable baselines, flow or controller evidence, calibrated fingerprint models, or a versioned netmon replay API exist.
+review_trigger: revisit when purpose-specific readiness profiles, durable statistical baselines, flow or controller evidence, or calibrated fingerprint models exist.
 ---
 
 # ADR-0005: Rank diagnosis by evidence and causal scope
@@ -159,3 +159,12 @@ abstention rules they must preserve.
 
 Extends ADR-0001's visible probe lifecycle, ADR-0002's shared output model, and
 ADR-0003's path-generation fencing with an evidence and inference contract.
+
+## Update (2026-07-24): replay evidence enters the same ranking
+
+The versioned-replay review trigger fired in ADR-0008. Exact recurrence,
+compatible incomplete context, and conflicting context now enter the existing
+evidence hierarchy as cited context; they cannot override fresh host evidence
+or path-critical probes. This extends rather than replaces the typed situation
+model. Purpose-specific readiness and statistical baselines remain separate
+future decisions.

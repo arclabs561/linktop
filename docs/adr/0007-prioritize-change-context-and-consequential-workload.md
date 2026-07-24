@@ -3,12 +3,12 @@ id: 0007
 status: accepted
 governs: src/main.rs, src/model.rs, src/net.rs, src/plain.rs, src/ui.rs, README.md, docs/design/focused-view-lifetimes.md, docs/design/network-situation-intelligence.md
 why: the overview exposed many correct fields but did not consistently surface the network transition, acquisition context, or host activity that would change an operator's next decision.
-rejected: add more permanent panels (increases competition without establishing priority); optimize only for the lowest common platform surface (throws away high-value native evidence); infer peer activity from neighbor-cache state (the source has no flow vantage); enable packet or socket capture in the default overview (silently widens privilege, privacy, and acquisition scope); persist network history locally now (duplicates the planned netmon replay boundary before its schema gate).
+rejected: add more permanent panels (increases competition without establishing priority); optimize only for the lowest common platform surface (throws away high-value native evidence); infer peer activity from neighbor-cache state (the source has no flow vantage); enable packet or socket capture in the default overview (silently widens privilege, privacy, and acquisition scope); give Linktop a private history schema or database (duplicates Netmon replay semantics and creates a second retention owner).
 supersedes: none
 superseded_by: none
 extends: 0002, 0003, 0005, 0006
 confidence: high
-review_trigger: revisit when Linux or Windows gains an equivalent process-accounting backend, endpoint attribution is proposed, durable cross-session comparison is available from netmon, or an overview use case needs a different purpose-specific priority order.
+review_trigger: revisit when Linux or Windows gains an equivalent process-accounting backend, endpoint attribution is proposed, or an overview use case needs a different purpose-specific priority order.
 ---
 
 # ADR-0007: Prioritize change, context, and consequential workload
@@ -178,3 +178,11 @@ and by avoiding endpoint or intent claims.
 Extends ADR-0002's lifetime-specific projections, ADR-0003's path-generation
 fence, ADR-0005's causal information hierarchy, and ADR-0006's passive
 acquisition boundary.
+
+## Update (2026-07-24): prior context earns overview priority
+
+ADR-0008 fired the durable-comparison review trigger without changing Linktop's
+information hierarchy. A recurrence or context conflict now outranks static
+inventory when no newer in-session transition exists. The data contract and
+comparison semantics remain Netmon-owned; Linktop owns the explicit local path,
+live collection, and projection.
