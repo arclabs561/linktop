@@ -13,7 +13,7 @@ use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 
 use crate::model::{App, MonitorControl, MonitorMode, ProbePolicy};
-use crate::{net, process, ui};
+use crate::{apply_monitor_update, history, net, process, ui};
 
 const POLL_STEP: Duration = Duration::from_millis(100);
 const DEFAULT_BACKGROUND: &str = "#11161c";
@@ -35,6 +35,7 @@ pub fn run(
     requested_seconds: &[u64],
     size: CaptureSize,
     output_directory: &Path,
+    history_path: Option<PathBuf>,
 ) -> Result<()> {
     let schedule = CaptureSchedule::new(requested_seconds)?;
     fs::create_dir_all(output_directory)
@@ -52,10 +53,14 @@ pub fn run(
     let (updates, controls, monitor) = net::start_monitor(interval, mode, probe_policy);
     let started_at = Instant::now();
     let mut app = App::with_probe_policy(probe_policy);
+    let mut history = history_path.map(history::HistorySession::open);
+    if let Some(history) = &history {
+        history.attach(&mut app);
+    }
     let result = (|| -> Result<()> {
         for target in schedule.targets {
-            wait_until(target, started_at, &updates, &mut app)?;
-            drain_updates(&updates, &mut app)?;
+            wait_until(target, started_at, &updates, &mut app, history.as_mut())?;
+            drain_updates(&updates, &mut app, history.as_mut())?;
             let frame = terminal
                 .draw(|frame| ui::render(frame, &app, mode, 0, mode == MonitorMode::Overview))
                 .context("render capture frame")?;
@@ -92,6 +97,7 @@ pub fn run_native(
     requested_seconds: &[u64],
     size: CaptureSize,
     output_directory: &Path,
+    history_path: Option<PathBuf>,
 ) -> Result<()> {
     let schedule = CaptureSchedule::new(requested_seconds)?;
     fs::create_dir_all(output_directory)
@@ -134,6 +140,9 @@ pub fn run_native(
         .arg(&binary);
     if probe_policy.is_active() {
         start.arg("--active");
+    }
+    if let Some(path) = history_path {
+        start.arg("--history").arg(path);
     }
     match mode {
         MonitorMode::Overview => {}
@@ -243,6 +252,7 @@ fn wait_until(
     started_at: Instant,
     updates: &std::sync::mpsc::Receiver<crate::model::MonitorUpdate>,
     app: &mut App,
+    mut history: Option<&mut history::HistorySession>,
 ) -> Result<()> {
     loop {
         let remaining = target.saturating_sub(started_at.elapsed());
@@ -250,7 +260,9 @@ fn wait_until(
             return Ok(());
         }
         match updates.recv_timeout(remaining.min(POLL_STEP)) {
-            Ok(update) => app.apply(update),
+            Ok(update) => {
+                apply_monitor_update(app, history.as_deref_mut(), update);
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 anyhow::bail!("monitor stopped before the requested capture time");
@@ -262,10 +274,13 @@ fn wait_until(
 fn drain_updates(
     updates: &std::sync::mpsc::Receiver<crate::model::MonitorUpdate>,
     app: &mut App,
+    mut history: Option<&mut history::HistorySession>,
 ) -> Result<()> {
     loop {
         match updates.try_recv() {
-            Ok(update) => app.apply(update),
+            Ok(update) => {
+                apply_monitor_update(app, history.as_deref_mut(), update);
+            }
             Err(TryRecvError::Empty) => return Ok(()),
             Err(TryRecvError::Disconnected) => {
                 anyhow::bail!("monitor stopped before the frame was rendered");

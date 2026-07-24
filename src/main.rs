@@ -1,4 +1,5 @@
 mod capture;
+mod history;
 mod metrics;
 mod model;
 mod net;
@@ -9,6 +10,7 @@ mod process;
 mod speed;
 mod ui;
 
+use std::ffi::OsString;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::sync::mpsc::TryRecvError;
@@ -51,6 +53,10 @@ struct Cli {
     /// Enable next-hop, DNS, HTTPS, and public-egress probes in the overview.
     #[arg(long)]
     active: bool,
+
+    /// Read, compare, and append private host-path evidence at PATH (or LINKTOP_HISTORY).
+    #[arg(long, global = true, value_name = "PATH")]
+    history: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -150,6 +156,7 @@ fn main() -> Result<()> {
     let interval = Duration::from_secs(cli.interval);
     let dwell = cli.dwell.map(Duration::from_secs);
     let plain = cli.plain;
+    let explicit_history = cli.history.clone();
     let probe_policy = if cli.active {
         ProbePolicy::Active
     } else {
@@ -158,47 +165,72 @@ fn main() -> Result<()> {
     let terminal_stdin = io::stdin().is_terminal();
     let terminal_stdout = io::stdout().is_terminal();
     let live_output = choose_live_output(terminal_stdin, terminal_stdout, plain, dwell);
+    let default_history = resolve_default_history(
+        explicit_history.clone(),
+        std::env::var_os("LINKTOP_HISTORY"),
+        live_output != LiveOutput::Once,
+    );
     match cli.command {
         Some(Command::Snapshot { json }) => {
             reject_live_options("snapshot", plain, dwell)?;
             reject_root_active("snapshot", cli.active)?;
+            reject_history("snapshot", explicit_history.as_ref())?;
             snapshot(json)
         }
         Some(Command::Probe { json }) => {
             reject_live_options("probe", plain, dwell)?;
             reject_root_active("probe", cli.active)?;
+            reject_history("probe", explicit_history.as_ref())?;
             probe(json)
         }
         Some(Command::Link { json }) => {
             reject_root_active("link", cli.active)?;
+            reject_history("link", explicit_history.as_ref())?;
             if json {
                 reject_live_options("link --json", plain, dwell)?;
                 link(true)
             } else {
                 match live_output {
-                    LiveOutput::Tui => {
-                        run_tui(interval, MonitorMode::Link, dwell, ProbePolicy::Passive)
-                    }
-                    LiveOutput::Plain => {
-                        run_plain(interval, MonitorMode::Link, dwell, ProbePolicy::Passive)
-                    }
+                    LiveOutput::Tui => run_tui(
+                        interval,
+                        MonitorMode::Link,
+                        dwell,
+                        ProbePolicy::Passive,
+                        None,
+                    ),
+                    LiveOutput::Plain => run_plain(
+                        interval,
+                        MonitorMode::Link,
+                        dwell,
+                        ProbePolicy::Passive,
+                        None,
+                    ),
                     LiveOutput::Once => link(false),
                 }
             }
         }
         Some(Command::Peers { json }) => {
             reject_root_active("peers", cli.active)?;
+            reject_history("peers", explicit_history.as_ref())?;
             if json {
                 reject_live_options("peers --json", plain, dwell)?;
                 peers(true)
             } else {
                 match live_output {
-                    LiveOutput::Tui => {
-                        run_tui(interval, MonitorMode::Peers, dwell, ProbePolicy::Passive)
-                    }
-                    LiveOutput::Plain => {
-                        run_plain(interval, MonitorMode::Peers, dwell, ProbePolicy::Passive)
-                    }
+                    LiveOutput::Tui => run_tui(
+                        interval,
+                        MonitorMode::Peers,
+                        dwell,
+                        ProbePolicy::Passive,
+                        None,
+                    ),
+                    LiveOutput::Plain => run_plain(
+                        interval,
+                        MonitorMode::Peers,
+                        dwell,
+                        ProbePolicy::Passive,
+                        None,
+                    ),
                     LiveOutput::Once => peers(false),
                 }
             }
@@ -211,6 +243,7 @@ fn main() -> Result<()> {
         }) => {
             reject_live_options("speed", plain, dwell)?;
             reject_root_active("speed", cli.active)?;
+            reject_history("speed", explicit_history.as_ref())?;
             speed(&host, port, Duration::from_secs(duration), json)
         }
         Some(Command::Screenshot {
@@ -229,6 +262,10 @@ fn main() -> Result<()> {
                 !active || mode == MonitorMode::Overview,
                 "screenshot --active is only valid for the overview"
             );
+            anyhow::ensure!(
+                explicit_history.is_none() || mode == MonitorMode::Overview,
+                "screenshot --history is only valid for the overview"
+            );
             let capture_policy = if active {
                 ProbePolicy::Active
             } else {
@@ -236,14 +273,45 @@ fn main() -> Result<()> {
             };
             let size = capture::CaptureSize { columns, rows };
             if native {
-                capture::run_native(interval, mode, capture_policy, &at, size, &output_dir)
+                capture::run_native(
+                    interval,
+                    mode,
+                    capture_policy,
+                    &at,
+                    size,
+                    &output_dir,
+                    explicit_history,
+                )
             } else {
-                capture::run(interval, mode, capture_policy, &at, size, &output_dir)
+                capture::run(
+                    interval,
+                    mode,
+                    capture_policy,
+                    &at,
+                    size,
+                    &output_dir,
+                    explicit_history,
+                )
             }
         }
         None => match live_output {
-            LiveOutput::Tui => run_tui(interval, MonitorMode::Overview, dwell, probe_policy),
-            LiveOutput::Plain => run_plain(interval, MonitorMode::Overview, dwell, probe_policy),
+            LiveOutput::Tui => run_tui(
+                interval,
+                MonitorMode::Overview,
+                dwell,
+                probe_policy,
+                default_history,
+            ),
+            LiveOutput::Plain => run_plain(
+                interval,
+                MonitorMode::Overview,
+                dwell,
+                probe_policy,
+                default_history,
+            ),
+            LiveOutput::Once if default_history.is_some() => {
+                anyhow::bail!("--history requires a live terminal or --plain --dwell")
+            }
             LiveOutput::Once if probe_policy.is_active() => probe(false),
             LiveOutput::Once => snapshot(false),
         },
@@ -279,6 +347,28 @@ fn reject_root_active(subject: &str, active: bool) -> Result<()> {
         "--active applies to the live overview; use `linktop probe` for a bounded active diagnosis (not {subject})"
     );
     Ok(())
+}
+
+fn reject_history(subject: &str, history: Option<&PathBuf>) -> Result<()> {
+    anyhow::ensure!(
+        history.is_none(),
+        "--history applies to the live overview (not {subject})"
+    );
+    Ok(())
+}
+
+fn resolve_default_history(
+    explicit: Option<PathBuf>,
+    environment: Option<OsString>,
+    use_environment: bool,
+) -> Option<PathBuf> {
+    explicit.or_else(|| {
+        use_environment
+            .then_some(environment)
+            .flatten()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    })
 }
 
 fn snapshot(json: bool) -> Result<()> {
@@ -594,6 +684,11 @@ fn network_configuration_text(link: &model::LinkSnapshot) -> Option<String> {
     if let Some(connection_id) = &configuration.connection_id {
         parts.push(format!("association {connection_id}"));
     }
+    if let Some(bssid) = &configuration.associated_bssid {
+        parts.push(format!("BSSID {bssid}"));
+    } else if configuration.bssid_restricted {
+        parts.push("BSSID hidden by macOS".into());
+    }
     if let Some(method) = &configuration.method {
         parts.push(method.clone());
     }
@@ -646,6 +741,7 @@ fn run_tui(
     mode: MonitorMode,
     dwell: Option<Duration>,
     probe_policy: ProbePolicy,
+    history_path: Option<PathBuf>,
 ) -> Result<()> {
     enable_raw_mode().context("enable terminal raw mode")?;
     let _guard = TerminalGuard;
@@ -656,6 +752,10 @@ fn run_tui(
 
     let (updates, controls, monitor) = net::start_monitor(interval, mode, probe_policy);
     let mut app = model::App::with_probe_policy(probe_policy);
+    let mut history = history_path.map(history::HistorySession::open);
+    if let Some(history) = &history {
+        history.attach(&mut app);
+    }
     let mut active_mode = mode;
     let mut peer_offset = 0_usize;
     let can_navigate = mode == MonitorMode::Overview;
@@ -664,7 +764,9 @@ fn run_tui(
         loop {
             loop {
                 match updates.try_recv() {
-                    Ok(update) => app.apply(update),
+                    Ok(update) => {
+                        apply_monitor_update(&mut app, history.as_mut(), update);
+                    }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         app.apply(model::MonitorUpdate::Notice("probe worker stopped".into()));
@@ -762,9 +864,19 @@ fn run_plain(
     mode: MonitorMode,
     dwell: Option<Duration>,
     probe_policy: ProbePolicy,
+    history_path: Option<PathBuf>,
 ) -> Result<()> {
     let (updates, controls, monitor) = net::start_monitor(interval, mode, probe_policy);
     let mut app = model::App::with_probe_policy(probe_policy);
+    let mut history = history_path.map(history::HistorySession::open);
+    if let Some(history) = &history {
+        history.attach(&mut app);
+        println!(
+            "history  {} [{}]",
+            history_status(&app).0,
+            history_status(&app).1
+        );
+    }
     let subject = match mode {
         MonitorMode::Overview if probe_policy.is_active() => {
             "active path probes + passive host/cache observation / no LAN scan"
@@ -800,14 +912,34 @@ fn run_plain(
         };
         let observed = update.clone();
         let before = plain::PlainState::from(&app);
-        app.apply(update);
+        let history_line = apply_monitor_update(&mut app, history.as_mut(), update);
         for line in plain::format_update(&observed, &before, &app) {
             println!("{line}");
+        }
+        if let Some(line) = history_line {
+            println!("+{} history  {line}", plain::format_elapsed(app.uptime()));
         }
     }
     controls.send(MonitorControl::Stop).ok();
     monitor.join().ok();
     Ok(())
+}
+
+pub(crate) fn apply_monitor_update(
+    app: &mut model::App,
+    history: Option<&mut history::HistorySession>,
+    update: model::MonitorUpdate,
+) -> Option<String> {
+    let observed = update.clone();
+    app.apply(update);
+    history.and_then(|history| history.observe_update(&observed, app))
+}
+
+fn history_status(app: &model::App) -> (&str, &str) {
+    app.history_context
+        .as_ref()
+        .map(|context| (context.summary.as_str(), context.evidence.as_str()))
+        .unwrap_or(("history disabled", "no durable retention"))
 }
 
 struct TerminalGuard;
@@ -836,6 +968,31 @@ mod cli_tests {
 
         let probe = Cli::try_parse_from(["linktop", "probe", "--json"]).unwrap();
         assert!(matches!(probe.command, Some(Command::Probe { json: true })));
+    }
+
+    #[test]
+    fn history_environment_is_only_a_nonempty_root_default() {
+        let explicit = PathBuf::from("operator.jsonl");
+        assert_eq!(
+            resolve_default_history(
+                Some(explicit.clone()),
+                Some(OsString::from("environment.jsonl")),
+                true
+            ),
+            Some(explicit)
+        );
+        assert_eq!(
+            resolve_default_history(None, Some(OsString::from("environment.jsonl")), true),
+            Some(PathBuf::from("environment.jsonl"))
+        );
+        assert_eq!(
+            resolve_default_history(None, Some(OsString::new()), true),
+            None
+        );
+        assert_eq!(
+            resolve_default_history(None, Some(OsString::from("environment.jsonl")), false),
+            None
+        );
     }
 
     #[test]

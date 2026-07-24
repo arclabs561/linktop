@@ -438,7 +438,7 @@ pub(crate) fn overview_diagnosis(app: &App) -> OverviewDiagnosis {
     } else {
         "radio n/a"
     };
-    let coverage = if app.probe_policy().is_active() {
+    let mut coverage = if app.probe_policy().is_active() {
         format!(
             "coverage {} · core {settled}/{} · {public_evidence} · {peer_evidence} · {radio_evidence}",
             app.evidence_coverage().label(),
@@ -455,6 +455,12 @@ pub(crate) fn overview_diagnosis(app: &App) -> OverviewDiagnosis {
             }
         )
     };
+    if let Some(history) = &app.history_context {
+        coverage.push_str(" · history cited");
+        if history.summary.contains("unavailable") || history.summary.contains("failed") {
+            coverage.push_str("/limited");
+        }
+    }
     let action = match situation.kind {
         SituationKind::Paused => "next: p resumes observation",
         SituationKind::PathTransition => "next: allow the default route to settle",
@@ -542,6 +548,8 @@ fn salient_context(app: &App) -> String {
     }
     if app.path_generation == 0 {
         "context  waiting for the first confirmed default route".into()
+    } else if let Some(history) = &app.history_context {
+        format!("history  {}", history.summary)
     } else {
         format!(
             "context  generation {} observed for {}; no transition seen this session",
@@ -620,6 +628,11 @@ fn network_configuration_summary(app: &App) -> String {
         }
         if let Some(connection_id) = &configuration.connection_id {
             parts.push(format!("association {connection_id}"));
+        }
+        if let Some(bssid) = &configuration.associated_bssid {
+            parts.push(format!("BSSID {bssid}"));
+        } else if configuration.bssid_restricted {
+            parts.push("BSSID hidden by macOS".into());
         }
         if let (Some(start), Some(end)) = (
             configuration.lease_started_at.as_deref(),
@@ -1120,7 +1133,7 @@ fn render_scope(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         format!("partial; missing {}", app.peers.failed_sources.join("+"))
     };
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled(" local  ", Style::default().fg(MUTED)),
             Span::styled(
@@ -1169,11 +1182,20 @@ fn render_scope(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Style::default().fg(INK),
             ),
         ]),
-        Line::from(Span::styled(
-            " [2] full link evidence   [3] neighbor details",
-            Style::default().fg(ACCENT),
-        )),
     ];
+    if let Some(history) = &app.history_context {
+        lines.push(Line::from(vec![
+            Span::styled(" history", Style::default().fg(MUTED)),
+            Span::styled(
+                format!(" {} · {}", history.summary, history.evidence),
+                Style::default().fg(INK),
+            ),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        " [2] full link evidence   [3] neighbor details",
+        Style::default().fg(ACCENT),
+    )));
     frame.render_widget(
         Paragraph::new(lines)
             .block(instrument_block(" EVIDENCE / ACTIVITY BOUNDARY "))
@@ -2046,8 +2068,9 @@ fn render_overview_compact(frame: &mut Frame<'_>, area: Rect, app: &App, can_nav
         ]),
         compact_local_path_line(app, area.width, &ssid),
     ];
-    let context_is_change = diagnosis.context.starts_with("change");
-    if context_is_change {
+    let context_is_salient =
+        diagnosis.context.starts_with("change") || diagnosis.context.starts_with("history");
+    if context_is_salient {
         lines.push(Line::from(Span::styled(
             fit(
                 &diagnosis.context,
@@ -2063,7 +2086,7 @@ fn render_overview_compact(frame: &mut Frame<'_>, area: Rect, app: &App, can_nav
     } else {
         lines.push(compact_workload_line(app, area.width));
     }
-    if context_is_change {
+    if context_is_salient {
         lines.extend(compact_coverage_lines(&diagnosis.coverage, area.width));
     }
     lines.push(Line::from(vec![
@@ -2557,8 +2580,8 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        Address, LinkSnapshot, MonitorUpdate, ProbeKind, ProbePolicy, ProbeResult, ProcessTraffic,
-        WorkloadSnapshot,
+        Address, HistoryContext, LinkSnapshot, MonitorUpdate, ProbeKind, ProbePolicy, ProbeResult,
+        ProcessTraffic, WorkloadSnapshot,
     };
 
     #[test]
@@ -2902,6 +2925,36 @@ mod tests {
         assert!(rendered.contains("SSID, gateway, resolvers"));
         assert!(rendered.contains("house"));
         assert!(rendered.contains("phone-hotspot"));
+    }
+
+    #[test]
+    fn overview_promotes_prior_context_without_inventing_a_place() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: LinkSnapshot {
+                host: "workstation".into(),
+                interface: Some("en0".into()),
+                link_type: Some("wifi".into()),
+                gateway: Some("192.0.2.1".into()),
+                ..LinkSnapshot::empty()
+            },
+        });
+        app.history_context = Some(HistoryContext {
+            summary: "recurring network context · 3 prior observations".into(),
+            evidence: "netmon host-path v0 · gateway link binding observed; no place asserted"
+                .into(),
+        });
+        for (width, height) in [(100, 24), (70, 14)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+                .unwrap();
+            let rendered = buffer_text(terminal.backend());
+            assert!(rendered.contains("recurring network context"));
+            assert!(!rendered.contains("location:"));
+        }
     }
 
     #[test]

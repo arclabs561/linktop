@@ -153,6 +153,8 @@ pub struct InterfaceRate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NetworkConfiguration {
     pub connection_id: Option<String>,
+    pub associated_bssid: Option<String>,
+    pub bssid_restricted: bool,
     pub method: Option<String>,
     pub state: Option<String>,
     pub server: Option<String>,
@@ -199,6 +201,12 @@ pub struct PathChange {
     pub dimensions: Vec<&'static str>,
     pub previous: String,
     pub current: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryContext {
+    pub summary: String,
+    pub evidence: String,
 }
 
 impl LinkSnapshot {
@@ -635,6 +643,8 @@ pub struct App {
     pub path_generation: u64,
     pub path_observed_since: Duration,
     pub last_path_change: Option<PathChange>,
+    pub history_context: Option<HistoryContext>,
+    pub wifi_observation_settled: bool,
     pub path_transition_pending: bool,
     probe_policy: ProbePolicy,
     peer_dwell: BTreeMap<PeerKey, PeerDwell>,
@@ -677,6 +687,8 @@ impl App {
             path_generation: 0,
             path_observed_since: Duration::ZERO,
             last_path_change: None,
+            history_context: None,
+            wifi_observation_settled: false,
             path_transition_pending: false,
             probe_policy,
             peer_dwell: BTreeMap::new(),
@@ -726,6 +738,7 @@ impl App {
                 self.interface_rate = None;
                 self.workload = WorkloadSnapshot::pending();
                 self.peers = PeerSnapshot::pending();
+                self.wifi_observation_settled = false;
                 self.peer_dwell.clear();
                 self.peer_baseline_seen = false;
                 for probe in &mut self.probes {
@@ -775,6 +788,7 @@ impl App {
                 telemetry,
             } => {
                 if generation == self.path_generation {
+                    self.wifi_observation_settled = true;
                     if let Some(ssid) = ssid
                         && (self.link.ssid.as_deref() != Some(ssid.as_str())
                             || self.link.ssid_restricted)
@@ -2138,6 +2152,8 @@ mod tests {
         before.ssid_restricted = true;
         before.network_configuration = Some(Box::new(NetworkConfiguration {
             connection_id: Some("101".into()),
+            associated_bssid: None,
+            bssid_restricted: true,
             method: Some("DHCP".into()),
             state: Some("BOUND".into()),
             server: Some("192.168.1.1".into()),

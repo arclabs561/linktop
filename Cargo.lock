@@ -1199,6 +1199,8 @@ dependencies = [
  "clap",
  "crossterm",
  "if-addrs",
+ "netmon-evidence",
+ "netmon-replay",
  "pretty_assertions",
  "ratatui",
  "reqwest",
@@ -1302,6 +1304,23 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "netmon-evidence"
+version = "0.0.1"
+source = "git+https://github.com/arclabs561/netmon.git?rev=6cab05cfbdf55c8dbc0b29fb3ff1f9732f0473a4#6cab05cfbdf55c8dbc0b29fb3ff1f9732f0473a4"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "netmon-replay"
+version = "0.0.1"
+source = "git+https://github.com/arclabs561/netmon.git?rev=6cab05cfbdf55c8dbc0b29fb3ff1f9732f0473a4#6cab05cfbdf55c8dbc0b29fb3ff1f9732f0473a4"
+dependencies = [
+ "netmon-evidence",
+ "serde_json",
 ]
 
 [[package]]

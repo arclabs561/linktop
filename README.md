@@ -17,8 +17,9 @@ localization.
 
 - The selected default route, interface, link type, next-hop gateway, resolver
   set, local addresses, and SSID when the platform exposes it.
-- On macOS, the current Wi-Fi association ID, DHCP method/state/server, subnet,
-  lease window, security mode, and router-ARP verification from
+- On macOS, the current Wi-Fi association ID, associated BSSID when Location
+  Services policy exposes it, DHCP method/state/server, subnet, lease window,
+  security mode, and router-ARP verification from
   `ipconfig getsummary`. The association ID joins the path fingerprint so a
   switch can still create a new generation when macOS hides the SSID; lease
   renewal alone does not.
@@ -110,6 +111,8 @@ linktop
 linktop --plain
 linktop --plain --interval 5 | tee linktop.log
 linktop --dwell 30
+linktop --history ~/.local/state/linktop/host-path.jsonl
+linktop --plain --dwell 30 --history ~/.local/state/linktop/host-path.jsonl
 linktop --active
 linktop --active --plain --dwell 30
 linktop snapshot
@@ -124,6 +127,30 @@ linktop peers --plain --dwell 30 | tee peers.log
 linktop peers --json
 linktop speed 192.168.1.10
 ```
+
+## Optional prior-context evidence
+
+Linktop does not retain observations by default. `--history PATH` is an
+explicit private-retention choice for the live overview. It reads a Netmon
+`HostPathObservationV0` JSONL log, compares the completed current context with
+prior records from this host, cites exact recurrence, compatible/incomplete
+evidence, or conflicting context, and appends the new record. The
+`LINKTOP_HISTORY` environment variable may supply the same opt-in path for a
+regular operator setup.
+
+History records can contain SSIDs, BSSIDs, interface addresses and prefixes,
+gateway IP and cached link-layer address, resolver sets, and association
+metadata. Linktop creates a new history directory with mode `0700` and sets the
+log to `0600` on Unix. A malformed or incompatible log is left unchanged and
+reported as an evidence limitation; current live diagnosis continues.
+
+A recurring network context is not automatically a physical location. The same
+SSID and private gateway address can occur at unrelated sites, one site can
+contain many BSSIDs, and a hotspot can move. Associated BSSID, the passively
+cached gateway binding, network boundary, recurrence, controller site evidence,
+and a private operator assertion can support a place candidate. Linktop reports
+the available evidence and explicitly says when no place is asserted. It does
+not perform an ambient Wi-Fi scan or attach a human location label on its own.
 
 `linktop probe` is the automation-oriented active contract: it exits `1` when
 the tested path fails and `2` when no path verdict is available. Live TUI and
@@ -227,10 +254,12 @@ display does not silently widen a focused command's network activity.
 Linktop observes the current host's network context and, when explicitly
 enabled, diagnoses its active path. It does not capture network packets, trigger
 wireless scans, perform LAN discovery, manage network controllers, retain
-durable history, own credentials, publish telemetry, or perform
+durable history unless an operator supplies `--history` or
+`LINKTOP_HISTORY`, own credentials, publish telemetry, or perform
 identity/presence fusion. Those are separate lifecycles even when their evidence
-is useful beside a Linktop report. Linktop may later consume a versioned,
-policy-neutral Rust evidence/replay API from netmon, but its direct local
+is useful beside a Linktop report. Linktop consumes Netmon's experimental,
+versioned, policy-neutral Rust evidence/replay crates at an exact Git revision;
+it does not invoke the Netmon CLI or require a Netmon service. Direct local
 observation and diagnosis remain independently usable.
 
 The longer product direction, including episode stories, purpose-specific
