@@ -293,6 +293,7 @@ pub(crate) struct OverviewDiagnosis {
     pub health: Health,
     pub summary: String,
     pub context: String,
+    pub compact_context: String,
     pub context_is_salient: bool,
     pub coverage: String,
     pub action: &'static str,
@@ -498,11 +499,12 @@ pub(crate) fn overview_diagnosis(app: &App) -> OverviewDiagnosis {
             "next: no action; [2] link and [3] neighbor cache show supporting evidence"
         }
     };
-    let (context, context_is_salient) = salient_context(app);
+    let (context, compact_context, context_is_salient) = salient_context(app);
     OverviewDiagnosis {
         health,
         summary,
         context,
+        compact_context,
         context_is_salient,
         coverage,
         action,
@@ -517,12 +519,10 @@ pub(crate) fn overview_status_label(app: &App) -> &'static str {
     }
 }
 
-fn salient_context(app: &App) -> (String, bool) {
+fn salient_context(app: &App) -> (String, String, bool) {
     if app.path_transition_pending {
-        return (
-            "change   default route settling; last confirmed path retained".into(),
-            true,
-        );
+        let message = "change   default route settling; last confirmed path retained".to_string();
+        return (message.clone(), message, true);
     }
     let path_change = app.last_path_change.as_ref().map(|change| {
         (
@@ -550,27 +550,25 @@ fn salient_context(app: &App) -> (String, bool) {
         .flatten()
         .max_by_key(|(elapsed, _)| *elapsed)
     {
-        return (
-            format!("change   +{} {message}", format_duration(elapsed)),
-            true,
-        );
+        let message = format!("change   +{} {message}", format_duration(elapsed));
+        return (message.clone(), message, true);
     }
     if app.path_generation == 0 {
-        (
-            "context  waiting for the first confirmed default route".into(),
-            false,
-        )
+        let message = "context  waiting for the first confirmed default route".to_string();
+        (message.clone(), message, false)
     } else if let Some(history) = &app.history_context {
-        (format!("history  {}", history.summary), true)
-    } else {
         (
-            format!(
-                "context  generation {} observed for {}; no transition seen this session",
-                app.path_generation,
-                format_duration(app.uptime().saturating_sub(app.path_observed_since))
-            ),
-            false,
+            format!("history  {}", history.summary),
+            format!("history  {}", history.compact_summary),
+            true,
         )
+    } else {
+        let message = format!(
+            "context  generation {} observed for {}; no transition seen this session",
+            app.path_generation,
+            format_duration(app.uptime().saturating_sub(app.path_observed_since))
+        );
+        (message.clone(), message, false)
     }
 }
 
@@ -2086,13 +2084,13 @@ fn render_overview_compact(frame: &mut Frame<'_>, area: Rect, app: &App, can_nav
     if diagnosis.context_is_salient {
         lines.push(Line::from(Span::styled(
             fit(
-                &diagnosis.context,
+                &diagnosis.compact_context,
                 usize::from(area.width.saturating_sub(2)),
             ),
             Style::default().fg(INK),
         )));
     } else {
-        lines.extend(compact_coverage_lines(&diagnosis.coverage, area.width));
+        lines.push(compact_coverage_line(app, area.width));
     }
     if app.probe_policy().is_active() {
         lines.push(gateway_summary_line(app, area.width));
@@ -2100,7 +2098,7 @@ fn render_overview_compact(frame: &mut Frame<'_>, area: Rect, app: &App, can_nav
         lines.push(compact_workload_line(app, area.width));
     }
     if diagnosis.context_is_salient {
-        lines.extend(compact_coverage_lines(&diagnosis.coverage, area.width));
+        lines.push(compact_coverage_line(app, area.width));
     }
     lines.push(Line::from(vec![
         Span::styled("context   ", Style::default().fg(MUTED)),
@@ -2140,14 +2138,6 @@ fn render_overview_compact(frame: &mut Frame<'_>, area: Rect, app: &App, can_nav
                 Span::styled(format!("  {}", probe.detail), Style::default().fg(MUTED)),
             ])
         }));
-    } else {
-        lines.push(Line::from(vec![
-            Span::styled("UNTESTED   ", Style::default().fg(MUTED)),
-            Span::styled(
-                "active probes off · [a] enable for this session",
-                Style::default().fg(INK),
-            ),
-        ]));
     }
     lines.push(compact_telemetry_line(app));
     let available = chunks[1].height.saturating_sub(2) as usize;
@@ -2185,7 +2175,7 @@ fn compact_workload_line(app: &App, width: u16) -> Line<'static> {
                 }
             );
             format!(
-                "{} rx{} tx{} /{}s",
+                "{} rx {} tx {} /{}s",
                 fit(&process_label, 16),
                 compact_rate(process.received_bytes_per_second as f64 * 8.0),
                 compact_rate(process.transmitted_bytes_per_second as f64 * 8.0),
@@ -2270,23 +2260,24 @@ fn compact_local_path_line<'a>(app: &'a App, width: u16, ssid: &str) -> Line<'a>
     let interface = app.link.interface.as_deref().unwrap_or("interface?");
     let link_type = app.link.link_type.as_deref().unwrap_or("link?");
     let gateway = app.link.gateway.as_deref().unwrap_or("gateway?");
-    if width < 70 {
+    if width < 88 {
         let network = if ssid.is_empty() {
             link_type.to_owned()
+        } else if ssid == "SSID hidden by macOS" {
+            format!("{link_type} / SSID hidden")
         } else {
-            format!("{link_type} {ssid}")
+            format!("{link_type} / {ssid}")
         };
+        let summary = format!(
+            "g{} {interface} [{network}] → gw {gateway}",
+            app.path_generation
+        );
         return Line::from(vec![
+            Span::styled("path      ", Style::default().fg(MUTED)),
             Span::styled(
-                format!("local g{:<2} ", app.path_generation),
-                Style::default().fg(MUTED),
+                fit(&summary, usize::from(width.saturating_sub(12))),
+                Style::default().fg(INK),
             ),
-            Span::styled(
-                format!("{interface} [{network}]"),
-                Style::default().fg(ACCENT),
-            ),
-            Span::styled(" → ", Style::default().fg(GRID)),
-            Span::styled(gateway, Style::default().fg(INK)),
         ]);
     }
     let network = if ssid.is_empty() {
@@ -2310,29 +2301,45 @@ fn compact_local_path_line<'a>(app: &'a App, width: u16, ssid: &str) -> Line<'a>
     ])
 }
 
-fn compact_coverage_lines(coverage: &str, width: u16) -> Vec<Line<'static>> {
-    let usable = usize::from(width.saturating_sub(2));
-    let parts: Vec<_> = coverage.split(" · ").collect();
-    if width >= 70 && parts.len() >= 3 {
-        vec![
-            Line::from(Span::styled(
-                fit(parts[0], usable),
-                Style::default().fg(MUTED),
-            )),
-            Line::from(Span::styled(
-                fit(
-                    &format!("passive   {} · {}", parts[1], parts[2..].join(" · ")),
-                    usable,
-                ),
-                Style::default().fg(MUTED),
-            )),
-        ]
+fn compact_coverage_line(app: &App, width: u16) -> Line<'static> {
+    let peer_summary = app.peer_dwell_summary();
+    let cache = if app.peers.health == Health::Queued {
+        "cache pending".into()
     } else {
-        vec![Line::from(Span::styled(
-            fit(coverage, usable),
-            Style::default().fg(MUTED),
-        ))]
+        format!(
+            "cache {}/{}",
+            peer_summary.current,
+            peer_summary.observed.max(peer_summary.current)
+        )
+    };
+    let probes = if app.probe_policy().is_active() {
+        let settled = ProbeKind::PATH
+            .iter()
+            .map(|kind| app.probe_view(*kind))
+            .filter(|probe| !matches!(probe.health, Health::Queued | Health::Running))
+            .count();
+        format!("core {settled}/{}", ProbeKind::PATH.len())
+    } else {
+        "probes off".into()
+    };
+    let history = app.history_context.as_ref().map(|history| {
+        if history.kind.is_limited() {
+            "history limited"
+        } else {
+            "history"
+        }
+    });
+    let mut summary = format!(
+        "coverage {} · {cache} · {probes}",
+        app.evidence_coverage().label()
+    );
+    if let Some(history) = history {
+        summary.push_str(&format!(" · {history}"));
     }
+    Line::from(Span::styled(
+        fit(&summary, usize::from(width.saturating_sub(2))),
+        Style::default().fg(MUTED),
+    ))
 }
 
 fn gateway_summary_line(app: &App, width: u16) -> Line<'_> {
@@ -2838,7 +2845,8 @@ mod tests {
             .unwrap();
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("OVERVIEW"));
-        assert!(rendered.contains("en0 [wifi house-wifi]"));
+        assert!(rendered.contains("en0 [wifi / house-wifi]"));
+        assert!(rendered.contains("gw 192.168.1.1"));
         assert!(rendered.contains("coverage"));
         assert!(rendered.contains("process"));
         assert!(rendered.contains("passive"));
@@ -2956,6 +2964,7 @@ mod tests {
         app.history_context = Some(HistoryContext {
             kind: crate::model::HistoryContextKind::Recurring,
             summary: "recurring network context · 3 prior observations".into(),
+            compact_summary: "recurring · 3 prior · place candidate: gateway".into(),
             evidence: "netmon host-path v0 · gateway link binding observed; no place asserted"
                 .into(),
         });
@@ -2966,7 +2975,12 @@ mod tests {
                 .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
                 .unwrap();
             let rendered = buffer_text(terminal.backend());
-            assert!(rendered.contains("recurring network context"));
+            assert!(rendered.contains("recurring"));
+            if width == 70 {
+                assert!(rendered.contains("place candidate: gateway"));
+            } else {
+                assert!(rendered.contains("recurring network context"));
+            }
             assert!(!rendered.contains("location:"));
         }
         assert!(overview_diagnosis(&app).context_is_salient);
@@ -2978,6 +2992,7 @@ mod tests {
         app.history_context = Some(HistoryContext {
             kind: crate::model::HistoryContextKind::Unavailable,
             summary: "archive could not be read".into(),
+            compact_summary: "unavailable · live diagnosis unaffected".into(),
             evidence: "current diagnosis unaffected".into(),
         });
 
@@ -3009,7 +3024,7 @@ mod tests {
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("process"));
         assert!(rendered.contains("codex×2"));
-        assert!(rendered.contains("rx32.77Kbit/s"));
+        assert!(rendered.contains("rx 32.77Kbit/s"));
         assert!(rendered.contains("/1s"));
     }
 

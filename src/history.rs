@@ -31,6 +31,7 @@ impl HistorySession {
                 initial: HistoryContext {
                     kind: HistoryContextKind::Configured,
                     summary: "history configured; no prior evidence log".into(),
+                    compact_summary: "configured · no prior evidence".into(),
                     evidence: "private JSONL · retention explicitly enabled".into(),
                 },
             };
@@ -46,6 +47,7 @@ impl HistorySession {
                     initial: HistoryContext {
                         kind: HistoryContextKind::Loaded,
                         summary: format!("history loaded: {count} compatible record(s)"),
+                        compact_summary: format!("loaded · {count} prior record(s)"),
                         evidence: "netmon host-path v0 · private JSONL".into(),
                     },
                 }
@@ -58,6 +60,7 @@ impl HistorySession {
                 initial: HistoryContext {
                     kind: HistoryContextKind::Unavailable,
                     summary: format!("history unavailable: {error}"),
+                    compact_summary: "unavailable · live diagnosis unaffected".into(),
                     evidence: "current live diagnosis is unaffected; log left unchanged".into(),
                 },
             },
@@ -88,6 +91,7 @@ impl HistorySession {
             let status = HistoryContext {
                 kind: HistoryContextKind::AppendFailed,
                 summary: format!("history append failed: {error}"),
+                compact_summary: "append failed · live diagnosis unaffected".into(),
                 evidence: "current live diagnosis is unaffected; log left unchanged".into(),
             };
             app.history_context = Some(status.clone());
@@ -298,10 +302,33 @@ fn summarize(
         })
         .unwrap_or_default();
     let dimensions = comparison.changed_dimensions.join(", ");
-    let (kind, summary) = match (comparison.relation, matching) {
+    let (place, compact_place) = match (
+        current.path.associated_bssid.as_ref(),
+        current.path.next_hop_link_address.as_ref(),
+        current.path.network_name.visibility,
+    ) {
+        (Some(_), _, _) => (
+            "place candidate evidence: associated BSSID observed; no place asserted",
+            "place candidate: BSSID",
+        ),
+        (None, Some(_), _) => (
+            "place candidate evidence: gateway link binding observed; no place asserted",
+            "place candidate: gateway",
+        ),
+        (None, None, NetworkNameVisibilityV0::Restricted) => (
+            "place candidate limited: SSID/BSSID restricted by the platform",
+            "place evidence restricted",
+        ),
+        (None, None, _) => (
+            "place candidate limited: no BSSID or gateway link binding",
+            "place evidence absent",
+        ),
+    };
+    let (kind, summary, compact_summary) = match (comparison.relation, matching) {
         (ContextRelationV0::FirstObservation, _) => (
             HistoryContextKind::FirstObservation,
             "first observation for this host in the evidence log".into(),
+            format!("first observation · {compact_place}"),
         ),
         (ContextRelationV0::SameContext, _) => (
             HistoryContextKind::Recurring,
@@ -309,43 +336,34 @@ fn summarize(
                 "recurring network context · {matching} prior observation(s) · last {age}{}",
                 changed_suffix(&dimensions)
             ),
+            format!("recurring · {matching} prior · {age} · {compact_place}"),
         ),
         (ContextRelationV0::CompatibleContext, _) => (
             HistoryContextKind::Compatible,
             format!(
                 "compatible prior context · {compatible} candidate(s) · incomplete evidence prevents same/change claim · changed {dimensions} · prior {age}"
             ),
+            format!("compatible/incomplete · {compatible} candidate(s) · changed {dimensions}"),
         ),
         (ContextRelationV0::ContextChanged, 0) => (
             HistoryContextKind::Changed,
             format!(
                 "new network context relative to the prior record · changed {dimensions} · prior {age}"
             ),
+            format!("new context · changed {dimensions} · {compact_place}"),
         ),
         (ContextRelationV0::ContextChanged, _) => (
             HistoryContextKind::Returned,
             format!(
                 "returned to a known network context · {matching} prior observation(s) · changed {dimensions} · prior {age}"
             ),
+            format!("returned · {matching} prior · changed {dimensions}"),
         ),
-    };
-    let place = match (
-        current.path.associated_bssid.as_ref(),
-        current.path.next_hop_link_address.as_ref(),
-        current.path.network_name.visibility,
-    ) {
-        (Some(_), _, _) => "place candidate evidence: associated BSSID observed; no place asserted",
-        (None, Some(_), _) => {
-            "place candidate evidence: gateway link binding observed; no place asserted"
-        }
-        (None, None, NetworkNameVisibilityV0::Restricted) => {
-            "place candidate limited: SSID/BSSID restricted by the platform"
-        }
-        (None, None, _) => "place candidate limited: no BSSID or gateway link binding",
     };
     HistoryContext {
         kind,
         summary,
+        compact_summary,
         evidence: format!("netmon host-path v0 · {place}"),
     }
 }
