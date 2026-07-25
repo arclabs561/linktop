@@ -20,14 +20,20 @@ would also make later controller or operator evidence difficult to reconcile.
 
 ## Chosen approach
 
-Netmon replay owns one deterministic, observer-scoped recurrence reduction over
-`HostPathObservationV0`. For the current observation it reports:
+Netmon replay owns one deterministic, observer-ID-scoped recurrence reduction
+over `HostPathObservationV0`. For the current observation it reports:
 
-- exact prior observations under the durable context key;
+- whether prior exact key matches are absent, unanchored, or anchored by a
+  gateway next-hop link-layer address;
+- exact prior key-match observations;
 - compatible/incomplete prior candidates separately;
 - first and last exact observation times;
 - distinct associated-BSSID variants among exact prior observations; and
-- whether the current BSSID was seen in those exact prior observations.
+- typed attachment corroboration for the current BSSID.
+
+The current observer ID is the reported hostname. It is useful for scoping
+replay but can be renamed or reused and therefore is not a durable physical-host
+identity.
 
 Compatibility is never transitively clustered. It is an uncertainty relation,
 not context identity: record A can be compatible with incomplete B and B with C
@@ -35,7 +41,9 @@ even when complete A and C conflict.
 
 Linktop projects those facts using separate vocabulary:
 
-- `network context` for exact recurrence or a supported transition;
+- `network context` only for anchored exact recurrence or a supported
+  transition;
+- `exact host-path key match` when sparse values repeat without an anchor;
 - `attachment` for the current association/BSSID episode;
 - `context anchor` for a gateway link binding or weaker available boundary
   evidence; and
@@ -48,6 +56,10 @@ claim motion, AP identity, or a new site. When macOS restricts BSSID access,
 Linktop says the attachment identity is unavailable instead of treating a
 missing value as change.
 
+The history reader fails closed on internal corruption. It may use the valid
+prefix before one malformed, unterminated final fragment, but that session is
+read-only: the warning is shown and Linktop never appends behind the fragment.
+
 ## Non-goals
 
 - No ambient Wi-Fi scan, Core Location request, public-IP geolocation, or
@@ -58,6 +70,7 @@ missing value as change.
 - No claim that a BSSID variant is one verified AP or that a cached gateway
   binding proves current physical presence.
 - No Linktop-owned durable identity or place-policy database in this slice.
+- No claim that the hostname observer ID is a stable machine identity.
 
 ## Decision gates
 
