@@ -133,19 +133,27 @@ linktop speed 192.168.1.10
 Linktop does not retain observations by default. `--history PATH` is an
 explicit private-retention choice for the live overview. It reads a Netmon
 `HostPathObservationV0` JSONL log, compares the completed current context with
-prior records from this host, cites exact recurrence, compatible/incomplete
-evidence, or conflicting context, and appends the new record. Exact recurrence
-also distinguishes known, newly observed, and unavailable associated-BSSID
-attachment evidence. Compatibility is not clustered transitively, and an exact
-serialized key variant is not presented as a count of physical networks. The
-`LINKTOP_HISTORY` environment variable may supply the same opt-in path for a
-regular operator setup.
+prior records from this observer ID, cites anchored recurrence, an unanchored
+exact key match, compatible/incomplete evidence, or conflicting context, and
+appends the new record. A cached gateway link-layer binding is the v0 recurrence
+anchor. Equal sparse fields and a repeated BSSID do not manufacture context
+identity. Attachment evidence separately distinguishes known, newly observed,
+and unavailable associated BSSIDs. Compatibility is not clustered transitively,
+and an exact serialized key variant is not presented as a count of physical
+networks. The observer ID is currently the reported hostname, so it scopes
+comparison but is not a durable hardware identity. The `LINKTOP_HISTORY`
+environment variable may supply the same opt-in path for a regular operator
+setup.
 
 History records can contain SSIDs, BSSIDs, interface addresses and prefixes,
 gateway IP and cached link-layer address, resolver sets, and association
 metadata. Linktop creates a new history directory with mode `0700` and sets the
 log to `0600` on Unix. A malformed or incompatible log is left unchanged and
-reported as an evidence limitation; current live diagnosis continues.
+reported as an evidence limitation; current live diagnosis continues. If only
+the final unterminated JSON fragment is malformed, Linktop can compare against
+the valid prefix but keeps the log read-only and reports the interrupted tail.
+Internal or newline-terminated corruption remains unavailable rather than being
+silently skipped.
 
 A recurring network context is not automatically a physical location. The same
 SSID and private gateway address can occur at unrelated sites, one site can
