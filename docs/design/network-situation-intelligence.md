@@ -161,8 +161,14 @@ captures, and replay without acquiring different semantics in each renderer.
 
 Linktop borrows mechanisms, not visual imitation:
 
-- TShark's capture/display split: a view or filter changes projection, not the
-  acquisition contract.
+- [TShark's capture/display split](https://www.wireshark.org/docs/man-pages/tshark.html):
+  a display filter or output projection changes what is decoded or shown, while
+  a capture filter changes acquisition. Linktop must use the same distinction
+  for views and collectors.
+- [tcpdump's timestamped evidence and terminal capture
+  counters](https://www.tcpdump.org/manpages/tcpdump.1.html): time, numeric
+  identity, capture scope, and dropped-packet accounting are operator facts,
+  not optional decoration.
 - Termshark's stable index, selected object, and decoded detail: the overview
   ranks situations and entities while focused views expose provenance and raw
   evidence.
@@ -176,14 +182,25 @@ Linktop borrows mechanisms, not visual imitation:
 - bmon's current interface plus history and bottom's focused-widget expansion:
   one selected subject can consume detail space without adding permanent
   overview panels.
-- Nmap's runtime progress interaction: active work can disclose progress without
-  turning the primary interface into a scrolling packet log.
+- [Nmap's reason, timing, output, and runtime
+  controls](https://nmap.org/book/man-briefoptions.html): active work can name
+  why a state was assigned, expose bounded progress, and retain a report-shaped
+  output contract without turning the primary interface into a scrolling packet
+  log.
 
 Linktop deliberately does not import Bettercap's adjacency between ordinary
 observation and intrusive controls, Kismet's daemon/web architecture,
 Termshark's packet-dissection scope, or airodump-ng's attack-oriented density.
 Specialist acquisition and analysis remain handoffs or optional evidence
 providers.
+
+[Kismet's datasource model](https://www.kismetwireless.net/docs/readme/datasources/datasources/)
+also makes an important acquisition limit explicit: faster channel hopping can
+increase discovery coverage while reducing per-channel completeness, and the
+actual tradeoff depends on the protocol, hardware, driver, and collection goal.
+Linktop and Netmon must therefore show observer, interval, channel or protocol
+coverage, and gaps rather than presenting every absent device or packet as
+negative evidence.
 
 Time has to be named. A value is a current rate over the monitor interval, a
 cumulative counter, a rolling distribution over a stated sample count, an

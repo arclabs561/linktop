@@ -163,3 +163,16 @@ prefix read-only, reports the interruption, and never appends behind it.
 Internal or newline-terminated corruption still disables history. The current
 observer ID is the reported hostname and is not claimed as durable hardware
 identity.
+
+## Update (2026-07-26): consume the released 0.1.0 commit without widening the contract
+
+Netmon now publishes a checksummed `netmon-v0.1.0` CLI release. Linktop advances
+its `netmon-evidence` and `netmon-replay` dependencies to the exact commit
+underlying that release so downstream CI and the released executable exercise
+one source boundary.
+
+The crates remain experimental, `publish = false`, and outside the stable
+multi-modal schema gate. A binary release therefore does not turn their Rust API
+into a semver compatibility promise. Linktop retains the exact HTTPS revision
+pin until that gate passes; it does not depend on a mutable branch, sibling
+checkout, installed Netmon executable, or human-readable CLI output.
