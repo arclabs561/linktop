@@ -109,7 +109,7 @@ by the terminal library that happens to render them:
 | `--plain` / `--dwell` | human log and supervised temporal observation | explicit stream, optionally bounded | caller-owned stdout | timestamped append-only prose; not a structured event API |
 | `--json` | agent or program consuming one observation or experiment | one observation or bounded experiment | caller-owned stdout | versioned schema discriminator; one JSON document |
 | `--history` | durable host-path recurrence evidence | live overview session | private Netmon `HostPathObservationV0` JSONL | versioned evidence/replay contract; one writer owns each log |
-| `screenshot` | human or agent layout QA | bounded frame transaction | private QA files chosen by caller | text/SVG or text/ANSI/HTML artifacts; not an evidence or automation API |
+| `screenshot` | human or agent layout QA | bounded frame transaction | private QA files chosen by caller | text/SVG or text/ANSI/HTML artifacts plus a versioned private completion manifest; never network evidence |
 | Netmon finite PCAP text | human inspection of a saved capture | one normalization run | caller-owned stdout | bounded expert prose; not for parsing |
 | Netmon `pcap --jsonl` | machine use requiring run provenance | one normalization occurrence | caller-owned stdout | versioned manifest, occurrence receipt, records, and quarantines |
 | Netmon `pcap --records-jsonl` | reproducible machine ingestion and replay | one deterministic normalization | caller-owned stdout | versioned content-bound records; byte identity is gated |
@@ -146,8 +146,9 @@ the current complete shape, including model-backed nested evidence.
 
 The TUI, one-shot text, and plain stream are for people, including expert
 operators. Agents and programs consume versioned JSON or Netmon records, not
-screen text. Screenshot file names remain a QA convention rather than a
-published manifest contract until an external automated consumer requires one.
+screen text. Screenshot artifact names remain a private QA convention.
+Automated capture consumers use the versioned completion manifest rather than
+parsing those names.
 
 Presentation never widens acquisition. Switching TUI views does not start a new
 collector, JSON does not imply completeness beyond its coverage fields, and a
@@ -285,15 +286,38 @@ monitor with an inert control loop, so no live route, radio, process, or
 neighbor collector can contaminate the fixture.
 
 An optional `--native` lane runs the current executable in a fixed-size tmux PTY and
-captures its real alternate-screen output at the same times. It writes plain text,
-ANSI, and self-contained HTML so QA can inspect terminal negotiation and colors as
-well as geometry. Native capture requires tmux but remains headless and does not
+captures its real alternate-screen output at the same times. It captures one ANSI
+pane snapshot, derives plain text from those same bytes, and writes self-contained
+HTML so QA can inspect terminal negotiation and colors as well as geometry. Native
+capture requires tmux but remains headless and does not
 foreground a terminal emulator. Scheduled keys and resizes are replayed through
 tmux after a bounded readiness check; the runner settles briefly after actions
 and verifies the pane dimensions before capture. The synthetic scene reaches
 the native child through an internal screenshot-only environment value rather
 than widening normal live CLI behavior. Frame-indexed names record the scene,
-scheduled and actual time, and actual viewport. Repository development points both lanes at the ignored
+scheduled and actual time, actual rendered view, and actual viewport.
+
+After every requested frame and all of its artifacts succeed, the transaction
+atomically publishes one pretty-printed `linktop.qa_capture_manifest.v1`. It
+records producer/version and executable SHA-256, deterministic or native lane,
+requested subject, scene/stage, policy, normalized frame/key/resize schedules,
+and each frame's scheduled/actual time, viewport, and rendered view. Artifact
+entries use only relative names and include media type, byte length, and SHA-256.
+Artifact creation rejects pre-existing paths. Publication rereads the files and
+checks frame completeness, order, byte length, and digest, then installs the
+completed private temporary inode at a new final path using an exclusive
+same-directory hard link; the native lane also matches the visible header to the
+recorded view and policy. Failure or interruption leaves no completion manifest.
+Consumers rehash artifacts to detect
+changes after the pre-publication verification point. The manifest contains no
+absolute paths or captured network facts and remains a private QA receipt, not
+Netmon evidence, telemetry, or permission to retain observed data.
+
+The output filesystem must support same-directory hard links. Both lanes probe
+that capability inside the private output directory before starting the dwell;
+unsupported filesystems fail before any frame artifact is produced.
+
+Repository development points both lanes at the ignored
 `.agents/reports/ui-captures/` directory so observed network identifiers are not
 committed.
 
@@ -345,9 +369,9 @@ rows into a durable peer inventory.
 - If a machine consumer needs continuous live state, introduce an explicit
   versioned NDJSON event contract and replay fixture; never overload `--json`
   or make an agent scrape the TUI or plain stream.
-- If screenshot artifacts gain an automated external consumer, add a versioned
-  manifest and artifact-integrity contract before treating file names as an
-  API.
+- If screenshot artifacts gain a consumer outside private QA, design
+  publication, retention, sanitization, and compatibility separately; the
+  private completion manifest is not that external evidence boundary.
 
 ## Open questions
 

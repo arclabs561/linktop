@@ -1,0 +1,55 @@
+{
+  "schema": "linktop.qa_capture_manifest.v1",
+  "producer": {
+    "name": "linktop",
+    "version": "0.1.0",
+    "executable_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  },
+  "lane": "deterministic",
+  "requested_subject": "overview",
+  "scene": "dense-peers",
+  "policy": "passive",
+  "replay": {
+    "frames_ms": [
+      1000
+    ],
+    "keys": [
+      {
+        "at_ms": 1000,
+        "key": "3"
+      }
+    ],
+    "resizes": [
+      {
+        "at_ms": 1000,
+        "viewport": {
+          "columns": 80,
+          "rows": 20
+        }
+      }
+    ]
+  },
+  "frames": [
+    {
+      "index": 1,
+      "rendered_view": "peers",
+      "scene": "dense-peers",
+      "stage": "final",
+      "policy": "passive",
+      "scheduled_ms": 1000,
+      "actual_ms": 1004,
+      "viewport": {
+        "columns": 80,
+        "rows": 20
+      },
+      "artifacts": [
+        {
+          "name": "peers-frame001.txt",
+          "media_type": "text/plain; charset=utf-8",
+          "byte_length": 6,
+          "sha256": "3c04009b8f1d7bee2e496be23c08761744b26c499ca15f3c125643be85c86e0c"
+        }
+      ]
+    }
+  ]
+}

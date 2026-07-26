@@ -164,3 +164,44 @@ inherited `LINKTOP_HISTORY`. A screenshot may render live host evidence or an
 inert synthetic scene, but it cannot read, compare, or append durable recurrence
 evidence. This makes the implementation match the original process-local QA
 decision.
+
+## Update (2026-07-26): publish a private completion manifest
+
+The automated-consumer review trigger fired when agents began using multi-frame
+captures to qualify view navigation and terminal-size behavior. File names alone
+could not prove that every requested frame completed, identify the view actually
+rendered after replayed navigation, or detect a partial or modified artifact set.
+
+Each successful transaction now writes one pretty-printed
+`linktop.qa_capture_manifest.v1` document after all requested frames and
+artifacts have completed. The manifest records the Linktop producer, version,
+and executable SHA-256, deterministic or native lane, requested subject, scene
+and stage, passive or active policy, normalized frame/key/resize schedules, and
+per-frame scheduled and actual elapsed milliseconds, actual viewport, and
+rendered view. Each artifact entry contains a relative file name, media type,
+byte length, and SHA-256 digest. Native visible text is derived from the same
+ANSI pane snapshot used by the ANSI and HTML artifacts.
+
+Before publication, Linktop verifies that the completed frame count and order
+match the normalized request and rereads every artifact to verify its length and
+digest. Artifact creation is no-clobber and rejects pre-existing files and
+symlinks. It writes the manifest through a private temporary file and installs
+the completed inode at the final name with an exclusive same-directory hard
+link only after verification, so concurrent publication cannot replace an
+existing path and a failed, interrupted, or incomplete capture has no
+completion manifest. A consumer must rehash artifacts against the manifest to
+detect changes after that verification point. Frame file names now use the
+actual rendered view after replayed `1`, `2`, `3`, or `Tab` navigation rather
+than the requested entry subject. The native lane checks the captured visible
+header against both the rendered view and acquisition policy.
+
+The caller-selected output filesystem must support same-directory hard links.
+Linktop probes that capability in the private output directory before starting
+the dwell, so an unsupported filesystem fails without producing frame artifacts.
+
+The manifest is a private QA completion contract, not network evidence,
+telemetry, or a durable observation record. It contains no absolute paths or
+captured network facts; those remain inside the caller-selected private frame
+artifacts. Its digest records the artifact bytes verified immediately before
+publication and makes later changes detectable, but does not authorize
+publication or retention.
