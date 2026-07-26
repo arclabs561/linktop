@@ -2128,6 +2128,8 @@ fn render_peer_table(frame: &mut Frame<'_>, area: Rect, app: &App, peer_offset: 
     }
     let range = if peers.is_empty() {
         "0 / 0".into()
+    } else if capacity == 0 {
+        format!("0 visible / {}", peers.len())
     } else {
         format!("{}-{} / {}", offset + 1, end, peers.len())
     };
@@ -3294,6 +3296,20 @@ mod tests {
         assert!(rendered.contains("12-24 / 24"));
         assert!(rendered.contains("192.168.1.12"));
         assert!(!rendered.contains("192.168.1.2 "));
+    }
+
+    #[test]
+    fn zero_capacity_peer_view_reports_no_visible_rows() {
+        let mut app = App::new();
+        app.peers = peer_fixture(4);
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_peer_table(frame, frame.area(), &app, 3))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+        assert!(rendered.contains("0 visible / 4"));
+        assert!(!rendered.contains("1-0 / 4"));
     }
 
     #[test]
