@@ -219,19 +219,19 @@ fn render_overview_evidence(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ),
     ]));
     let content_rows = usize::from(area.height.saturating_sub(2));
-    if let Some(history) = &app.history_context {
-        if content_rows >= lines.len() + 2 {
-            lines.extend([
-                Line::from(vec![
-                    Span::styled("anchor     ", Style::default().fg(MUTED)),
-                    Span::styled(history.context_anchor.clone(), Style::default().fg(INK)),
-                ]),
-                Line::from(vec![
-                    Span::styled("place      ", Style::default().fg(MUTED)),
-                    Span::styled(history.place_authority.clone(), Style::default().fg(INK)),
-                ]),
-            ]);
-        }
+    if let Some(history) = &app.history_context
+        && content_rows >= lines.len() + 2
+    {
+        lines.extend([
+            Line::from(vec![
+                Span::styled("anchor     ", Style::default().fg(MUTED)),
+                Span::styled(history.context_anchor.clone(), Style::default().fg(INK)),
+            ]),
+            Line::from(vec![
+                Span::styled("place      ", Style::default().fg(MUTED)),
+                Span::styled(history.place_authority.clone(), Style::default().fg(INK)),
+            ]),
+        ]);
     }
     lines.truncate(content_rows);
     frame.render_widget(
@@ -290,7 +290,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, mode: MonitorMode
             app.peers.health,
             if narrow {
                 format!(
-                    "{}/{}",
+                    "CACHE {}/{}",
                     app.peers.peers.len(),
                     app.peer_dwell_summary().observed.max(app.peers.peers.len())
                 )
@@ -2479,6 +2479,26 @@ fn render_footer(
     let state = if app.paused { "PAUSED" } else { "LIVE" };
     if area.width < 100 {
         if can_navigate && area.width < 76 {
+            if mode == MonitorMode::Peers {
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(" q ", Style::default().fg(Color::Black).bg(INK)),
+                        Span::styled(" quit  ", Style::default().fg(MUTED)),
+                        Span::styled(" r ", Style::default().fg(Color::Black).bg(INK)),
+                        Span::styled(" refresh  ", Style::default().fg(MUTED)),
+                        Span::styled(" p ", Style::default().fg(Color::Black).bg(INK)),
+                        Span::styled(" pause  ", Style::default().fg(MUTED)),
+                        Span::styled(" j/k ", Style::default().fg(Color::Black).bg(INK)),
+                        Span::styled(" scroll  ", Style::default().fg(MUTED)),
+                        Span::styled(
+                            format!("{state} "),
+                            Style::default().fg(if app.paused { WARN } else { OK }),
+                        ),
+                    ])),
+                    area,
+                );
+                return;
+            }
             let probes = if app.probe_policy().is_active() {
                 "probes:on"
             } else {
@@ -3414,6 +3434,23 @@ mod tests {
         assert!(rendered.contains("PASSIVE NEIGHBORS"));
         assert!(rendered.contains("192.168.1.1"));
         assert!(!rendered.contains("OBSERVATION CONTEXT"));
+    }
+
+    #[test]
+    fn narrow_peers_labels_cache_extent_and_keeps_operator_controls() {
+        let mut app = App::new();
+        app.peers = peer_fixture(12);
+        let backend = TestBackend::new(62, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Peers, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+
+        assert!(rendered.contains("CACHE 12/12"));
+        assert!(rendered.contains("refresh"));
+        assert!(rendered.contains("pause"));
+        assert!(rendered.contains("scroll"));
     }
 
     #[test]
