@@ -922,6 +922,11 @@ fn run_plain(
     }
     controls.send(MonitorControl::Stop).ok();
     monitor.join().ok();
+    if dwell.is_some() {
+        for line in plain::format_dwell_summary(&app, mode.dwell_collector_scope()) {
+            println!("{line}");
+        }
+    }
     Ok(())
 }
 

@@ -92,3 +92,16 @@ the review trigger rather than overloading `--json` or changing pipe behavior.
 
 Extends ADR-0001's terminal-first instrument with explicit focused-view and
 noninteractive lifetime contracts.
+
+## Update (2026-07-26): bounded plain dwell closes with a scoped summary
+
+When an explicitly bounded plain session ends, append one final process-local
+dwell summary after the live event stream. The summary includes the current
+path generation and up to eight completed generations observed by the same
+process. It labels each generation as current or completed and reports only
+evidence collected by that command's overview, link, or peers plan; disabled
+collectors are reported as `not collected`, not as zero activity.
+
+This closing summary does not change the lifetime of an unbounded plain stream,
+make JSON continuous, persist observations, or widen a focused command's
+acquisition plan.

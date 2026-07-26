@@ -8,7 +8,7 @@ supersedes: none
 superseded_by: none
 extends: 0001
 confidence: high
-review_trigger: revisit if the path fingerprint proves unstable on a supported platform, monitoring moves to an async runtime with structured cancellation, or observations intentionally span multiple paths.
+review_trigger: revisit if the path fingerprint proves unstable on a supported platform, completed generations become durable or accept late evidence, a projection combines generations as one path, or monitoring moves to an async runtime with structured cancellation.
 ---
 
 # ADR-0003: Fence observations by path generation
@@ -101,3 +101,19 @@ a new generation and receives the same path-scoped reset as any other sustained
 transition. This refinement removes a known false transition during house-Wi-Fi and
 hotspot handoff without allowing old asynchronous results to cross into the next
 confirmed path.
+
+## Update (2026-07-26): retain completed summaries outside live path state
+
+Immediately before a confirmed transition resets the live accumulators, copy
+the completed generation's typed path identity and interface, radio, workload,
+and peer aggregates into a separate read-only queue. Retain at most eight
+completed generations, process-locally. The new generation still receives
+fresh live accumulators, and every asynchronous result is still accepted or
+rejected against the current generation. Detailed peer bindings still reset;
+only their aggregate cache-dwell summary enters the completed record.
+
+A completed summary cannot be mutated by late results, support the current
+diagnosis, establish peer liveness or location, or become durable history. It
+is never combined with another generation as though both described one path.
+It exists only to explain transitions observed during this process and is
+emitted by the explicit bounded plain-dwell summary.

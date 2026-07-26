@@ -96,6 +96,13 @@ after the observation window. `--dwell` never changes a passive command into an 
 one. JSON remains a single observation in this slice; a future JSON event stream must
 use an explicit `--json-stream` contract rather than overloading `--json`.
 
+An explicitly bounded plain stream closes with a human-readable dwell summary.
+It reports the current generation plus up to eight completed generations seen
+by the process, preserving interface, radio, workload-window, and peer-cache
+aggregates only when the command's collector plan acquired them. A link or peers
+session says `not collected` for disabled sources rather than presenting absent
+collection as zero activity.
+
 Focused monitoring uses workload-specific schedules:
 
 - passive overview keeps route, DHCP/association, counter, radio,
@@ -177,6 +184,13 @@ three seconds, disclose `switching networks`, and launch no new collectors again
 retained topology. A recovered route resumes normal fingerprint comparison; a route
 that remains absent after the grace period becomes a new incomplete generation.
 
+Before resetting those live accumulators, Linktop copies the completed
+generation's typed identity and dwell aggregates into a bounded, immutable
+process-local queue. That queue is output history, not current evidence: late
+results cannot update it, it cannot affect the new generation's diagnosis, and
+it is discarded when the process exits. Detailed peer rows do not cross this
+boundary; only their aggregate cache-dwell summary does.
+
 ### Self-contained visual QA
 
 Ratatui `TestBackend` renders canonical overview, link, and peers fixtures at wide,
@@ -207,10 +221,12 @@ terminal one-shot must use `--json`, redirect output, or a future explicit snaps
 modifier. Repeated passive cache reads add small local process cost, bounded by the
 interval, command deadlines, and single-flight scheduling.
 
-The focused link and peers views keep process-local history only. Their first/last
-observations reset on every path generation and are not persisted across runs. The
-overview can explicitly read and append a private Netmon v0 host-path JSONL log; it
-does not make focused cache rows into a durable peer inventory.
+The focused link and peers views keep process-local history only. Their live
+first/last observations reset on every path generation. An explicit bounded
+plain dwell may report a completed generation from its in-process queue, but
+neither form is persisted across runs. The overview can explicitly read and
+append a private Netmon v0 host-path JSONL log; it does not make focused cache
+rows into a durable peer inventory.
 
 ## Implementation plan
 

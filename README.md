@@ -105,6 +105,10 @@ either command with no lifetime option remains a one-shot snapshot. Use
 `--dwell SECONDS` to request and bound any live
 overview, link, or peers observation. Plain mode is useful for logs, `tee`,
 remote shells, and support handoffs; it never emits cursor-control sequences.
+Combining `--plain` with `--dwell` closes the stream with a collector-scoped
+summary of the current path generation and up to eight completed generations
+observed by that process. Evidence a focused command did not collect is
+labelled `not collected`; the summary is not persisted.
 
 ```sh
 linktop
@@ -130,7 +134,7 @@ linktop speed 192.168.1.10
 
 ## Optional prior-context evidence
 
-Linktop does not retain observations by default. `--history PATH` is an
+Linktop does not persist observations by default. `--history PATH` is an
 explicit private-retention choice for the live overview. It reads a Netmon
 `HostPathObservationV0` JSONL log, compares the completed current context with
 prior records from this observer ID, cites anchored recurrence, an unanchored
