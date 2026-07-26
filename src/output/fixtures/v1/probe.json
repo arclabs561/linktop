@@ -45,6 +45,7 @@
     "neighbors": {
       "health": "ok",
       "detail": "1 cached binding",
+      "path_filter": "applied",
       "sources": [
         "arp -an"
       ],
@@ -68,7 +69,25 @@
         "health": "ok",
         "detail": "example.test resolved",
         "latency_ms": 12.0,
-        "metrics": null
+        "metrics": {
+          "sent": 4,
+          "received": 3,
+          "lost": 1,
+          "loss_rate": 0.25,
+          "rtt_min_ms": 8.0,
+          "rtt_mean_ms": 12.0,
+          "rtt_p50_ms": 11.0,
+          "rtt_p95_ms": 17.0,
+          "rtt_p99_ms": 17.8,
+          "rtt_max_ms": 18.0,
+          "rtt_sample_variance_ms2": 26.0,
+          "rtt_sample_stddev_ms": 5.1,
+          "mean_abs_adjacent_rtt_delta_ms": 5.0,
+          "positive_adjacent_rtt_delta_p95_ms": 7.0,
+          "rtt_delta_from_min_p95_ms": 9.0,
+          "rtt_delta_from_min_max_ms": 10.0,
+          "adjacent_rtt_pairs": 2
+        }
       }
     ]
   }

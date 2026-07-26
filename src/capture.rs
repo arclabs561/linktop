@@ -1007,6 +1007,7 @@ fn dense_peer_baseline() -> PeerSnapshot {
     PeerSnapshot {
         health: Health::Ok,
         detail: "28 synthetic baseline cache entries; no liveness scan".into(),
+        path_filter: crate::model::PeerPathFilter::Applied,
         sources: vec![
             "synthetic ARP cache fixture".into(),
             "synthetic NDP cache fixture".into(),

@@ -17,8 +17,54 @@
     "port": 5201,
     "duration_s": 10,
     "gateway_latency": {
-      "baseline": null,
-      "loaded": null
+      "baseline": {
+        "health": "ok",
+        "detail": "gateway baseline complete",
+        "latency_ms": 12.0,
+        "metrics": {
+          "sent": 4,
+          "received": 3,
+          "lost": 1,
+          "loss_rate": 0.25,
+          "rtt_min_ms": 8.0,
+          "rtt_mean_ms": 12.0,
+          "rtt_p50_ms": 11.0,
+          "rtt_p95_ms": 17.0,
+          "rtt_p99_ms": 17.8,
+          "rtt_max_ms": 18.0,
+          "rtt_sample_variance_ms2": 26.0,
+          "rtt_sample_stddev_ms": 5.1,
+          "mean_abs_adjacent_rtt_delta_ms": 5.0,
+          "positive_adjacent_rtt_delta_p95_ms": 7.0,
+          "rtt_delta_from_min_p95_ms": 9.0,
+          "rtt_delta_from_min_max_ms": 10.0,
+          "adjacent_rtt_pairs": 2
+        }
+      },
+      "loaded": {
+        "health": "ok",
+        "detail": "gateway under load complete",
+        "latency_ms": 24.0,
+        "metrics": {
+          "sent": 4,
+          "received": 3,
+          "lost": 1,
+          "loss_rate": 0.25,
+          "rtt_min_ms": 8.0,
+          "rtt_mean_ms": 12.0,
+          "rtt_p50_ms": 11.0,
+          "rtt_p95_ms": 17.0,
+          "rtt_p99_ms": 17.8,
+          "rtt_max_ms": 18.0,
+          "rtt_sample_variance_ms2": 26.0,
+          "rtt_sample_stddev_ms": 5.1,
+          "mean_abs_adjacent_rtt_delta_ms": 5.0,
+          "positive_adjacent_rtt_delta_p95_ms": 7.0,
+          "rtt_delta_from_min_p95_ms": 9.0,
+          "rtt_delta_from_min_max_ms": 10.0,
+          "adjacent_rtt_pairs": 2
+        }
+      }
     },
     "transfer": {
       "sent_bits_per_second": 1000000.0,

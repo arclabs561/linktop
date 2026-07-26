@@ -3,8 +3,8 @@ use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
 
 use crate::model::{
-    Health, InterfaceCounters, LinkSnapshot, MacScope, Peer, PeerSnapshot, ProbePolicy,
-    SnapshotProbe, SnapshotReport, SnapshotSummary,
+    Health, InterfaceCounters, LinkSnapshot, MacScope, Peer, PeerPathFilter, PeerSnapshot,
+    ProbePolicy, SnapshotProbe, SnapshotReport, SnapshotSummary,
 };
 
 pub const OBSERVATION_SCHEMA_V1: &str = "linktop.observation.v1";
@@ -144,6 +144,7 @@ pub struct PeerEvidence<'a> {
     pub path_context: PeerPathContext<'a>,
     pub health: Health,
     pub detail: &'a str,
+    pub path_filter: PeerPathFilter,
     pub sources: &'a [String],
     pub failed_sources: &'a [String],
     pub oui_source: Option<&'a str>,
@@ -160,6 +161,7 @@ impl<'a> PeerEvidence<'a> {
             },
             health: snapshot.health,
             detail: &snapshot.detail,
+            path_filter: snapshot.path_filter,
             sources: &snapshot.sources,
             failed_sources: &snapshot.failed_sources,
             oui_source: snapshot.oui_source.as_deref(),
@@ -213,8 +215,10 @@ pub fn print_json(document: &impl Serialize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::LatencyMetrics;
     use crate::model::{
-        Address, EvidenceCoverage, PathStatus, ProbeKind, SnapshotProbe, SnapshotReport,
+        Address, EvidenceCoverage, NetworkConfiguration, PathStatus, ProbeKind, ProbeResult,
+        SnapshotProbe, SnapshotReport, WifiTelemetry,
     };
     use crate::speed::{LoadedLatency, SpeedReport, TransferSummary};
 
@@ -235,7 +239,19 @@ mod tests {
             link_type: Some("wifi".into()),
             ssid: Some("lab".into()),
             ssid_restricted: false,
-            wifi: None,
+            wifi: Some(WifiTelemetry {
+                signal_dbm: Some(-52.0),
+                noise_dbm: Some(-91.0),
+                signal_percent: Some(84.0),
+                channel: Some(149),
+                channel_width_mhz: Some(80),
+                frequency_mhz: Some(5745),
+                band: Some("5 GHz".into()),
+                phy: Some("802.11ax".into()),
+                tx_rate_mbps: Some(1200.0),
+                rx_rate_mbps: Some(960.0),
+                mcs: Some(11),
+            }),
             gateway: Some("192.0.2.1".into()),
             public_ip: None,
             resolvers: vec!["192.0.2.53".into()],
@@ -246,7 +262,64 @@ mod tests {
                 is_default: true,
                 is_temporary: false,
             }],
-            network_configuration: None,
+            network_configuration: Some(Box::new(NetworkConfiguration {
+                connection_id: Some("lab-wifi".into()),
+                associated_bssid: Some("00:11:22:33:44:55".into()),
+                bssid_restricted: false,
+                method: Some("DHCP".into()),
+                state: Some("BOUND".into()),
+                server: Some("192.0.2.1".into()),
+                subnet_mask: Some("255.255.255.0".into()),
+                lease_seconds: Some(86400),
+                lease_started_at: Some("2026-07-26T12:00:00Z".into()),
+                lease_expires_at: Some("2026-07-27T12:00:00Z".into()),
+                router_arp_verified: Some(true),
+                security: Some("WPA3 Personal".into()),
+            })),
+        }
+    }
+
+    fn test_counters() -> InterfaceCounters {
+        InterfaceCounters {
+            interface: "en0".into(),
+            received_bytes: 123_456,
+            transmitted_bytes: 78_901,
+            received_packets: 1_234,
+            transmitted_packets: 789,
+            receive_errors: 2,
+            transmit_errors: 3,
+            drops: 4,
+        }
+    }
+
+    fn test_metrics() -> LatencyMetrics {
+        LatencyMetrics {
+            sent: 4,
+            received: 3,
+            lost: 1,
+            loss_rate: Some(0.25),
+            rtt_min_ms: Some(8.0),
+            rtt_mean_ms: Some(12.0),
+            rtt_p50_ms: Some(11.0),
+            rtt_p95_ms: Some(17.0),
+            rtt_p99_ms: Some(17.8),
+            rtt_max_ms: Some(18.0),
+            rtt_sample_variance_ms2: Some(26.0),
+            rtt_sample_stddev_ms: Some(5.1),
+            mean_abs_adjacent_rtt_delta_ms: Some(5.0),
+            positive_adjacent_rtt_delta_p95_ms: Some(7.0),
+            rtt_delta_from_min_p95_ms: Some(9.0),
+            rtt_delta_from_min_max_ms: Some(10.0),
+            adjacent_rtt_pairs: 2,
+        }
+    }
+
+    fn test_probe_result(detail: &str, latency_ms: f64) -> ProbeResult {
+        ProbeResult {
+            health: Health::Ok,
+            detail: detail.into(),
+            latency_ms: Some(latency_ms),
+            metrics: Some(test_metrics()),
         }
     }
 
@@ -254,6 +327,7 @@ mod tests {
         PeerSnapshot {
             health: Health::Ok,
             detail: "1 cached binding".into(),
+            path_filter: PeerPathFilter::Applied,
             sources: vec!["arp -an".into()],
             failed_sources: Vec::new(),
             oui_source: Some("IEEE OUI".into()),
@@ -270,6 +344,7 @@ mod tests {
     }
 
     fn assert_golden(document: &impl Serialize, expected: &str) {
+        let expected = expected.replace("\r\n", "\n");
         assert_eq!(
             format!("{}\n", serde_json::to_string_pretty(document).unwrap()),
             expected
@@ -302,6 +377,14 @@ mod tests {
         assert_eq!(value["assessment"]["evidence_coverage"], "partial");
         assert_eq!(value["evidence"]["link"]["interface"], "en0");
         assert!(value["evidence"]["interface_counters"].is_null());
+    }
+
+    #[test]
+    fn golden_comparison_normalizes_checkout_line_endings() {
+        assert_golden(
+            &serde_json::json!({"field": "value"}),
+            "{\r\n  \"field\": \"value\"\r\n}\r\n",
+        );
     }
 
     #[test]
@@ -346,8 +429,11 @@ mod tests {
         let link = test_link();
         let peers = test_peers();
         let snapshot_summary = passive_summary(EvidenceCoverage::Partial);
+        let mut snapshot_link = link.clone();
+        snapshot_link.wifi = None;
+        snapshot_link.network_configuration = None;
         let snapshot_report = SnapshotReport {
-            link: link.clone(),
+            link: snapshot_link,
             interface_counters: None,
             neighbors: peers.clone(),
             probes: Vec::new(),
@@ -371,8 +457,11 @@ mod tests {
             completed_probes: 1,
             total_probes: ProbeKind::ALL.len(),
         };
+        let mut probe_link = link.clone();
+        probe_link.wifi = None;
+        probe_link.network_configuration = None;
         let probe_report = SnapshotReport {
-            link: link.clone(),
+            link: probe_link,
             interface_counters: None,
             neighbors: peers.clone(),
             probes: vec![SnapshotProbe {
@@ -380,7 +469,7 @@ mod tests {
                 health: Health::Ok,
                 detail: "example.test resolved".into(),
                 latency_ms: Some(12.0),
-                metrics: None,
+                metrics: Some(test_metrics()),
             }],
             summary: probe_summary,
         };
@@ -395,12 +484,13 @@ mod tests {
             include_str!("output/fixtures/v1/probe.json"),
         );
 
+        let link_counters = test_counters();
         let link_document = ObservationDocument::at(
             ObservationSubject::Link,
             snapshot_summary,
             LinkEvidence {
                 link: &link,
-                interface_counters: None,
+                interface_counters: Some(&link_counters),
             },
             "2026-07-26T20:00:00Z".into(),
         );
@@ -424,8 +514,8 @@ mod tests {
             port: 5201,
             duration_s: 10,
             gateway_latency: LoadedLatency {
-                baseline: None,
-                loaded: None,
+                baseline: Some(test_probe_result("gateway baseline complete", 12.0)),
+                loaded: Some(test_probe_result("gateway under load complete", 24.0)),
             },
             transfer: TransferSummary {
                 sent_bits_per_second: Some(1_000_000.0),

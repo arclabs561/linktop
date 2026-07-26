@@ -650,7 +650,7 @@ fn link(json: bool) -> Result<()> {
 fn peers(json: bool) -> Result<()> {
     let link = net::collect_link();
     let report = peers::collect(&link);
-    let assessment = model::passive_peer_summary(&link, &report);
+    let assessment = model::passive_peer_summary(&report);
     if json {
         let evidence = output::PeerEvidence::new(&link, &report);
         let document = output::ObservationDocument::new(

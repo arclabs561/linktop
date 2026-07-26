@@ -708,6 +708,7 @@ mod tests {
         let peers = PeerSnapshot {
             health: Health::Ok,
             detail: "1 cached peer".into(),
+            path_filter: crate::model::PeerPathFilter::Applied,
             sources: vec!["arp -an".into()],
             failed_sources: Vec::new(),
             oui_source: None,
@@ -838,6 +839,7 @@ mod tests {
         app.peers = PeerSnapshot {
             health: Health::Ok,
             detail: "1 cached peer(s); no liveness scan".into(),
+            path_filter: crate::model::PeerPathFilter::Applied,
             sources: vec!["arp -an".into()],
             failed_sources: Vec::new(),
             peers: vec![Peer {
@@ -857,6 +859,7 @@ mod tests {
             snapshot: PeerSnapshot {
                 health: Health::Ok,
                 detail: "0 cached peer(s); no liveness scan".into(),
+                path_filter: crate::model::PeerPathFilter::Applied,
                 sources: vec!["arp -an".into()],
                 failed_sources: Vec::new(),
                 oui_source: Some("test registry".into()),
@@ -873,6 +876,7 @@ mod tests {
         let before_snapshot = PeerSnapshot {
             health: Health::Ok,
             detail: "1 cached peer".into(),
+            path_filter: crate::model::PeerPathFilter::Applied,
             sources: vec!["arp -an".into()],
             failed_sources: Vec::new(),
             oui_source: None,
@@ -907,6 +911,7 @@ mod tests {
         let before_snapshot = PeerSnapshot {
             health: Health::Ok,
             detail: "1 cached peer".into(),
+            path_filter: crate::model::PeerPathFilter::Applied,
             sources: vec!["arp -an".into(), "ndp -an".into()],
             failed_sources: Vec::new(),
             oui_source: None,

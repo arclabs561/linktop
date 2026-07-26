@@ -689,6 +689,7 @@ pub fn collect_snapshot(timeout: Duration) -> SnapshotReport {
         .unwrap_or_else(|_| crate::model::PeerSnapshot {
             health: Health::Unavailable,
             detail: "neighbor-cache worker panicked".into(),
+            path_filter: crate::model::PeerPathFilter::Unavailable,
             sources: Vec::new(),
             failed_sources: Vec::new(),
             oui_source: None,
@@ -717,6 +718,7 @@ pub fn collect_passive_snapshot() -> SnapshotReport {
         .unwrap_or_else(|_| crate::model::PeerSnapshot {
             health: Health::Unavailable,
             detail: "neighbor-cache worker panicked".into(),
+            path_filter: crate::model::PeerPathFilter::Unavailable,
             sources: Vec::new(),
             failed_sources: Vec::new(),
             oui_source: None,

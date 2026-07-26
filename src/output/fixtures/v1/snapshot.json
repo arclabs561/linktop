@@ -45,6 +45,7 @@
     "neighbors": {
       "health": "ok",
       "detail": "1 cached binding",
+      "path_filter": "applied",
       "sources": [
         "arp -an"
       ],
