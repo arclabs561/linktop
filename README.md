@@ -228,7 +228,26 @@ linktop screenshot overview --at 2,5,12 --columns 160 --rows 26
 linktop screenshot overview --active --at 2,5,12 --columns 160 --rows 26
 linktop screenshot peers --at 5,15 --columns 100 --rows 24
 linktop screenshot link --at 12 --columns 100 --rows 24
+linktop screenshot overview --scene dense-peers --at 1,3,5 \
+  --key 1:3 --resize 3:80x20 --key 3:page-down --key 5:home
 ```
+
+Repeatable `--key AT:KEY` and `--resize AT:COLSxROWS` actions reproduce
+operator interactions and terminal breakpoints without manual timing. At one
+timestamp Linktop drains available observations, resizes, applies keys in
+command-line order, and then renders the requested frame. Supported replay keys
+are `r`, `p`, `a`, `1`, `2`, `3`, `tab`, `j`, `k`, `up`, `down`, `page-up`,
+`page-down`, `g`, `G`, `home`, and `end`; terminating keys are rejected because
+the final `--at` remains the transaction boundary.
+
+`--scene dense-peers` supplies a passive, synthetic ARP/NDP cache history with
+27 current documentation-range neighbors, overflow, IPv4 and IPv6 rows,
+gateway and no-MAC cases, source disagreement, NUD states, a changed binding,
+cache disappearance, and return. The scene enters the same `MonitorUpdate`
+reducer as live observations, so it exercises attention ranking and
+generation-scoped dwell instead of bypassing the application model. It is
+available for overview and peers screenshots and cannot be combined with
+active probes or history.
 
 Use `--native` to exercise the actual Crossterm alternate-screen application in
 a fixed-size tmux PTY. It saves the visible text, the ANSI terminal frame, and a
@@ -237,19 +256,26 @@ self-contained HTML reconstruction with the terminal colors intact:
 ```sh
 linktop screenshot overview --native --at 2,5,12 --columns 100 --rows 24
 linktop screenshot peers --native --at 5,15 --columns 80 --rows 20
+linktop screenshot overview --native --scene dense-peers --at 1,3 \
+  --key 1:3 --resize 3:80x20
 ```
 
 Native capture requires tmux; it does not require ImageMagick or a foreground
 terminal window. It deliberately clears `NO_COLOR` only in the captured child
 process so the artifact tests Linktop's own color contract even when the
-calling shell disables color.
+calling shell disables color. Linktop waits for the child view to become ready,
+settles after each replayed action, and verifies the tmux pane dimensions before
+writing a frame. The child does not inherit `LINKTOP_HISTORY` or an ambient
+fixture selector; an explicit history path remains the only history authority.
+Interrupting the transaction also terminates its isolated tmux server and child.
 
 The command writes to `./linktop-captures/` by default. Repository development
 can use `just capture-ui overview 160 26 2,5,12`, which keeps artifacts under
 the ignored `.agents/reports/ui-captures/` directory; `just capture-native`
-selects the PTY lane. Filenames include the subject, session, fixed size, and
-actual elapsed milliseconds so frames from different times and runs do not
-overwrite each other. The last `--at` value is the transaction lifetime.
+selects the PTY lane. Filenames include the subject, live or synthetic scene,
+session, frame index, actual viewport, and scheduled and actual elapsed
+milliseconds so frames from different times, sizes, and runs do not overwrite
+each other. The last `--at` value is the transaction lifetime.
 
 ## Controls
 

@@ -204,12 +204,34 @@ comma-delimited `--at` values save private text and styled SVG frames at explici
 elapsed times; the latest requested time is the bounded transaction lifetime. The
 portable lane needs no TTY, tmux, ImageMagick, or manual operator screenshot.
 
+Repeatable `--key AT:KEY` and `--resize AT:COLSxROWS` actions extend that
+transaction to responsive and navigational states. For any shared timestamp the
+runner drains already-available observations, resizes first, applies keys in CLI
+order through the same reducer as the live TUI, and renders last. Actions after
+the final frame, terminating keys, and conflicting same-time resizes are invalid.
+The headless lane is the deterministic ordering and content authority.
+
+The named `dense-peers` scene provides a synthetic, passive observation history
+for overview and peers captures. Generation-tagged link and peer updates flow
+through the real model reducer and include 27 current documentation-range
+neighbors plus one cache-absent peer. The snapshots deliberately exercise
+IPv4/IPv6 overflow, gateway role, missing MAC evidence, source disagreement,
+kernel NUD states, binding change, cache disappearance, and return. This is one
+maintained product fixture, not a general scenario language, and it cannot be
+combined with active probes or durable history. The scene replaces the host
+monitor with an inert control loop, so no live route, radio, process, or
+neighbor collector can contaminate the fixture.
+
 An optional `--native` lane runs the current executable in a fixed-size tmux PTY and
 captures its real alternate-screen output at the same times. It writes plain text,
 ANSI, and self-contained HTML so QA can inspect terminal negotiation and colors as
 well as geometry. Native capture requires tmux but remains headless and does not
-foreground a terminal emulator. Timestamped names keep multiple frames and runs
-distinct. Repository development points both lanes at the ignored
+foreground a terminal emulator. Scheduled keys and resizes are replayed through
+tmux after a bounded readiness check; the runner settles briefly after actions
+and verifies the pane dimensions before capture. The synthetic scene reaches
+the native child through an internal screenshot-only environment value rather
+than widening normal live CLI behavior. Frame-indexed names record the scene,
+scheduled and actual time, and actual viewport. Repository development points both lanes at the ignored
 `.agents/reports/ui-captures/` directory so observed network identifiers are not
 committed.
 

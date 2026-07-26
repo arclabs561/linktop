@@ -13,7 +13,7 @@ mod ui;
 use std::ffi::OsString;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
-use std::sync::mpsc::TryRecvError;
+use std::sync::mpsc::{Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -124,6 +124,15 @@ enum Command {
         /// Enable active path probes in an overview capture.
         #[arg(long)]
         active: bool,
+        /// Replay a key at an elapsed second (for example `--key 2:3`).
+        #[arg(long = "key", value_name = "AT:KEY")]
+        keys: Vec<capture::ScheduledKey>,
+        /// Resize before a frame at an elapsed second (for example `--resize 3:80x20`).
+        #[arg(long = "resize", value_name = "AT:COLSxROWS")]
+        resizes: Vec<capture::ScheduledResize>,
+        /// Use a deterministic synthetic observation scene instead of host evidence.
+        #[arg(long, value_enum)]
+        scene: Option<capture::CaptureScene>,
     },
 }
 
@@ -149,6 +158,29 @@ enum LiveOutput {
     Tui,
     Plain,
     Once,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InteractionState {
+    pub active_mode: MonitorMode,
+    pub peer_offset: usize,
+    pub can_navigate: bool,
+}
+
+impl InteractionState {
+    fn new(active_mode: MonitorMode, can_navigate: bool) -> Self {
+        Self {
+            active_mode,
+            peer_offset: 0,
+            can_navigate,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InteractionOutcome {
+    Continue,
+    Quit,
 }
 
 fn main() -> Result<()> {
@@ -254,6 +286,9 @@ fn main() -> Result<()> {
             output_dir,
             native,
             active,
+            keys,
+            resizes,
+            scene,
         }) => {
             reject_live_options("screenshot", plain, dwell)?;
             reject_root_active("screenshot", cli.active)?;
@@ -266,32 +301,42 @@ fn main() -> Result<()> {
                 explicit_history.is_none() || mode == MonitorMode::Overview,
                 "screenshot --history is only valid for the overview"
             );
+            if scene.is_some() {
+                anyhow::ensure!(
+                    matches!(mode, MonitorMode::Overview | MonitorMode::Peers),
+                    "screenshot --scene dense-peers is only valid for overview or peers"
+                );
+                anyhow::ensure!(
+                    !active,
+                    "screenshot --scene dense-peers cannot be combined with --active"
+                );
+                anyhow::ensure!(
+                    explicit_history.is_none(),
+                    "screenshot --scene dense-peers cannot be combined with --history"
+                );
+            }
             let capture_policy = if active {
                 ProbePolicy::Active
             } else {
                 ProbePolicy::Passive
             };
             let size = capture::CaptureSize { columns, rows };
+            let request = capture::CaptureRequest {
+                interval,
+                mode,
+                probe_policy: capture_policy,
+                requested_seconds: at,
+                size,
+                output_directory: output_dir,
+                history_path: explicit_history,
+                keys,
+                resizes,
+                scene,
+            };
             if native {
-                capture::run_native(
-                    interval,
-                    mode,
-                    capture_policy,
-                    &at,
-                    size,
-                    &output_dir,
-                    explicit_history,
-                )
+                capture::run_native(request)
             } else {
-                capture::run(
-                    interval,
-                    mode,
-                    capture_policy,
-                    &at,
-                    size,
-                    &output_dir,
-                    explicit_history,
-                )
+                capture::run(request)
             }
         }
         None => match live_output {
@@ -743,6 +788,7 @@ fn run_tui(
     probe_policy: ProbePolicy,
     history_path: Option<PathBuf>,
 ) -> Result<()> {
+    let screenshot_scene = capture::child_scene_from_environment()?;
     enable_raw_mode().context("enable terminal raw mode")?;
     let _guard = TerminalGuard;
     let mut stdout = io::stdout();
@@ -750,15 +796,18 @@ fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
-    let (updates, controls, monitor) = net::start_monitor(interval, mode, probe_policy);
+    let (updates, controls, monitor) = if screenshot_scene.is_some() {
+        capture::start_scene_monitor()
+    } else {
+        net::start_monitor(interval, mode, probe_policy)
+    };
     let mut app = model::App::with_probe_policy(probe_policy);
     let mut history = history_path.map(history::HistorySession::open);
     if let Some(history) = &history {
         history.attach(&mut app);
     }
-    let mut active_mode = mode;
-    let mut peer_offset = 0_usize;
     let can_navigate = mode == MonitorMode::Overview;
+    let mut interaction = InteractionState::new(mode, can_navigate);
     let deadline = dwell.map(|duration| Instant::now() + duration);
     let result = (|| -> Result<()> {
         loop {
@@ -774,8 +823,18 @@ fn run_tui(
                     }
                 }
             }
-            terminal
-                .draw(|frame| ui::render(frame, &app, active_mode, peer_offset, can_navigate))?;
+            if let Some(scene) = screenshot_scene {
+                capture::ensure_scene(&mut app, scene);
+            }
+            terminal.draw(|frame| {
+                ui::render(
+                    frame,
+                    &app,
+                    interaction.active_mode,
+                    interaction.peer_offset,
+                    interaction.can_navigate,
+                )
+            })?;
 
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 break;
@@ -784,63 +843,15 @@ fn run_tui(
             if event::poll(Duration::from_millis(100))?
                 && let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
+                && apply_tui_key(
+                    &mut app,
+                    &controls,
+                    &mut interaction,
+                    key.code,
+                    ui::peer_page_capacity(terminal.size()?.into()),
+                ) == InteractionOutcome::Quit
             {
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Char('r') => {
-                        controls.send(MonitorControl::Refresh).ok();
-                        app.apply(model::MonitorUpdate::Notice(
-                            "manual refresh requested".into(),
-                        ));
-                    }
-                    KeyCode::Char('p') => {
-                        let paused = !app.paused;
-                        controls.send(MonitorControl::Pause(paused)).ok();
-                        app.set_paused(paused);
-                    }
-                    KeyCode::Char('a') if can_navigate => {
-                        let policy = if app.probe_policy().is_active() {
-                            ProbePolicy::Passive
-                        } else {
-                            ProbePolicy::Active
-                        };
-                        controls.send(MonitorControl::SetProbePolicy(policy)).ok();
-                        app.set_probe_policy(policy);
-                    }
-                    KeyCode::Char('1') if can_navigate => {
-                        active_mode = MonitorMode::Overview;
-                    }
-                    KeyCode::Char('2') if can_navigate => {
-                        active_mode = MonitorMode::Link;
-                    }
-                    KeyCode::Char('3') if can_navigate => {
-                        active_mode = MonitorMode::Peers;
-                    }
-                    KeyCode::Tab if can_navigate => {
-                        active_mode = next_dashboard_view(active_mode);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') if active_mode == MonitorMode::Peers => {
-                        peer_offset =
-                            (peer_offset + 1).min(app.peers.peers.len().saturating_sub(1));
-                    }
-                    KeyCode::Up | KeyCode::Char('k') if active_mode == MonitorMode::Peers => {
-                        peer_offset = peer_offset.saturating_sub(1);
-                    }
-                    KeyCode::PageDown if active_mode == MonitorMode::Peers => {
-                        peer_offset =
-                            (peer_offset + 10).min(app.peers.peers.len().saturating_sub(1));
-                    }
-                    KeyCode::PageUp if active_mode == MonitorMode::Peers => {
-                        peer_offset = peer_offset.saturating_sub(10);
-                    }
-                    KeyCode::Home | KeyCode::Char('g') if active_mode == MonitorMode::Peers => {
-                        peer_offset = 0;
-                    }
-                    KeyCode::End | KeyCode::Char('G') if active_mode == MonitorMode::Peers => {
-                        peer_offset = app.peers.peers.len().saturating_sub(1);
-                    }
-                    _ => {}
-                }
+                break;
             }
         }
         Ok(())
@@ -849,6 +860,74 @@ fn run_tui(
     controls.send(MonitorControl::Stop).ok();
     monitor.join().ok();
     result
+}
+
+pub(crate) fn apply_tui_key(
+    app: &mut model::App,
+    controls: &Sender<MonitorControl>,
+    interaction: &mut InteractionState,
+    key: KeyCode,
+    peer_page_capacity: usize,
+) -> InteractionOutcome {
+    let page_capacity = peer_page_capacity.max(1);
+    let maximum_peer_offset = app.peers.peers.len().saturating_sub(page_capacity);
+    interaction.peer_offset = interaction.peer_offset.min(maximum_peer_offset);
+    match key {
+        KeyCode::Char('q') | KeyCode::Esc => return InteractionOutcome::Quit,
+        KeyCode::Char('r') => {
+            controls.send(MonitorControl::Refresh).ok();
+            app.apply(model::MonitorUpdate::Notice(
+                "manual refresh requested".into(),
+            ));
+        }
+        KeyCode::Char('p') => {
+            let paused = !app.paused;
+            controls.send(MonitorControl::Pause(paused)).ok();
+            app.set_paused(paused);
+        }
+        KeyCode::Char('a') if interaction.can_navigate => {
+            let policy = if app.probe_policy().is_active() {
+                ProbePolicy::Passive
+            } else {
+                ProbePolicy::Active
+            };
+            controls.send(MonitorControl::SetProbePolicy(policy)).ok();
+            app.set_probe_policy(policy);
+        }
+        KeyCode::Char('1') if interaction.can_navigate => {
+            interaction.active_mode = MonitorMode::Overview;
+        }
+        KeyCode::Char('2') if interaction.can_navigate => {
+            interaction.active_mode = MonitorMode::Link;
+        }
+        KeyCode::Char('3') if interaction.can_navigate => {
+            interaction.active_mode = MonitorMode::Peers;
+        }
+        KeyCode::Tab if interaction.can_navigate => {
+            interaction.active_mode = next_dashboard_view(interaction.active_mode);
+        }
+        KeyCode::Down | KeyCode::Char('j') if interaction.active_mode == MonitorMode::Peers => {
+            interaction.peer_offset = (interaction.peer_offset + 1).min(maximum_peer_offset);
+        }
+        KeyCode::Up | KeyCode::Char('k') if interaction.active_mode == MonitorMode::Peers => {
+            interaction.peer_offset = interaction.peer_offset.saturating_sub(1);
+        }
+        KeyCode::PageDown if interaction.active_mode == MonitorMode::Peers => {
+            interaction.peer_offset =
+                (interaction.peer_offset + page_capacity).min(maximum_peer_offset);
+        }
+        KeyCode::PageUp if interaction.active_mode == MonitorMode::Peers => {
+            interaction.peer_offset = interaction.peer_offset.saturating_sub(page_capacity);
+        }
+        KeyCode::Home | KeyCode::Char('g') if interaction.active_mode == MonitorMode::Peers => {
+            interaction.peer_offset = 0;
+        }
+        KeyCode::End | KeyCode::Char('G') if interaction.active_mode == MonitorMode::Peers => {
+            interaction.peer_offset = maximum_peer_offset;
+        }
+        _ => {}
+    }
+    InteractionOutcome::Continue
 }
 
 fn next_dashboard_view(mode: MonitorMode) -> MonitorMode {
@@ -1050,6 +1129,85 @@ mod cli_tests {
         assert_eq!(at, vec![2, 5, 10]);
         assert_eq!((columns, rows), (100, 24));
         assert!(native);
+    }
+
+    #[test]
+    fn screenshot_parses_scheduled_interactions_and_dense_scene() {
+        let cli = Cli::try_parse_from([
+            "linktop",
+            "screenshot",
+            "overview",
+            "--at",
+            "2,5",
+            "--key",
+            "2:3",
+            "--key",
+            "3:page-down",
+            "--resize",
+            "3:80x20",
+            "--scene",
+            "dense-peers",
+        ])
+        .unwrap();
+        let Some(Command::Screenshot {
+            keys,
+            resizes,
+            scene,
+            ..
+        }) = cli.command
+        else {
+            panic!("screenshot command was not parsed");
+        };
+        assert_eq!(keys.len(), 2);
+        assert_eq!(resizes.len(), 1);
+        assert_eq!(scene, Some(capture::CaptureScene::DensePeers));
+    }
+
+    #[test]
+    fn shared_interaction_reducer_guards_focused_views_and_scrolls_peers() {
+        let (controls, received) = std::sync::mpsc::channel();
+        let mut app = model::App::with_probe_policy(ProbePolicy::Passive);
+        capture::ensure_scene(&mut app, capture::CaptureScene::DensePeers);
+        let mut focused = InteractionState::new(MonitorMode::Link, false);
+
+        assert_eq!(
+            apply_tui_key(&mut app, &controls, &mut focused, KeyCode::Char('3'), 10),
+            InteractionOutcome::Continue
+        );
+        assert_eq!(focused.active_mode, MonitorMode::Link);
+        apply_tui_key(&mut app, &controls, &mut focused, KeyCode::Char('a'), 10);
+        assert!(!app.probe_policy().is_active());
+
+        let mut dashboard = InteractionState::new(MonitorMode::Overview, true);
+        apply_tui_key(&mut app, &controls, &mut dashboard, KeyCode::Char('3'), 10);
+        apply_tui_key(&mut app, &controls, &mut dashboard, KeyCode::PageDown, 10);
+        assert_eq!(dashboard.active_mode, MonitorMode::Peers);
+        assert_eq!(dashboard.peer_offset, 10);
+
+        apply_tui_key(&mut app, &controls, &mut dashboard, KeyCode::Char('p'), 10);
+        assert!(app.paused);
+        assert!(matches!(
+            received.try_recv(),
+            Ok(MonitorControl::Pause(true))
+        ));
+    }
+
+    #[test]
+    fn peer_navigation_uses_the_visible_page_and_normalizes_after_resize() {
+        let (controls, _) = std::sync::mpsc::channel();
+        let mut app = model::App::with_probe_policy(ProbePolicy::Passive);
+        capture::ensure_scene(&mut app, capture::CaptureScene::DensePeers);
+        let mut interaction = InteractionState::new(MonitorMode::Peers, false);
+
+        apply_tui_key(&mut app, &controls, &mut interaction, KeyCode::End, 7);
+        assert_eq!(interaction.peer_offset, 20);
+        apply_tui_key(&mut app, &controls, &mut interaction, KeyCode::Up, 7);
+        assert_eq!(interaction.peer_offset, 19);
+
+        apply_tui_key(&mut app, &controls, &mut interaction, KeyCode::Up, 10);
+        assert_eq!(interaction.peer_offset, 16);
+        apply_tui_key(&mut app, &controls, &mut interaction, KeyCode::PageUp, 10);
+        assert_eq!(interaction.peer_offset, 6);
     }
 
     #[test]

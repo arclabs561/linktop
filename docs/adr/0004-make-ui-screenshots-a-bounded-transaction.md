@@ -1,14 +1,14 @@
 ---
 id: 0004
 status: accepted
-governs: src/capture.rs, src/main.rs, src/ui.rs, Cargo.toml, Cargo.lock, README.md, justfile
+governs: src/capture.rs, src/main.rs, src/ui.rs, Cargo.toml, Cargo.lock, README.md, justfile, docs/design/focused-view-lifetimes.md
 why: manual screenshots and a heuristic external helper cannot prove how the real live views look after specific observation times, across several sizes, without making the operator the QA bottleneck.
 rejected: keep the external tmux and ImageMagick example as the only path (one early monochrome frame and no timing contract); add screenshot flags to every live command (widens the already complex output/lifetime matrix); retain frames or network observations after the command exits (crosses the no-history boundary).
 supersedes: none
 superseded_by: none
 extends: 0002
 confidence: high
-review_trigger: revisit if terminal-emulator pixel rasterization is required, a structured live event contract exists, user input must be replayed, or screenshots need durable publication or retention.
+review_trigger: revisit if terminal-emulator pixel rasterization, subsecond or conditional replay, mouse input, state assertions, or durable screenshot publication or retention is required.
 ---
 
 # ADR-0004: Make UI screenshots a bounded transaction
@@ -107,3 +107,51 @@ bounded artifact contract.
 
 Extends ADR-0002's explicit subject/presentation/lifetime matrix with a bounded
 developer and operator QA transaction.
+
+## Update (2026-07-26): Replay bounded keys, resizes, and a dense peer scene
+
+The interaction-replay trigger fired after responsive-layout and peer-overflow
+defects could only be reproduced by a human resizing and navigating the live
+TUI. The screenshot transaction now accepts repeatable `--key AT:KEY` and
+`--resize AT:COLSxROWS` actions. Times remain integer seconds from 1 through
+86400 and no action may occur after the final frame. At each timestamp the
+headless lane drains available monitor updates, applies at most one normalized
+resize, applies keys in command-line occurrence order, and renders a scheduled
+frame last. Identical same-time resizes collapse; conflicting same-time resizes,
+unknown keys, and terminating `q` or `Esc` actions fail before capture.
+
+Live Crossterm input and deterministic replay use one interaction reducer, so
+navigation, scrolling, refresh, pause, and active-policy changes cannot drift
+between production and QA paths. Peer navigation uses the currently visible
+page capacity, including after a resize, so `End`, reverse scrolling, and page
+movement cannot retain an off-screen offset. The native lane sends the same
+bounded actions through tmux, waits for the initial Linktop alternate-screen
+view, allows a short bounded render-settle window after actions, and verifies
+the pane dimensions before naming and writing each artifact. An interrupt is
+handled as a bounded shutdown that kills the isolated tmux server and child
+rather than leaving a long scheduled dwell behind. The headless renderer remains
+authoritative for deterministic content and ordering; native capture is the
+fidelity check for PTY negotiation, Crossterm input, ANSI style, and terminal
+resize behavior.
+
+Add one named `dense-peers` scene for overview and peers screenshots. It uses
+only documentation-range IPv4/IPv6 addresses and synthetic attribution, and it
+enters the normal model through generation-tagged `Link` and `Peers`
+`MonitorUpdate` events. Its baseline, transition, and final snapshots exercise
+overflow, the path gateway, a missing MAC, source disagreement, NUD states,
+binding change, cache disappearance, and cache return. Synthetic scenes remain
+passive and cannot be combined with `--active`, history, or a replayed `a` key.
+They replace the host monitor with an inert control loop, so live route, radio,
+process, and neighbor collectors do not run or leak host evidence into the
+scene.
+For native capture, the parent selects the scene through a narrowly named
+internal child environment value rather than adding a fixture option to normal
+live commands. It clears inherited history and stale scene defaults before
+starting the child; only the requested synthetic scene can contribute evidence.
+
+This is intentionally not a general event language, macro recorder, or
+assertion engine. Frame names now include the subject, scene, session, frame
+index, verified viewport, scheduled time, and actual time so resize sequences
+remain inspectable. Subsecond timing, conditional actions, mouse events,
+state-based assertions, and durable artifact publication cross the updated
+review trigger.
