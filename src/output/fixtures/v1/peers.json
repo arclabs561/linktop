@@ -1,0 +1,46 @@
+{
+  "schema": "linktop.observation.v1",
+  "producer": {
+    "name": "linktop",
+    "version": "0.1.0"
+  },
+  "subject": "peers",
+  "completed_at": "2026-07-26T20:00:00Z",
+  "acquisition": {
+    "policy": "passive",
+    "lifetime": "one_observation"
+  },
+  "assessment": {
+    "probe_policy": "passive",
+    "path_status": "untested",
+    "evidence_coverage": "complete",
+    "completed_probes": 0,
+    "total_probes": 0
+  },
+  "evidence": {
+    "path_context": {
+      "host": "operator-host",
+      "default_interface": "en0",
+      "default_gateway": "192.0.2.1"
+    },
+    "health": "ok",
+    "detail": "1 cached binding",
+    "sources": [
+      "arp -an"
+    ],
+    "failed_sources": [],
+    "oui_source": "IEEE OUI",
+    "peers": [
+      {
+        "address": "192.0.2.1",
+        "mac": "02:00:00:00:00:01",
+        "interface": "en0",
+        "state": "reachable",
+        "binding_conflict": false,
+        "mac_scope": "local",
+        "registrant": null,
+        "is_default_gateway": true
+      }
+    ]
+  }
+}

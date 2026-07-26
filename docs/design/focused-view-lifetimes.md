@@ -96,6 +96,64 @@ after the observation window. `--dwell` never changes a passive command into an 
 one. JSON remains a single observation in this slice; a future JSON event stream must
 use an explicit `--json-stream` contract rather than overloading `--json`.
 
+### Projection contracts
+
+Presentation, lifetime, retention, and stability are independent properties.
+The supported surfaces are organized by the operator or consumer question, not
+by the terminal library that happens to render them:
+
+| Surface | Audience and purpose | Lifetime | Persistence | Stability and permitted machine use |
+| --- | --- | --- | --- | --- |
+| live TUI | human triage, attention, and navigation | continuous or bounded by `--dwell` | process-local only | responsive human presentation; never parse as an API |
+| redirected one-shot text | human report, shell handoff, and scrollback | one observation | caller-owned stdout | bounded expert prose; scripts must not parse wording or columns |
+| `--plain` / `--dwell` | human log and supervised temporal observation | explicit stream, optionally bounded | caller-owned stdout | timestamped append-only prose; not a structured event API |
+| `--json` | agent or program consuming one observation or experiment | one observation or bounded experiment | caller-owned stdout | versioned schema discriminator; one JSON document |
+| `--history` | durable host-path recurrence evidence | live overview session | private Netmon `HostPathObservationV0` JSONL | versioned evidence/replay contract; one writer owns each log |
+| `screenshot` | human or agent layout QA | bounded frame transaction | private QA files chosen by caller | text/SVG or text/ANSI/HTML artifacts; not an evidence or automation API |
+| Netmon finite PCAP text | human inspection of a saved capture | one normalization run | caller-owned stdout | bounded expert prose; not for parsing |
+| Netmon `pcap --jsonl` | machine use requiring run provenance | one normalization occurrence | caller-owned stdout | versioned manifest, occurrence receipt, records, and quarantines |
+| Netmon `pcap --records-jsonl` | reproducible machine ingestion and replay | one deterministic normalization | caller-owned stdout | versioned content-bound records; byte identity is gated |
+
+Every Linktop human projection and JSON document takes its assessment from the
+same typed model. A renderer may rank, abbreviate, page, or disclose overflow;
+it must not independently redefine path status or evidence coverage. Human
+surfaces are deliberately prioritized and bounded. JSON is the complete
+subject projection and carries explicit provenance about what was and was not
+collected.
+
+`linktop.observation.v1` identifies one snapshot, probe, link, or peers
+observation. It includes the producer version, subject, completion time,
+acquisition policy and lifetime, the typed path assessment and evidence
+coverage, and subject
+evidence. Link evidence includes interface counters when acquired. Peer
+evidence includes the host-visible path context and makes the default-gateway
+role explicit instead of requiring a consumer to reproduce presentation
+logic. `linktop.speed_experiment.v1` separately identifies the explicit bounded
+active load experiment because it is not a passive host-path assessment.
+Earlier raw, unversioned JSON was experimental implementation serialization and
+is not a compatibility contract.
+
+The v1 compatibility rule is additive: existing field names, types, meanings,
+and nesting do not change within v1. New optional evidence may be added when a
+collector gains evidence, but removing a field, changing its type or meaning,
+or changing required nesting requires a new schema discriminator. Exact
+pretty-JSON golden documents for snapshot, probe, link, peers, and speed gate
+the current complete shape, including model-backed nested evidence.
+
+The TUI, one-shot text, and plain stream are for people, including expert
+operators. Agents and programs consume versioned JSON or Netmon records, not
+screen text. Screenshot file names remain a QA convention rather than a
+published manifest contract until an external automated consumer requires one.
+
+Presentation never widens acquisition. Switching TUI views does not start a new
+collector, JSON does not imply completeness beyond its coverage fields, and a
+screenshot transaction cannot read or append durable history. The legacy Go
+Netmon `events.jsonl` remains fenced from new integrations while the Rust CLI
+name collision is retired.
+
+Netmon's saved-capture output and replay contracts are specified in
+[`saved-pcap-normalization.md`](https://github.com/arclabs561/netmon/blob/main/docs/saved-pcap-normalization.md).
+
 An explicitly bounded plain stream closes with a human-readable dwell summary.
 It reports the current generation plus up to eight completed generations seen
 by the process, preserving interface, radio, workload-window, and peer-cache
@@ -280,6 +338,12 @@ rows into a durable peer inventory.
 - If path identity needs evidence beyond interface, SSID, gateway, resolvers, and local
   addresses, extend the typed fingerprint; do not infer network identity from public IP
   alone.
+- If a machine consumer needs continuous live state, introduce an explicit
+  versioned NDJSON event contract and replay fixture; never overload `--json`
+  or make an agent scrape the TUI or plain stream.
+- If screenshot artifacts gain an automated external consumer, add a versioned
+  manifest and artifact-integrity contract before treating file names as an
+  API.
 
 ## Open questions
 

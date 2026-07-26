@@ -324,7 +324,6 @@ pub struct CaptureRequest {
     pub requested_seconds: Vec<u64>,
     pub size: CaptureSize,
     pub output_directory: PathBuf,
-    pub history_path: Option<PathBuf>,
     pub keys: Vec<ScheduledKey>,
     pub resizes: Vec<ScheduledResize>,
     pub scene: Option<CaptureScene>,
@@ -365,7 +364,6 @@ pub fn run(request: CaptureRequest) -> Result<()> {
         requested_seconds,
         size,
         output_directory,
-        history_path,
         keys,
         resizes,
         scene,
@@ -397,14 +395,10 @@ pub fn run(request: CaptureRequest) -> Result<()> {
     };
     let mut current_size = size;
     let mut frame_index = 0_usize;
-    let mut history = history_path.map(history::HistorySession::open);
-    if let Some(history) = &history {
-        history.attach(&mut app);
-    }
     let result = (|| -> Result<()> {
         for target in plan.timestamps {
-            wait_until(target, started_at, &updates, &mut app, history.as_mut())?;
-            drain_updates(&updates, &mut app, history.as_mut())?;
+            wait_until(target, started_at, &updates, &mut app, None)?;
+            drain_updates(&updates, &mut app, None)?;
             if let Some(scene) = scene {
                 ensure_scene(&mut app, scene);
             }
@@ -489,7 +483,6 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
         requested_seconds,
         size,
         output_directory,
-        history_path,
         keys,
         resizes,
         scene,
@@ -535,9 +528,6 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
         .arg(&binary);
     if probe_policy.is_active() {
         start.arg("--active");
-    }
-    if let Some(path) = history_path {
-        start.arg("--history").arg(path);
     }
     match mode {
         MonitorMode::Overview => {}

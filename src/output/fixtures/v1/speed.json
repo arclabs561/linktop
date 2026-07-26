@@ -1,0 +1,29 @@
+{
+  "schema": "linktop.speed_experiment.v1",
+  "producer": {
+    "name": "linktop",
+    "version": "0.1.0"
+  },
+  "subject": "speed",
+  "completed_at": "2026-07-26T20:00:10Z",
+  "acquisition": {
+    "policy": "active",
+    "lifetime": "bounded_experiment"
+  },
+  "evidence": {
+    "tool": "iperf3",
+    "mode": "tcp",
+    "target": "192.0.2.20",
+    "port": 5201,
+    "duration_s": 10,
+    "gateway_latency": {
+      "baseline": null,
+      "loaded": null
+    },
+    "transfer": {
+      "sent_bits_per_second": 1000000.0,
+      "received_bits_per_second": 900000.0,
+      "retransmits": 1
+    }
+  }
+}

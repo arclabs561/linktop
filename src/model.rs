@@ -453,7 +453,7 @@ impl LinkSnapshot {
         }
     }
 
-    fn requires_radio_evidence(&self) -> bool {
+    pub(crate) fn requires_radio_evidence(&self) -> bool {
         self.link_type
             .as_deref()
             .is_some_and(|kind| kind.eq_ignore_ascii_case("wifi"))
@@ -1717,7 +1717,7 @@ pub struct SnapshotProbe {
     pub metrics: Option<LatencyMetrics>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SnapshotSummary {
     pub probe_policy: ProbePolicy,
     pub path_status: PathStatus,
@@ -1840,29 +1840,19 @@ impl SnapshotReport {
         interface_counters: Option<InterfaceCounters>,
         neighbors: PeerSnapshot,
     ) -> Self {
-        let link_available = link.interface.is_some()
-            || link.gateway.is_some()
-            || !link.resolvers.is_empty()
-            || !link.addresses.is_empty();
-        let radio_missing = link.requires_radio_evidence() && link.wifi.is_none();
-        let local_evidence_incomplete =
-            link_evidence_incomplete(&link, interface_counters.as_ref());
-        let evidence_coverage =
-            if !link_available && neighbors.health == Health::Unavailable && link.wifi.is_none() {
-                EvidenceCoverage::Unavailable
-            } else if link.interface.is_none()
-                || local_evidence_incomplete
-                || matches!(
-                    neighbors.health,
-                    Health::Degraded | Health::Failed | Health::Unavailable
-                )
-                || !neighbors.failed_sources.is_empty()
-                || radio_missing
-            {
-                EvidenceCoverage::Partial
-            } else {
-                EvidenceCoverage::Complete
-            };
+        let link_coverage = passive_link_coverage(&link, interface_counters.as_ref());
+        let neighbor_coverage = passive_peer_coverage(&neighbors);
+        let evidence_coverage = if link_coverage == EvidenceCoverage::Unavailable
+            && neighbor_coverage == EvidenceCoverage::Unavailable
+        {
+            EvidenceCoverage::Unavailable
+        } else if link_coverage != EvidenceCoverage::Complete
+            || neighbor_coverage != EvidenceCoverage::Complete
+        {
+            EvidenceCoverage::Partial
+        } else {
+            EvidenceCoverage::Complete
+        };
         Self {
             summary: SnapshotSummary {
                 probe_policy: ProbePolicy::Passive,
@@ -1876,6 +1866,79 @@ impl SnapshotReport {
             neighbors,
             probes: Vec::new(),
         }
+    }
+}
+
+pub(crate) fn passive_link_summary(
+    link: &LinkSnapshot,
+    interface_counters: Option<&InterfaceCounters>,
+) -> SnapshotSummary {
+    SnapshotSummary {
+        probe_policy: ProbePolicy::Passive,
+        path_status: PathStatus::Untested,
+        evidence_coverage: passive_link_coverage(link, interface_counters),
+        completed_probes: 0,
+        total_probes: 0,
+    }
+}
+
+pub(crate) fn passive_peer_summary(
+    link: &LinkSnapshot,
+    neighbors: &PeerSnapshot,
+) -> SnapshotSummary {
+    SnapshotSummary {
+        probe_policy: ProbePolicy::Passive,
+        path_status: PathStatus::Untested,
+        evidence_coverage: match passive_peer_coverage(neighbors) {
+            EvidenceCoverage::Complete if !peer_path_filter_available(link) => {
+                EvidenceCoverage::Partial
+            }
+            coverage => coverage,
+        },
+        completed_probes: 0,
+        total_probes: 0,
+    }
+}
+
+fn peer_path_filter_available(link: &LinkSnapshot) -> bool {
+    link.interface.as_deref().is_some_and(|active| {
+        link.addresses
+            .iter()
+            .any(|address| address.interface == active)
+    })
+}
+
+fn passive_link_coverage(
+    link: &LinkSnapshot,
+    interface_counters: Option<&InterfaceCounters>,
+) -> EvidenceCoverage {
+    let link_available = link.interface.is_some()
+        || link.gateway.is_some()
+        || !link.resolvers.is_empty()
+        || !link.addresses.is_empty();
+    if !link_available && link.wifi.is_none() {
+        return EvidenceCoverage::Unavailable;
+    }
+    if link_evidence_incomplete(link, interface_counters)
+        || (link.requires_radio_evidence() && link.wifi.is_none())
+    {
+        EvidenceCoverage::Partial
+    } else {
+        EvidenceCoverage::Complete
+    }
+}
+
+fn passive_peer_coverage(neighbors: &PeerSnapshot) -> EvidenceCoverage {
+    if matches!(neighbors.health, Health::Queued | Health::Running) {
+        EvidenceCoverage::Collecting
+    } else if neighbors.health == Health::Unavailable {
+        EvidenceCoverage::Unavailable
+    } else if matches!(neighbors.health, Health::Degraded | Health::Failed)
+        || !neighbors.failed_sources.is_empty()
+    {
+        EvidenceCoverage::Partial
+    } else {
+        EvidenceCoverage::Complete
     }
 }
 
@@ -2898,6 +2961,24 @@ mod tests {
         assert_eq!(report.summary.probe_policy, ProbePolicy::Passive);
         assert_eq!(report.summary.path_status, PathStatus::Untested);
         assert!(report.probes.is_empty());
+    }
+
+    #[test]
+    fn focused_peer_coverage_requires_a_bounded_active_path_filter() {
+        let neighbors = test_peers(None, Some("reachable"));
+        let bounded = test_link("en0", "house", "192.168.1.1");
+        assert_eq!(
+            passive_peer_summary(&bounded, &neighbors).evidence_coverage,
+            EvidenceCoverage::Complete
+        );
+
+        let mut unbounded = bounded;
+        unbounded.interface = None;
+        unbounded.addresses.clear();
+        assert_eq!(
+            passive_peer_summary(&unbounded, &neighbors).evidence_coverage,
+            EvidenceCoverage::Partial
+        );
     }
 
     #[test]
