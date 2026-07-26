@@ -654,10 +654,19 @@ impl MacScope {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerPathFilter {
+    Pending,
+    Applied,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerSnapshot {
     pub health: Health,
     pub detail: String,
+    pub path_filter: PeerPathFilter,
     pub sources: Vec<String>,
     pub failed_sources: Vec<String>,
     pub oui_source: Option<String>,
@@ -669,6 +678,7 @@ impl PeerSnapshot {
         Self {
             health: Health::Queued,
             detail: "waiting for neighbor cache".into(),
+            path_filter: PeerPathFilter::Pending,
             sources: Vec::new(),
             failed_sources: Vec::new(),
             oui_source: None,
@@ -1882,30 +1892,14 @@ pub(crate) fn passive_link_summary(
     }
 }
 
-pub(crate) fn passive_peer_summary(
-    link: &LinkSnapshot,
-    neighbors: &PeerSnapshot,
-) -> SnapshotSummary {
+pub(crate) fn passive_peer_summary(neighbors: &PeerSnapshot) -> SnapshotSummary {
     SnapshotSummary {
         probe_policy: ProbePolicy::Passive,
         path_status: PathStatus::Untested,
-        evidence_coverage: match passive_peer_coverage(neighbors) {
-            EvidenceCoverage::Complete if !peer_path_filter_available(link) => {
-                EvidenceCoverage::Partial
-            }
-            coverage => coverage,
-        },
+        evidence_coverage: passive_peer_coverage(neighbors),
         completed_probes: 0,
         total_probes: 0,
     }
-}
-
-fn peer_path_filter_available(link: &LinkSnapshot) -> bool {
-    link.interface.as_deref().is_some_and(|active| {
-        link.addresses
-            .iter()
-            .any(|address| address.interface == active)
-    })
 }
 
 fn passive_link_coverage(
@@ -1935,8 +1929,11 @@ fn passive_peer_coverage(neighbors: &PeerSnapshot) -> EvidenceCoverage {
         EvidenceCoverage::Unavailable
     } else if matches!(neighbors.health, Health::Degraded | Health::Failed)
         || !neighbors.failed_sources.is_empty()
+        || neighbors.path_filter == PeerPathFilter::Unavailable
     {
         EvidenceCoverage::Partial
+    } else if neighbors.path_filter == PeerPathFilter::Pending {
+        EvidenceCoverage::Collecting
     } else {
         EvidenceCoverage::Complete
     }
@@ -2208,6 +2205,7 @@ mod tests {
         app.peers = PeerSnapshot {
             health: Health::Ok,
             detail: "complete native cache".into(),
+            path_filter: PeerPathFilter::Applied,
             sources: vec!["arp -an".into(), "ndp -an".into()],
             failed_sources: Vec::new(),
             oui_source: None,
@@ -2914,6 +2912,7 @@ mod tests {
         let neighbors = PeerSnapshot {
             health: Health::Degraded,
             detail: "one native cache source failed".into(),
+            path_filter: PeerPathFilter::Applied,
             sources: vec!["arp -an".into()],
             failed_sources: vec!["ndp -an".into()],
             oui_source: None,
@@ -2951,6 +2950,7 @@ mod tests {
             PeerSnapshot {
                 health: Health::Ok,
                 detail: "native neighbor cache read".into(),
+                path_filter: PeerPathFilter::Applied,
                 sources: vec!["arp -an".into(), "ndp -an".into()],
                 failed_sources: Vec::new(),
                 oui_source: None,
@@ -2965,18 +2965,15 @@ mod tests {
 
     #[test]
     fn focused_peer_coverage_requires_a_bounded_active_path_filter() {
-        let neighbors = test_peers(None, Some("reachable"));
-        let bounded = test_link("en0", "house", "192.168.1.1");
+        let mut neighbors = test_peers(None, Some("reachable"));
         assert_eq!(
-            passive_peer_summary(&bounded, &neighbors).evidence_coverage,
+            passive_peer_summary(&neighbors).evidence_coverage,
             EvidenceCoverage::Complete
         );
 
-        let mut unbounded = bounded;
-        unbounded.interface = None;
-        unbounded.addresses.clear();
+        neighbors.path_filter = PeerPathFilter::Unavailable;
         assert_eq!(
-            passive_peer_summary(&unbounded, &neighbors).evidence_coverage,
+            passive_peer_summary(&neighbors).evidence_coverage,
             EvidenceCoverage::Partial
         );
     }
@@ -2999,6 +2996,7 @@ mod tests {
         let neighbors = PeerSnapshot {
             health: Health::Ok,
             detail: "complete native cache".into(),
+            path_filter: PeerPathFilter::Applied,
             sources: vec!["arp -an".into(), "ndp -an".into()],
             failed_sources: Vec::new(),
             oui_source: None,
@@ -3062,6 +3060,7 @@ mod tests {
             PeerSnapshot {
                 health: Health::Ok,
                 detail: "complete native cache".into(),
+                path_filter: PeerPathFilter::Applied,
                 sources: vec!["arp -an".into(), "ndp -an".into()],
                 failed_sources: Vec::new(),
                 oui_source: None,
@@ -3159,6 +3158,7 @@ mod tests {
             snapshot: PeerSnapshot {
                 health: Health::Degraded,
                 detail: "IPv6 cache unavailable".into(),
+                path_filter: PeerPathFilter::Applied,
                 sources: vec!["arp -an".into()],
                 failed_sources: vec!["ndp -an".into()],
                 oui_source: None,
@@ -3172,6 +3172,7 @@ mod tests {
             snapshot: PeerSnapshot {
                 health: Health::Ok,
                 detail: "empty complete cache".into(),
+                path_filter: PeerPathFilter::Applied,
                 sources: vec!["arp -an".into(), "ndp -an".into()],
                 failed_sources: Vec::new(),
                 oui_source: None,
@@ -3212,6 +3213,7 @@ mod tests {
         PeerSnapshot {
             health: Health::Ok,
             detail: "1 cached peer".into(),
+            path_filter: PeerPathFilter::Applied,
             sources: vec!["arp -an".into(), "ndp -an".into()],
             failed_sources: Vec::new(),
             oui_source: None,

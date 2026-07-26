@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use if_addrs::IfAddr;
 
-use crate::model::{Health, LinkSnapshot, MacScope, Peer, PeerSnapshot};
+use crate::model::{Health, LinkSnapshot, MacScope, Peer, PeerPathFilter, PeerSnapshot};
 use crate::{oui, process};
 
 #[derive(Debug, Clone)]
@@ -75,6 +75,14 @@ impl PeerScope {
     fn is_bounded(&self) -> bool {
         self.active_interface.is_some() && !self.networks.is_empty()
     }
+
+    fn path_filter(&self) -> PeerPathFilter {
+        if self.is_bounded() {
+            PeerPathFilter::Applied
+        } else {
+            PeerPathFilter::Unavailable
+        }
+    }
 }
 
 impl LocalNetwork {
@@ -93,6 +101,7 @@ impl LocalNetwork {
 
 pub fn collect(link: &LinkSnapshot) -> PeerSnapshot {
     let scope = PeerScope::for_link(link);
+    let path_filter = scope.path_filter();
     let commands: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
         &[("arp", &["-an"]), ("ndp", &["-an"])]
     } else if cfg!(target_os = "windows") {
@@ -161,6 +170,7 @@ pub fn collect(link: &LinkSnapshot) -> PeerSnapshot {
                 "no neighbor-cache source completed: {}",
                 failed_sources.join(" + ")
             ),
+            path_filter,
             sources,
             failed_sources,
             oui_source,
@@ -175,7 +185,7 @@ pub fn collect(link: &LinkSnapshot) -> PeerSnapshot {
                 peer.address.clone(),
             )
         });
-        let scope_note = if scope.is_bounded() {
+        let scope_note = if path_filter == PeerPathFilter::Applied {
             "; active-path filtered"
         } else {
             "; path filter unavailable"
@@ -199,6 +209,7 @@ pub fn collect(link: &LinkSnapshot) -> PeerSnapshot {
                 "{} neighbor-cache entries; no active discovery{scope_note}{failure_note}{conflict_note}",
                 peers.len()
             ),
+            path_filter,
             sources,
             failed_sources,
             oui_source,
@@ -469,6 +480,22 @@ mod tests {
             .map(|peer| peer.address)
             .collect();
         assert_eq!(visible, ["172.20.10.1", "172.20.10.3"]);
+    }
+
+    #[test]
+    fn path_filter_status_tracks_the_collector_scope_result() {
+        let mut scope = PeerScope {
+            active_interface: Some("en0".into()),
+            gateway: Some(IpAddr::from_str("192.0.2.1").unwrap()),
+            networks: vec![LocalNetwork {
+                address: IpAddr::from_str("192.0.2.10").unwrap(),
+                netmask: IpAddr::from_str("255.255.255.0").unwrap(),
+            }],
+        };
+        assert_eq!(scope.path_filter(), PeerPathFilter::Applied);
+
+        scope.networks.clear();
+        assert_eq!(scope.path_filter(), PeerPathFilter::Unavailable);
     }
 
     #[test]

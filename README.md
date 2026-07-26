@@ -117,8 +117,9 @@ Finite text and the TUI are expert human interfaces, not machine APIs.
 documents carry the producer version, subject, completion time, acquisition policy/lifetime,
 typed path assessment, evidence coverage, and complete subject evidence.
 Link JSON includes interface counters when available; peer JSON includes path
-context and an explicit default-gateway role. Use these contracts instead of
-parsing prose or terminal columns.
+context, the collector's actual path-filter result, and an explicit
+default-gateway role. Use these contracts instead of parsing prose or terminal
+columns.
 
 ```sh
 linktop

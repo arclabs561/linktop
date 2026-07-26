@@ -3423,6 +3423,7 @@ mod tests {
         let snapshot = crate::model::PeerSnapshot {
             health: Health::Ok,
             detail: "2 cached peers; no liveness scan".into(),
+            path_filter: crate::model::PeerPathFilter::Applied,
             sources: vec!["arp -an".into(), "ndp -an".into()],
             failed_sources: Vec::new(),
             oui_source: Some("Wireshark manuf".into()),
@@ -4022,6 +4023,7 @@ mod tests {
         crate::model::PeerSnapshot {
             health: Health::Ok,
             detail: format!("{count} cached peer(s); no liveness scan"),
+            path_filter: crate::model::PeerPathFilter::Applied,
             sources: vec!["arp -an".into(), "ndp -an".into()],
             failed_sources: Vec::new(),
             oui_source: Some("Wireshark manuf".into()),

@@ -128,8 +128,11 @@ coverage, and subject
 evidence. Link evidence includes interface counters when acquired. Peer
 evidence includes the host-visible path context and makes the default-gateway
 role explicit instead of requiring a consumer to reproduce presentation
-logic. `linktop.speed_experiment.v1` separately identifies the explicit bounded
-active load experiment because it is not a passive host-path assessment.
+logic. Its typed path-filter result comes from the peer collector's actual
+interface-prefix scope read; coverage cannot be declared complete from a
+separate link snapshot when that read failed or raced. `linktop.speed_experiment.v1`
+separately identifies the explicit bounded active load experiment because it is
+not a passive host-path assessment.
 Earlier raw, unversioned JSON was experimental implementation serialization and
 is not a compatibility contract.
 

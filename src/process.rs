@@ -47,11 +47,10 @@ fn join_reader(reader: Option<thread::JoinHandle<io::Result<Vec<u8>>>>) -> io::R
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn captures_completed_output() {
         let output = run_bounded(
@@ -64,7 +63,6 @@ mod tests {
         assert_eq!(String::from_utf8(output.stdout).unwrap(), "bounded");
     }
 
-    #[cfg(unix)]
     #[test]
     fn terminates_a_command_at_its_deadline() {
         let output = run_bounded(
