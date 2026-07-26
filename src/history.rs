@@ -1,4 +1,3 @@
-use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -250,7 +249,7 @@ fn observation_from_app(app: &App) -> HostPathObservationV0 {
             next_hop: app.link.gateway.clone(),
             next_hop_link_address,
             resolvers: app.link.resolvers.clone(),
-            address_prefixes: path_prefixes(&app.link),
+            address_prefixes: app.link.default_path_prefixes(),
         },
     }
 }
@@ -522,39 +521,6 @@ fn changed_suffix(dimensions: &str) -> String {
     }
 }
 
-fn path_prefixes(link: &LinkSnapshot) -> Vec<String> {
-    link.addresses
-        .iter()
-        .filter(|address| address.is_default)
-        .filter_map(|address| match address.address.parse::<IpAddr>().ok()? {
-            IpAddr::V4(value) => link
-                .network_configuration
-                .as_deref()
-                .and_then(|configuration| configuration.subnet_mask.as_deref())
-                .and_then(|mask| ipv4_prefix(value, mask)),
-            IpAddr::V6(value) if value.is_unicast_link_local() => None,
-            IpAddr::V6(value) => {
-                let segments = value.segments();
-                Some(format!(
-                    "{:x}:{:x}:{:x}:{:x}::/64",
-                    segments[0], segments[1], segments[2], segments[3]
-                ))
-            }
-        })
-        .collect()
-}
-
-fn ipv4_prefix(address: Ipv4Addr, mask: &str) -> Option<String> {
-    let mask = u32::from(mask.parse::<Ipv4Addr>().ok()?);
-    let inverted = !mask;
-    if inverted & inverted.wrapping_add(1) != 0 {
-        return None;
-    }
-    let prefix = mask.count_ones();
-    let network = Ipv4Addr::from(u32::from(address) & mask);
-    Some(format!("{network}/{prefix}"))
-}
-
 fn unix_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -694,7 +660,9 @@ mod tests {
     #[test]
     fn maps_host_address_to_network_prefix() {
         assert_eq!(
-            path_prefixes(&app("network-a", "192.0.2.1", "02:00:00:00:00:01").link),
+            app("network-a", "192.0.2.1", "02:00:00:00:00:01")
+                .link
+                .default_path_prefixes(),
             vec!["192.0.2.0/24"]
         );
     }

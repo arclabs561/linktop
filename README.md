@@ -119,8 +119,11 @@ monotonic elapsed duration, completion time, acquisition policy/lifetime, typed
 path assessment, evidence coverage, and complete subject evidence.
 Link JSON includes interface counters when available; peer JSON includes path
 context, the collector's actual path-filter result, and an explicit
-default-gateway role. Use these contracts instead of parsing prose or terminal
-columns.
+default-gateway role. Its optional `path_context.link_evidence` records typed
+network-name and BSSID visibility, association, host addresses and derived
+default-path prefixes, and effective resolvers when the one-shot link
+observation supplied them. Use these contracts instead of parsing prose or
+terminal columns.
 
 ```sh
 linktop

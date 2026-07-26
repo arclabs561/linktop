@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::time::Instant;
 
 use crate::model::{
-    Health, InterfaceCounters, LinkSnapshot, MacScope, Peer, PeerPathFilter, PeerSnapshot,
+    Address, Health, InterfaceCounters, LinkSnapshot, MacScope, Peer, PeerPathFilter, PeerSnapshot,
     ProbePolicy, SnapshotProbe, SnapshotReport, SnapshotSummary,
 };
 
@@ -141,10 +141,82 @@ impl<'a> HostPathEvidence<'a> {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentifierVisibility {
+    Observed,
+    Restricted,
+    Unavailable,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PathIdentifier<'a> {
+    pub visibility: IdentifierVisibility,
+    pub value: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct PeerPathContext<'a> {
     pub host: &'a str,
     pub default_interface: Option<&'a str>,
     pub default_gateway: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_evidence: Option<PeerLinkEvidence<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PeerLinkEvidence<'a> {
+    pub link_type: Option<&'a str>,
+    pub network_name: PathIdentifier<'a>,
+    pub association_id: Option<&'a str>,
+    pub associated_bssid: PathIdentifier<'a>,
+    pub addresses: &'a [Address],
+    pub default_path_prefixes: Vec<String>,
+    pub effective_resolvers: &'a [String],
+}
+
+impl<'a> PeerPathContext<'a> {
+    fn new(link: &'a LinkSnapshot) -> Self {
+        let configuration = link.network_configuration.as_deref();
+        Self {
+            host: &link.host,
+            default_interface: link.interface.as_deref(),
+            default_gateway: link.gateway.as_deref(),
+            link_evidence: has_peer_link_evidence(link).then(|| PeerLinkEvidence {
+                link_type: link.link_type.as_deref(),
+                network_name: visible_identifier(link.ssid.as_deref(), link.ssid_restricted),
+                association_id: configuration.and_then(|value| value.connection_id.as_deref()),
+                associated_bssid: visible_identifier(
+                    configuration.and_then(|value| value.associated_bssid.as_deref()),
+                    configuration.is_some_and(|value| value.bssid_restricted),
+                ),
+                addresses: &link.addresses,
+                default_path_prefixes: link.default_path_prefixes(),
+                effective_resolvers: &link.resolvers,
+            }),
+        }
+    }
+}
+
+fn has_peer_link_evidence(link: &LinkSnapshot) -> bool {
+    link.link_type.is_some()
+        || link.ssid.is_some()
+        || link.ssid_restricted
+        || link.network_configuration.is_some()
+        || !link.addresses.is_empty()
+        || !link.resolvers.is_empty()
+}
+
+fn visible_identifier(value: Option<&str>, restricted: bool) -> PathIdentifier<'_> {
+    PathIdentifier {
+        visibility: if value.is_some() {
+            IdentifierVisibility::Observed
+        } else if restricted {
+            IdentifierVisibility::Restricted
+        } else {
+            IdentifierVisibility::Unavailable
+        },
+        value,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -189,11 +261,7 @@ pub struct PeerEvidence<'a> {
 impl<'a> PeerEvidence<'a> {
     pub fn new(link: &'a LinkSnapshot, snapshot: &'a PeerSnapshot) -> Self {
         Self {
-            path_context: PeerPathContext {
-                host: &link.host,
-                default_interface: link.interface.as_deref(),
-                default_gateway: link.gateway.as_deref(),
-            },
+            path_context: PeerPathContext::new(link),
             health: snapshot.health,
             detail: &snapshot.detail,
             path_filter: snapshot.path_filter,
@@ -449,7 +517,62 @@ mod tests {
             value["evidence"]["path_context"]["default_gateway"],
             "192.0.2.1"
         );
+        assert_eq!(
+            value["evidence"]["path_context"]["link_evidence"]["link_type"],
+            "wifi"
+        );
+        assert_eq!(
+            value["evidence"]["path_context"]["link_evidence"]["network_name"]["visibility"],
+            "observed"
+        );
+        assert_eq!(
+            value["evidence"]["path_context"]["link_evidence"]["network_name"]["value"],
+            "lab"
+        );
+        assert_eq!(
+            value["evidence"]["path_context"]["link_evidence"]["association_id"],
+            "lab-wifi"
+        );
+        assert_eq!(
+            value["evidence"]["path_context"]["link_evidence"]["associated_bssid"]["value"],
+            "00:11:22:33:44:55"
+        );
+        assert_eq!(
+            value["evidence"]["path_context"]["link_evidence"]["default_path_prefixes"][0],
+            "192.0.2.0/24"
+        );
+        assert_eq!(
+            value["evidence"]["path_context"]["link_evidence"]["effective_resolvers"][0],
+            "192.0.2.53"
+        );
         assert_eq!(value["evidence"]["peers"][0]["is_default_gateway"], true);
+    }
+
+    #[test]
+    fn peer_path_identifiers_preserve_restricted_visibility() {
+        let mut link = test_link();
+        link.ssid = None;
+        link.ssid_restricted = true;
+        let configuration = link.network_configuration.as_mut().unwrap();
+        configuration.associated_bssid = None;
+        configuration.bssid_restricted = true;
+        let snapshot = test_peers();
+        let value = serde_json::to_value(PeerEvidence::new(&link, &snapshot)).unwrap();
+
+        assert_eq!(
+            value["path_context"]["link_evidence"]["network_name"]["visibility"],
+            "restricted"
+        );
+        assert!(value["path_context"]["link_evidence"]["network_name"]["value"].is_null());
+        assert_eq!(
+            value["path_context"]["link_evidence"]["associated_bssid"]["visibility"],
+            "restricted"
+        );
+        assert!(value["path_context"]["link_evidence"]["associated_bssid"]["value"].is_null());
+
+        let empty = LinkSnapshot::empty();
+        let value = serde_json::to_value(PeerEvidence::new(&empty, &snapshot)).unwrap();
+        assert!(value["path_context"].get("link_evidence").is_none());
     }
 
     #[test]

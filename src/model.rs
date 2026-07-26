@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -489,6 +489,28 @@ impl LinkSnapshot {
         }
     }
 
+    pub(crate) fn default_path_prefixes(&self) -> Vec<String> {
+        self.addresses
+            .iter()
+            .filter(|address| address.is_default)
+            .filter_map(|address| match address.address.parse::<IpAddr>().ok()? {
+                IpAddr::V4(value) => self
+                    .network_configuration
+                    .as_deref()
+                    .and_then(|configuration| configuration.subnet_mask.as_deref())
+                    .and_then(|mask| ipv4_prefix(value, mask)),
+                IpAddr::V6(value) if value.is_unicast_link_local() => None,
+                IpAddr::V6(value) => {
+                    let segments = value.segments();
+                    Some(format!(
+                        "{:x}:{:x}:{:x}:{:x}::/64",
+                        segments[0], segments[1], segments[2], segments[3]
+                    ))
+                }
+            })
+            .collect()
+    }
+
     fn path_label(&self) -> String {
         let interface = self.interface.as_deref().unwrap_or("no default interface");
         let ssid = self
@@ -557,6 +579,17 @@ fn path_address_identity(value: &str) -> Option<String> {
             ))
         }
     }
+}
+
+fn ipv4_prefix(address: Ipv4Addr, mask: &str) -> Option<String> {
+    let mask = u32::from(mask.parse::<Ipv4Addr>().ok()?);
+    let inverted = !mask;
+    if inverted & inverted.wrapping_add(1) != 0 {
+        return None;
+    }
+    let prefix = mask.count_ones();
+    let network = Ipv4Addr::from(u32::from(address) & mask);
+    Some(format!("{network}/{prefix}"))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
