@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use chrono::NaiveDateTime;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::prelude::{Color, Frame, Line, Modifier, Span, Style};
 use ratatui::widgets::{Block, Borders, Paragraph, Sparkline, Wrap};
@@ -651,7 +652,7 @@ fn network_configuration_summary(app: &App) -> String {
             configuration.lease_started_at.as_deref(),
             configuration.lease_expires_at.as_deref(),
         ) {
-            parts.push(format!("lease {}→{}", short_clock(start), short_clock(end)));
+            parts.push(format!("lease {}", lease_window(start, end)));
         } else if let Some(seconds) = configuration.lease_seconds {
             parts.push(format!("lease {}h", seconds / 3_600));
         }
@@ -712,6 +713,33 @@ fn short_clock(value: &str) -> String {
         .next_back()
         .map(|time| time.split(':').take(2).collect::<Vec<_>>().join(":"))
         .unwrap_or_else(|| value.to_string())
+}
+
+fn lease_window(start: &str, end: &str) -> String {
+    const MACOS_DHCP_TIMESTAMP: &str = "%m/%d/%Y %H:%M:%S";
+
+    let parsed = NaiveDateTime::parse_from_str(start, MACOS_DHCP_TIMESTAMP)
+        .ok()
+        .zip(NaiveDateTime::parse_from_str(end, MACOS_DHCP_TIMESTAMP).ok());
+    let Some((start_at, end_at)) = parsed else {
+        return format!("{}→{}", short_clock(start), short_clock(end));
+    };
+
+    let start_clock = start_at.format("%H:%M");
+    let end_clock = end_at.format("%H:%M");
+    let day_delta = end_at
+        .date()
+        .signed_duration_since(start_at.date())
+        .num_days();
+    match day_delta {
+        0 => format!("{start_clock}→{end_clock}"),
+        1..=9 => format!("{start_clock}→+{day_delta}d {end_clock}"),
+        _ => format!(
+            "{}→{}",
+            start_at.format("%m/%d %H:%M"),
+            end_at.format("%m/%d %H:%M")
+        ),
+    }
 }
 
 fn ipv4_mask_prefix(mask: &str) -> Option<u32> {
@@ -3078,6 +3106,18 @@ mod tests {
         assert_eq!(ipv4_mask_prefix("255.255.0.0"), Some(16));
         assert_eq!(ipv4_mask_prefix("255.0.255.0"), None);
         assert_eq!(ipv4_mask_prefix("255.255.255"), None);
+    }
+
+    #[test]
+    fn lease_window_preserves_day_rollover() {
+        assert_eq!(
+            lease_window("07/25/2026 20:04:21", "07/26/2026 20:04:21"),
+            "20:04→+1d 20:04"
+        );
+        assert_eq!(
+            lease_window("07/25/2026 20:04:21", "07/25/2026 22:04:21"),
+            "20:04→22:04"
+        );
     }
 
     #[test]
