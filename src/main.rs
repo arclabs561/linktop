@@ -511,6 +511,9 @@ fn snapshot(json: bool) -> Result<()> {
         if let Some(configuration) = network_configuration_text(&report.link) {
             println!("config   {configuration}");
         }
+        if let Some(ssid) = ssid_text(&report.link) {
+            println!("ssid     {ssid}");
+        }
         if let Some(wifi) = &report.link.wifi {
             println!(
                 "802.11   RSSI {}  noise {}  channel {}  PHY {}  tx {}",
@@ -523,14 +526,7 @@ fn snapshot(json: bool) -> Result<()> {
                 speed::human_rate(wifi.tx_rate_mbps.map(|value| value * 1_000_000.0))
             );
         }
-        println!(
-            "resolvers {}",
-            if report.link.resolvers.is_empty() {
-                "unavailable".into()
-            } else {
-                report.link.resolvers.join(", ")
-            }
-        );
+        println!("resolvers {}", resolver_text(&report.link.resolvers));
         for address in report
             .link
             .addresses
@@ -684,10 +680,8 @@ fn link(json: bool) -> Result<()> {
     if let Some(configuration) = network_configuration_text(&link) {
         println!("config   {configuration}");
     }
-    if let Some(ssid) = &link.ssid {
+    if let Some(ssid) = ssid_text(&link) {
         println!("ssid     {ssid}");
-    } else if link.ssid_restricted {
-        println!("ssid     unavailable (hidden by macOS Location Services policy)");
     }
     if let Some(wifi) = &link.wifi {
         println!(
@@ -709,7 +703,7 @@ fn link(json: bool) -> Result<()> {
             counters.drops
         );
     }
-    println!("resolver {}", link.resolvers.join(", "));
+    println!("resolver {}", resolver_text(&link.resolvers));
     for address in &link.addresses {
         println!(
             "{} {:<8} {}{}",
@@ -741,20 +735,42 @@ fn peers(json: bool) -> Result<()> {
         );
         output::print_json(&document)?;
     } else {
-        let gateway = link.gateway;
+        let gateway = link.gateway.as_deref();
         println!(
             "LINKTOP  NEIGHBOR CACHE / PASSIVE / PATH {} / COVERAGE {}",
             assessment.path_status.label(),
             assessment.evidence_coverage.label()
         );
+        println!(
+            "path     {} [{}] via {}  /  path filter {}",
+            link.interface.as_deref().unwrap_or("unknown interface"),
+            link.link_type.as_deref().unwrap_or("unknown link"),
+            link.gateway.as_deref().unwrap_or("unknown next hop"),
+            match report.path_filter {
+                model::PeerPathFilter::Applied => "applied",
+                model::PeerPathFilter::Pending => "pending",
+                model::PeerPathFilter::Unavailable => "unavailable",
+            }
+        );
         println!("{}", report.detail);
         println!(
             "evidence {}  OUI {}",
-            report.sources.join(" + "),
+            if report.sources.is_empty() {
+                "neighbor-cache sources unavailable".into()
+            } else {
+                report.sources.join(" + ")
+            },
             report
                 .oui_source
                 .as_deref()
                 .unwrap_or("registry unavailable")
+        );
+        if !report.failed_sources.is_empty() {
+            println!("failed   {}", report.failed_sources.join(" + "));
+        }
+        println!(
+            "{:<40} {:<18} {:<10} {:<12} {:<9} {:<36} OUI / SCOPE",
+            "ADDRESS", "MAC", "IFACE", "STATE", "ROLE", "KERNEL SEMANTICS"
         );
         for peer in &report.peers {
             println!(
@@ -763,7 +779,7 @@ fn peers(json: bool) -> Result<()> {
                 peer.mac.as_deref().unwrap_or("—"),
                 peer.interface.as_deref().unwrap_or("—"),
                 peer.state.as_deref().unwrap_or("—"),
-                if gateway.as_deref() == Some(peer.address.as_str()) {
+                if gateway == Some(peer.address.as_str()) {
                     "gateway"
                 } else {
                     "—"
@@ -835,6 +851,26 @@ fn human_ms(value: Option<f64>) -> String {
     value
         .map(|value| format!("{value:.1}ms"))
         .unwrap_or_else(|| "?".into())
+}
+
+fn ssid_text(link: &model::LinkSnapshot) -> Option<String> {
+    link.ssid.clone().or_else(|| {
+        if link.ssid_restricted {
+            Some("unavailable (hidden by macOS Location Services policy)".into())
+        } else if link.link_type.as_deref() == Some("wifi") {
+            Some("unavailable (not observed)".into())
+        } else {
+            None
+        }
+    })
+}
+
+fn resolver_text(resolvers: &[String]) -> String {
+    if resolvers.is_empty() {
+        "unavailable".into()
+    } else {
+        resolvers.join(", ")
+    }
 }
 
 fn network_configuration_text(link: &model::LinkSnapshot) -> Option<String> {
@@ -1170,6 +1206,27 @@ mod cli_tests {
 
         let probe = Cli::try_parse_from(["linktop", "probe", "--json"]).unwrap();
         assert!(matches!(probe.command, Some(Command::Probe { json: true })));
+    }
+
+    #[test]
+    fn finite_link_labels_absent_wifi_and_resolver_evidence() {
+        let mut link = model::LinkSnapshot::empty();
+        link.link_type = Some("wifi".into());
+        assert_eq!(
+            ssid_text(&link).as_deref(),
+            Some("unavailable (not observed)")
+        );
+        assert_eq!(resolver_text(&link.resolvers), "unavailable");
+
+        link.ssid_restricted = true;
+        assert_eq!(
+            ssid_text(&link).as_deref(),
+            Some("unavailable (hidden by macOS Location Services policy)")
+        );
+        link.ssid = Some("operator-visible".into());
+        link.resolvers = vec!["192.0.2.53".into(), "2001:db8::53".into()];
+        assert_eq!(ssid_text(&link).as_deref(), Some("operator-visible"));
+        assert_eq!(resolver_text(&link.resolvers), "192.0.2.53, 2001:db8::53");
     }
 
     #[test]
