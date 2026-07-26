@@ -180,14 +180,17 @@ fn render_overview_evidence(frame: &mut Frame<'_>, area: Rect, app: &App) {
         lines.push(Line::from(vec![
             Span::styled("neighbors  ", Style::default().fg(MUTED)),
             Span::styled(
-                format!(
-                    "{} cache entries · {}",
-                    app.peers.peers.len(),
-                    if app.peers.sources.is_empty() {
-                        "source pending".into()
-                    } else {
-                        app.peers.sources.join(" + ")
-                    }
+                fit(
+                    &format!(
+                        "{} cache entries · {}",
+                        app.peers.peers.len(),
+                        if app.peers.sources.is_empty() {
+                            "source pending".into()
+                        } else {
+                            app.peers.sources.join(" + ")
+                        }
+                    ),
+                    usize::from(area.width.saturating_sub(13)),
                 ),
                 Style::default().fg(INK),
             ),
@@ -197,17 +200,20 @@ fn render_overview_evidence(frame: &mut Frame<'_>, area: Rect, app: &App) {
         lines.push(workload_evidence_line(app));
     }
     lines.push(Line::from(vec![
-        Span::styled("scope     ", Style::default().fg(MUTED)),
+        Span::styled("scope      ", Style::default().fg(MUTED)),
         Span::styled(
-            format!(
-                "{} addresses · {} · {}",
-                app.link.addresses.len(),
-                peer_session_summary(app),
-                if app.peers.sources.is_empty() {
-                    "neighbor-cache source pending".into()
-                } else {
-                    app.peers.sources.join("+")
-                }
+            fit(
+                &format!(
+                    "{} addresses · {} · {}",
+                    app.link.addresses.len(),
+                    peer_session_summary(app),
+                    if app.peers.sources.is_empty() {
+                        "neighbor-cache source pending".into()
+                    } else {
+                        app.peers.sources.join("+")
+                    }
+                ),
+                usize::from(area.width.saturating_sub(12)),
             ),
             Style::default().fg(INK),
         ),
@@ -507,25 +513,27 @@ pub(crate) fn overview_diagnosis(app: &App) -> OverviewDiagnosis {
         }
     }
     let action = match situation.kind {
-        SituationKind::Paused => "next: p resumes observation",
+        SituationKind::Paused => "next: [p] resumes observation",
         SituationKind::PathTransition => "next: allow the default route to settle",
-        SituationKind::GatewayFailure => "next: [2] inspect the local link and gateway; r retries",
+        SituationKind::GatewayFailure => {
+            "next: [2] inspect the local link and gateway; [r] retries"
+        }
         SituationKind::InterfaceLoss => {
             "next: [2] compare radio and traffic with the counter increase"
         }
         SituationKind::PassiveObservation => {
-            "next: a enables next-hop, DNS, HTTPS, and public-egress probes"
+            "next: [a] enables next-hop, DNS, HTTPS, and public-egress probes"
         }
         SituationKind::UnlocalizedFailure => {
             "next: restore the missing gateway or DNS evidence before assigning a cause"
         }
         SituationKind::DnsFailure | SituationKind::SlowDns => {
-            "next: inspect the configured resolver; r retries the bounded lookup"
+            "next: inspect the configured resolver; [r] retries the bounded lookup"
         }
         SituationKind::HttpsFailure | SituationKind::SlowHttps => {
-            "next: gateway and DNS passed; r retries the upstream HTTPS check"
+            "next: gateway and DNS passed; [r] retries the upstream HTTPS check"
         }
-        SituationKind::StalePathEvidence => "next: r refreshes the bounded DNS and HTTPS probes",
+        SituationKind::StalePathEvidence => "next: [r] refreshes the bounded DNS and HTTPS probes",
         SituationKind::GatewayLoss | SituationKind::GatewayVariation => {
             "next: [2] compare radio and traffic against the gateway episode"
         }
@@ -536,7 +544,7 @@ pub(crate) fn overview_diagnosis(app: &App) -> OverviewDiagnosis {
             "next: [2] inspect which local path evidence is unavailable"
         }
         SituationKind::EvidenceGap => {
-            "next: the path is usable; r retries missing supporting evidence"
+            "next: the path is usable; [r] retries missing supporting evidence"
         }
         SituationKind::Ready => {
             "next: no action; [2] link and [3] neighbor cache show supporting evidence"
@@ -841,7 +849,13 @@ fn render_diagnosis(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     .fg(health_color(diagnosis.health))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(diagnosis.summary, Style::default().fg(INK)),
+            Span::styled(
+                fit(
+                    &diagnosis.summary,
+                    usize::from(area.width.saturating_sub(13)),
+                ),
+                Style::default().fg(INK),
+            ),
         ]),
         Line::from(Span::styled(
             format!(
@@ -851,11 +865,20 @@ fn render_diagnosis(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Style::default().fg(INK),
         )),
         Line::from(Span::styled(
-            format!(" {}", diagnosis.coverage),
+            format!(
+                " {}",
+                fit(
+                    &diagnosis.coverage,
+                    usize::from(area.width.saturating_sub(3))
+                )
+            ),
             Style::default().fg(MUTED),
         )),
         Line::from(Span::styled(
-            format!(" {}", diagnosis.action),
+            format!(
+                " {}",
+                fit(diagnosis.action, usize::from(area.width.saturating_sub(3)))
+            ),
             Style::default().fg(ACCENT),
         )),
     ];
@@ -2025,62 +2048,62 @@ fn render_peers_focus(
     } else {
         format!("  /  missing {}", app.peers.failed_sources.join(" + "))
     };
+    let content_width = usize::from(chunks[1].width.saturating_sub(13));
+    let path = format!(
+        "{} [{}{}] via {}",
+        app.link.interface.as_deref().unwrap_or("discovering"),
+        app.link.link_type.as_deref().unwrap_or("link"),
+        ssid,
+        app.link.gateway.as_deref().unwrap_or("no gateway")
+    );
+    let evidence = format!(
+        "{sources}{failed_sources}  /  OUI {}",
+        app.peers
+            .oui_source
+            .as_deref()
+            .and_then(|source| source.rsplit('/').next())
+            .unwrap_or("unavailable")
+    );
+    let session = format!(
+        "{} / current path generation only",
+        peer_session_summary(app)
+    );
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
                 Span::styled(" path      ", Style::default().fg(MUTED)),
-                Span::styled(
-                    format!(
-                        "{} [{}{}] via {}",
-                        app.link.interface.as_deref().unwrap_or("discovering"),
-                        app.link.link_type.as_deref().unwrap_or("link"),
-                        ssid,
-                        app.link.gateway.as_deref().unwrap_or("no gateway")
-                    ),
-                    Style::default().fg(INK),
-                ),
+                Span::styled(fit(&path, content_width), Style::default().fg(INK)),
             ]),
             Line::from(vec![
                 Span::styled(" evidence  ", Style::default().fg(MUTED)),
-                Span::styled(sources, Style::default().fg(INK)),
-                Span::styled(failed_sources, Style::default().fg(WARN)),
-                Span::styled(
-                    format!(
-                        "  /  OUI {}",
-                        app.peers
-                            .oui_source
-                            .as_deref()
-                            .and_then(|source| source.rsplit('/').next())
-                            .unwrap_or("unavailable")
-                    ),
-                    Style::default().fg(MUTED),
-                ),
+                Span::styled(fit(&evidence, content_width), Style::default().fg(INK)),
             ]),
             Line::from(vec![
                 Span::styled(" session   ", Style::default().fg(MUTED)),
-                Span::styled(peer_session_summary(app), Style::default().fg(INK)),
-                Span::styled(
-                    " / current path generation only",
-                    Style::default().fg(MUTED),
-                ),
+                Span::styled(fit(&session, content_width), Style::default().fg(INK)),
             ]),
             Line::from(vec![
                 Span::styled(" semantics ", Style::default().fg(MUTED)),
                 Span::styled(
-                    "cache presence is not liveness; disappearance is not departure",
+                    fit(
+                        "cache presence is not liveness; disappearance is not departure",
+                        content_width,
+                    ),
                     Style::default().fg(INK),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(" activity  ", Style::default().fg(MUTED)),
                 Span::styled(
-                    "unknown; native cache has no traffic or application vantage",
+                    fit(
+                        "unknown; native cache has no traffic or application vantage",
+                        content_width,
+                    ),
                     Style::default().fg(INK),
                 ),
             ]),
         ])
-        .block(instrument_block(" OBSERVATION CONTEXT "))
-        .wrap(Wrap { trim: true }),
+        .block(instrument_block(" OBSERVATION CONTEXT ")),
         chunks[1],
     );
 
@@ -2092,8 +2115,8 @@ fn render_peer_table(frame: &mut Frame<'_>, area: Rect, app: &App, peer_offset: 
     let peers = ordered_peers(app);
     let content_rows = area.height.saturating_sub(2) as usize;
     let capacity = peer_table_capacity(area);
-    let wide = area.width >= 104;
-    let tight = area.width < 76;
+    let wide = area.width >= 138;
+    let tight = area.width < 90;
     let offset = peer_offset.min(peers.len().saturating_sub(capacity.max(1)));
     let end = (offset + capacity).min(peers.len());
     let mut lines = Vec::new();
@@ -2108,7 +2131,7 @@ fn render_peer_table(frame: &mut Frame<'_>, area: Rect, app: &App, peer_offset: 
             Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
         )));
         for peer in peers.iter().skip(offset).take(capacity) {
-            lines.push(peer_wide_line(peer, app, address_width));
+            lines.push(peer_wide_line(peer, app, address_width, area.width));
         }
     } else if tight {
         for peer in peers.iter().skip(offset).take(capacity) {
@@ -2152,10 +2175,10 @@ pub(crate) fn peer_page_capacity(area: Rect) -> usize {
 
 fn peer_table_capacity(area: Rect) -> usize {
     let content_rows = area.height.saturating_sub(2) as usize;
-    let wide = area.width >= 104;
+    let wide = area.width >= 138;
     let rows_per_peer = if wide {
         1
-    } else if area.width < 76 {
+    } else if area.width < 90 {
         3
     } else {
         2
@@ -2167,8 +2190,12 @@ fn peer_table_capacity(area: Rect) -> usize {
         .unwrap_or(0)
 }
 
-fn peer_wide_line<'a>(peer: &'a Peer, app: &App, address_width: usize) -> Line<'a> {
+fn peer_wide_line<'a>(peer: &'a Peer, app: &App, address_width: usize, width: u16) -> Line<'a> {
     let gateway = app.link.gateway.as_deref() == Some(peer.address.as_str());
+    let fixed_width = 51 + address_width;
+    let detail_width = usize::from(width.saturating_sub(2))
+        .saturating_sub(fixed_width)
+        .max(1);
     Line::from(vec![
         Span::styled(
             if gateway { " ▶ " } else { "   " },
@@ -2195,11 +2222,14 @@ fn peer_wide_line<'a>(peer: &'a Peer, app: &App, address_width: usize) -> Line<'
             Style::default().fg(if gateway { ACCENT } else { MUTED }),
         ),
         Span::styled(
-            format!(
-                "{} / {} / {}",
-                peer_attention_label(app, peer),
-                peer_dwell_label(app, peer),
-                peer_attribution(peer)
+            fit(
+                &format!(
+                    "{} / {} / {}",
+                    peer_attention_label(app, peer),
+                    peer_dwell_label(app, peer),
+                    peer_attribution(peer)
+                ),
+                detail_width,
             ),
             Style::default().fg(INK),
         ),
@@ -2617,7 +2647,7 @@ fn render_overview_compact(frame: &mut Frame<'_>, area: Rect, app: &App, can_nav
         ),
     ]));
     lines.push(Line::from(Span::styled(
-        diagnosis.action,
+        compact_diagnosis_action(app, &diagnosis, area.width),
         Style::default().fg(ACCENT),
     )));
     if app.probe_policy().is_active() {
@@ -2645,7 +2675,7 @@ fn render_overview_compact(frame: &mut Frame<'_>, area: Rect, app: &App, can_nav
             ])
         }));
     }
-    lines.push(compact_telemetry_line(app));
+    lines.push(compact_telemetry_line(app, area.width));
     let available = chunks[1].height.saturating_sub(2) as usize;
     if lines.len() < available {
         let event_count = available - lines.len();
@@ -2656,7 +2686,13 @@ fn render_overview_compact(frame: &mut Frame<'_>, area: Rect, app: &App, can_nav
                     Style::default().fg(MUTED),
                 ),
                 Span::styled("▌ ", Style::default().fg(health_color(event.health))),
-                Span::styled(event.message.as_str(), Style::default().fg(INK)),
+                Span::styled(
+                    fit(
+                        event.message.as_str(),
+                        usize::from(area.width.saturating_sub(12)),
+                    ),
+                    Style::default().fg(INK),
+                ),
             ])
         }));
     }
@@ -2711,55 +2747,68 @@ fn compact_rate(bits_per_second: f64) -> String {
 }
 
 fn compact_diagnosis_summary(app: &App, diagnosis: &OverviewDiagnosis, width: u16) -> String {
-    if width >= 76 {
-        return diagnosis.summary.clone();
-    }
-    let summary = match app.situation().kind {
-        SituationKind::PassiveObservation => {
-            "default route observed; end-to-end reachability untested".into()
+    let summary = if width >= 90 {
+        diagnosis.summary.clone()
+    } else {
+        match app.situation().kind {
+            SituationKind::PassiveObservation if width < 66 => {
+                "default route observed; Internet untested".into()
+            }
+            SituationKind::PassiveObservation => {
+                "default route observed; Internet reachability untested".into()
+            }
+            SituationKind::GatewayLoss => {
+                let metrics = app
+                    .gateway_assessment_metrics()
+                    .expect("gateway loss situation has metrics");
+                format!(
+                    "gateway loss {:.0}% / n{}",
+                    metrics.loss_rate.unwrap_or_default() * 100.0,
+                    metrics.sent
+                )
+            }
+            SituationKind::GatewayVariation => {
+                let metrics = app
+                    .gateway_assessment_metrics()
+                    .expect("gateway variation situation has metrics");
+                format!(
+                    "gateway unstable: p50 {} / p95 {} / n{}",
+                    human_ms(metrics.rtt_p50_ms),
+                    human_ms(metrics.rtt_p95_ms),
+                    metrics.sent
+                )
+            }
+            SituationKind::SlowDns => {
+                let probe = app.probe_view(ProbeKind::Dns);
+                format!("DNS slow: {} / limit 500ms", human_ms(probe.latency_ms))
+            }
+            SituationKind::SlowHttps => {
+                let probe = app.probe_view(ProbeKind::Https);
+                format!("HTTPS slow: {} / limit 1000ms", human_ms(probe.latency_ms))
+            }
+            SituationKind::StalePathEvidence => "core path evidence stale; r refreshes".into(),
+            SituationKind::WarmingBaseline => format!(
+                "warming next-hop {}/{}; core passed",
+                app.gateway_attempts,
+                crate::model::MIN_GATEWAY_ASSESSMENT_SAMPLES
+            ),
+            SituationKind::Ready => "core path checks passed".into(),
+            SituationKind::EvidenceGap if diagnosis.health == Health::Ok => {
+                "path works; supporting evidence partial".into()
+            }
+            _ => diagnosis.summary.clone(),
         }
-        SituationKind::GatewayLoss => {
-            let metrics = app
-                .gateway_assessment_metrics()
-                .expect("gateway loss situation has metrics");
-            format!(
-                "gateway loss {:.0}% / n{}",
-                metrics.loss_rate.unwrap_or_default() * 100.0,
-                metrics.sent
-            )
-        }
-        SituationKind::GatewayVariation => {
-            let metrics = app
-                .gateway_assessment_metrics()
-                .expect("gateway variation situation has metrics");
-            format!(
-                "gateway unstable: p50 {} / p95 {} / n{}",
-                human_ms(metrics.rtt_p50_ms),
-                human_ms(metrics.rtt_p95_ms),
-                metrics.sent
-            )
-        }
-        SituationKind::SlowDns => {
-            let probe = app.probe_view(ProbeKind::Dns);
-            format!("DNS slow: {} / limit 500ms", human_ms(probe.latency_ms))
-        }
-        SituationKind::SlowHttps => {
-            let probe = app.probe_view(ProbeKind::Https);
-            format!("HTTPS slow: {} / limit 1000ms", human_ms(probe.latency_ms))
-        }
-        SituationKind::StalePathEvidence => "core path evidence stale; r refreshes".into(),
-        SituationKind::WarmingBaseline => format!(
-            "warming next-hop {}/{}; core passed",
-            app.gateway_attempts,
-            crate::model::MIN_GATEWAY_ASSESSMENT_SAMPLES
-        ),
-        SituationKind::Ready => "core path checks passed".into(),
-        SituationKind::EvidenceGap if diagnosis.health == Health::Ok => {
-            "path works; supporting evidence partial".into()
-        }
-        _ => diagnosis.summary.clone(),
     };
     fit(&summary, usize::from(width.saturating_sub(13)))
+}
+
+fn compact_diagnosis_action(app: &App, diagnosis: &OverviewDiagnosis, width: u16) -> String {
+    let action = if width < 76 && !app.probe_policy().is_active() {
+        "next: [a] run bounded path probes"
+    } else {
+        diagnosis.action
+    };
+    fit(action, usize::from(width.saturating_sub(2)))
 }
 
 fn compact_local_path_line<'a>(app: &'a App, width: u16, ssid: &str) -> Line<'a> {
@@ -2933,7 +2982,7 @@ fn latency_trend(app: &App) -> String {
         .collect()
 }
 
-fn compact_telemetry_line(app: &App) -> Line<'_> {
+fn compact_telemetry_line(app: &App, width: u16) -> Line<'_> {
     let radio = app.link.wifi.as_ref().map_or_else(
         || "radio not observed".into(),
         |wifi| {
@@ -2961,7 +3010,13 @@ fn compact_telemetry_line(app: &App) -> Line<'_> {
     );
     Line::from(vec![
         Span::styled("link      ", Style::default().fg(MUTED)),
-        Span::styled(format!("{radio} · {traffic}"), Style::default().fg(INK)),
+        Span::styled(
+            fit(
+                &format!("{radio} · {traffic}"),
+                usize::from(width.saturating_sub(12)),
+            ),
+            Style::default().fg(INK),
+        ),
     ])
 }
 
@@ -3276,6 +3331,7 @@ mod tests {
         assert!(rendered.contains("NEIGHBOR CACHE / PASSIVE OBSERVATION"));
         assert!(rendered.contains("operator-net"));
         assert!(rendered.contains("cache presence is not liveness"));
+        assert!(rendered.contains("activity  unknown; native cache has no traffic"));
         assert!(rendered.contains("192.168.1.1"));
         assert!(rendered.contains("gateway"));
         assert!(rendered.contains("neighbor STALE"));
@@ -3293,9 +3349,26 @@ mod tests {
             .draw(|frame| render(frame, &app, MonitorMode::Peers, 12, false))
             .unwrap();
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("12-24 / 24"));
-        assert!(rendered.contains("192.168.1.12"));
+        assert!(rendered.contains("13-19 / 24"));
+        assert!(rendered.contains("192.168.1.13"));
         assert!(!rendered.contains("192.168.1.2 "));
+    }
+
+    #[test]
+    fn medium_peers_prefers_complete_two_line_rows_over_a_clipped_wide_table() {
+        let mut app = App::new();
+        app.peers = peer_fixture(4);
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Peers, 0, false))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+
+        assert!(!rendered.contains("ATTENTION / SESSION / ATTRIBUTION"));
+        assert!(rendered.contains("02:00:00:00:00:01"));
+        assert!(rendered.contains("cached only"));
+        assert!(rendered.contains("current snapshot"));
     }
 
     #[test]
@@ -3408,6 +3481,30 @@ mod tests {
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("cache 30/30"));
         assert!(!rendered.contains("192.168.1.1"));
+    }
+
+    #[test]
+    fn compact_overview_fits_diagnosis_and_keeps_a_complete_next_action() {
+        let app = dwell_overview_fixture();
+        let diagnosis = overview_diagnosis(&app);
+        let mut long_diagnosis = overview_diagnosis(&app);
+        long_diagnosis.summary = "x".repeat(100);
+        let summary = compact_diagnosis_summary(&app, &long_diagnosis, 90);
+
+        assert!(summary.chars().count() <= 77);
+        assert!(summary.ends_with('…'));
+        assert_eq!(
+            compact_diagnosis_action(&app, &diagnosis, 60),
+            "next: [a] run bounded path probes"
+        );
+
+        let backend = TestBackend::new(60, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+        assert!(rendered.contains("next: [a] run bounded path probes"));
     }
 
     #[test]

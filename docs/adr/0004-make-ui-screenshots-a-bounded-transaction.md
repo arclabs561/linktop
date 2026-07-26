@@ -155,3 +155,12 @@ index, verified viewport, scheduled time, and actual time so resize sequences
 remain inspectable. Subsecond timing, conditional actions, mouse events,
 state-based assertions, and durable artifact publication cross the updated
 review trigger.
+
+## Update (2026-07-26): enforce the no-retention boundary
+
+Reject `--history` for every screenshot subject and remove history from the
+capture request passed to both rendering lanes. The native child also clears an
+inherited `LINKTOP_HISTORY`. A screenshot may render live host evidence or an
+inert synthetic scene, but it cannot read, compare, or append durable recurrence
+evidence. This makes the implementation match the original process-local QA
+decision.

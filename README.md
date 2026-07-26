@@ -110,6 +110,16 @@ summary of the current path generation and up to eight completed generations
 observed by that process. Evidence a focused command did not collect is
 labelled `not collected`; the summary is not persisted.
 
+Finite text and the TUI are expert human interfaces, not machine APIs.
+`--json` emits one versioned JSON document for agents and programs:
+`linktop.observation.v1` for snapshot, probe, link, and peers, and
+`linktop.speed_experiment.v1` for the explicit load experiment. Observation
+documents carry the producer version, subject, completion time, acquisition policy/lifetime,
+typed path assessment, evidence coverage, and complete subject evidence.
+Link JSON includes interface counters when available; peer JSON includes path
+context and an explicit default-gateway role. Use these contracts instead of
+parsing prose or terminal columns.
+
 ```sh
 linktop
 linktop --plain

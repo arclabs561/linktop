@@ -1,0 +1,46 @@
+{
+  "schema": "linktop.observation.v1",
+  "producer": {
+    "name": "linktop",
+    "version": "0.1.0"
+  },
+  "subject": "link",
+  "completed_at": "2026-07-26T20:00:00Z",
+  "acquisition": {
+    "policy": "passive",
+    "lifetime": "one_observation"
+  },
+  "assessment": {
+    "probe_policy": "passive",
+    "path_status": "untested",
+    "evidence_coverage": "partial",
+    "completed_probes": 0,
+    "total_probes": 0
+  },
+  "evidence": {
+    "link": {
+      "host": "operator-host",
+      "interface": "en0",
+      "link_type": "wifi",
+      "ssid": "lab",
+      "ssid_restricted": false,
+      "wifi": null,
+      "gateway": "192.0.2.1",
+      "public_ip": null,
+      "resolvers": [
+        "192.0.2.53"
+      ],
+      "addresses": [
+        {
+          "interface": "en0",
+          "address": "192.0.2.10",
+          "family": 4,
+          "is_default": true,
+          "is_temporary": false
+        }
+      ],
+      "network_configuration": null
+    },
+    "interface_counters": null
+  }
+}

@@ -1,7 +1,7 @@
 ---
 id: 0002
 status: accepted
-governs: src/main.rs, src/net.rs, src/ui.rs, src/plain.rs, README.md
+governs: src/main.rs, src/net.rs, src/ui.rs, src/plain.rs, src/output.rs, README.md
 why: link and neighbor-cache observations become more informative while they dwell, but redirected and machine-readable commands must keep a bounded lifetime unless the caller explicitly requests a stream.
 rejected: keep focused commands one-shot everywhere (too little observation time for cache and path changes); add a watch wrapper command (duplicates the subject hierarchy); make every output live (unsafe pipe and automation lifetime); make snapshot and speed interactive (their work already has a natural terminal condition).
 supersedes: none
@@ -105,3 +105,27 @@ collectors are reported as `not collected`, not as zero activity.
 This closing summary does not change the lifetime of an unbounded plain stream,
 make JSON continuous, persist observations, or widen a focused command's
 acquisition plan.
+
+## Update (2026-07-26): version finite machine projections
+
+Replace the experimental direct serialization of implementation structs with
+explicit finite document contracts. Snapshot, probe, link, and peers emit one
+`linktop.observation.v1` document containing the producer version, subject,
+completion time, acquisition policy and lifetime, typed path assessment,
+evidence coverage, and the complete subject evidence. Link evidence includes interface counters when
+available. Peer evidence includes the current path context and an explicit
+default-gateway role per binding.
+
+The explicit load transaction emits `linktop.speed_experiment.v1` because it is
+a bounded active experiment rather than another passive path observation.
+Earlier unversioned JSON is not retained as a compatibility contract. Human
+prose remains intentionally free to improve; agents and programs consume the
+versioned JSON documents instead of scraping TUI, finite text, or plain-stream
+output. Continuous structured state still requires a distinct versioned NDJSON
+decision.
+
+Within v1, existing field names, types, meanings, and nesting remain stable;
+new optional evidence is additive. A removal, reinterpretation, type change, or
+required-nesting change creates a new schema discriminator. Exact readable
+golden documents for every finite JSON subject gate the complete wire shape so
+an internal model edit cannot silently alter v1.

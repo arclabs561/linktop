@@ -4,6 +4,7 @@ mod metrics;
 mod model;
 mod net;
 mod oui;
+mod output;
 mod peers;
 mod plain;
 mod process;
@@ -292,14 +293,11 @@ fn main() -> Result<()> {
         }) => {
             reject_live_options("screenshot", plain, dwell)?;
             reject_root_active("screenshot", cli.active)?;
+            reject_history("screenshot", explicit_history.as_ref())?;
             let mode = view.into();
             anyhow::ensure!(
                 !active || mode == MonitorMode::Overview,
                 "screenshot --active is only valid for the overview"
-            );
-            anyhow::ensure!(
-                explicit_history.is_none() || mode == MonitorMode::Overview,
-                "screenshot --history is only valid for the overview"
             );
             if scene.is_some() {
                 anyhow::ensure!(
@@ -309,10 +307,6 @@ fn main() -> Result<()> {
                 anyhow::ensure!(
                     !active,
                     "screenshot --scene dense-peers cannot be combined with --active"
-                );
-                anyhow::ensure!(
-                    explicit_history.is_none(),
-                    "screenshot --scene dense-peers cannot be combined with --history"
                 );
             }
             let capture_policy = if active {
@@ -328,7 +322,6 @@ fn main() -> Result<()> {
                 requested_seconds: at,
                 size,
                 output_directory: output_dir,
-                history_path: explicit_history,
                 keys,
                 resizes,
                 scene,
@@ -355,7 +348,7 @@ fn main() -> Result<()> {
                 default_history,
             ),
             LiveOutput::Once if default_history.is_some() => {
-                anyhow::bail!("--history requires a live terminal or --plain --dwell")
+                anyhow::bail!("--history requires a live terminal or --plain")
             }
             LiveOutput::Once if probe_policy.is_active() => probe(false),
             LiveOutput::Once => snapshot(false),
@@ -419,7 +412,13 @@ fn resolve_default_history(
 fn snapshot(json: bool) -> Result<()> {
     let report = net::collect_passive_snapshot();
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        let evidence = output::HostPathEvidence::new(&report);
+        let document = output::ObservationDocument::new(
+            output::ObservationSubject::Snapshot,
+            report.summary,
+            evidence,
+        );
+        output::print_json(&document)?;
     } else {
         println!(
             "LINKTOP  PASSIVE SNAPSHOT / PATH UNTESTED / COVERAGE {}",
@@ -497,7 +496,13 @@ fn snapshot(json: bool) -> Result<()> {
 fn probe(json: bool) -> Result<()> {
     let report = net::collect_snapshot(Duration::from_secs(15));
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        let evidence = output::HostPathEvidence::new(&report);
+        let document = output::ObservationDocument::new(
+            output::ObservationSubject::Probe,
+            report.summary,
+            evidence,
+        );
+        output::print_json(&document)?;
     } else {
         println!(
             "LINKTOP  ACTIVE PATH {} / COVERAGE {}",
@@ -567,11 +572,30 @@ fn probe(json: bool) -> Result<()> {
 
 fn link(json: bool) -> Result<()> {
     let link = net::collect_link_snapshot();
+    let counters = link
+        .interface
+        .as_deref()
+        .and_then(net::collect_interface_counters);
     if json {
-        println!("{}", serde_json::to_string_pretty(&link)?);
+        let assessment = model::passive_link_summary(&link, counters.as_ref());
+        let evidence = output::LinkEvidence {
+            link: &link,
+            interface_counters: counters.as_ref(),
+        };
+        let document = output::ObservationDocument::new(
+            output::ObservationSubject::Link,
+            assessment,
+            evidence,
+        );
+        output::print_json(&document)?;
         return Ok(());
     }
-    println!("LINKTOP  LOCAL LINK");
+    let assessment = model::passive_link_summary(&link, counters.as_ref());
+    println!(
+        "LINKTOP  LOCAL LINK / PATH {} / COVERAGE {}",
+        assessment.path_status.label(),
+        assessment.evidence_coverage.label()
+    );
     println!(
         "path     {} [{}] → {}",
         link.interface.as_deref().unwrap_or("unknown interface"),
@@ -597,11 +621,7 @@ fn link(json: bool) -> Result<()> {
             speed::human_rate(wifi.tx_rate_mbps.map(|value| value * 1_000_000.0))
         );
     }
-    if let Some(counters) = link
-        .interface
-        .as_deref()
-        .and_then(net::collect_interface_counters)
-    {
+    if let Some(counters) = counters {
         println!(
             "traffic  {} received / {} transmitted / {} errors / {} drops",
             human_bytes(counters.received_bytes),
@@ -630,11 +650,22 @@ fn link(json: bool) -> Result<()> {
 fn peers(json: bool) -> Result<()> {
     let link = net::collect_link();
     let report = peers::collect(&link);
+    let assessment = model::passive_peer_summary(&link, &report);
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        let evidence = output::PeerEvidence::new(&link, &report);
+        let document = output::ObservationDocument::new(
+            output::ObservationSubject::Peers,
+            assessment,
+            evidence,
+        );
+        output::print_json(&document)?;
     } else {
         let gateway = link.gateway;
-        println!("LINKTOP  NEIGHBOR CACHE / PASSIVE");
+        println!(
+            "LINKTOP  NEIGHBOR CACHE / PASSIVE / PATH {} / COVERAGE {}",
+            assessment.path_status.label(),
+            assessment.evidence_coverage.label()
+        );
         println!("{}", report.detail);
         println!(
             "evidence {}  OUI {}",
@@ -673,7 +704,8 @@ fn peers(json: bool) -> Result<()> {
 fn speed(host: &str, port: u16, duration: Duration, json: bool) -> Result<()> {
     let report = speed::run(host, port, duration)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        let document = output::SpeedExperimentDocument::new(&report);
+        output::print_json(&document)?;
         return Ok(());
     }
     println!(
@@ -1221,6 +1253,13 @@ mod cli_tests {
     fn transactional_commands_reject_live_lifetimes() {
         assert!(reject_live_options("snapshot", true, Some(Duration::from_secs(2))).is_err());
         assert!(reject_live_options("speed", false, Some(Duration::from_secs(2))).is_err());
+        assert!(
+            reject_history(
+                "screenshot",
+                Some(&PathBuf::from("/private/history-must-not-change.jsonl"))
+            )
+            .is_err()
+        );
     }
 
     #[test]
