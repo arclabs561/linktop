@@ -703,7 +703,7 @@ fn link(json: bool) -> Result<()> {
             counters.drops
         );
     }
-    println!("resolver {}", resolver_text(&link.resolvers));
+    println!("resolvers {}", resolver_text(&link.resolvers));
     for address in &link.addresses {
         println!(
             "{} {:<8} {}{}",
@@ -769,12 +769,12 @@ fn peers(json: bool) -> Result<()> {
             println!("failed   {}", report.failed_sources.join(" + "));
         }
         println!(
-            "{:<40} {:<18} {:<10} {:<12} {:<9} {:<36} OUI / SCOPE",
-            "ADDRESS", "MAC", "IFACE", "STATE", "ROLE", "KERNEL SEMANTICS"
+            "{:<40} {:<18} {:<10} {:<12} {:<9} {:<36} {:<28} MAC SCOPE",
+            "ADDRESS", "MAC", "IFACE", "STATE", "ROLE", "KERNEL SEMANTICS", "REGISTRANT"
         );
         for peer in &report.peers {
             println!(
-                "{:<40} {:<18} {:<10} {:<12} {:<9} {:<36} {}",
+                "{:<40} {:<18} {:<10} {:<12} {:<9} {:<36} {:<28} {}",
                 peer.address,
                 peer.mac.as_deref().unwrap_or("—"),
                 peer.interface.as_deref().unwrap_or("—"),
@@ -785,10 +785,10 @@ fn peers(json: bool) -> Result<()> {
                     "—"
                 },
                 ui::peer_state_meaning(peer.state.as_deref()),
-                peer.registrant
-                    .as_deref()
-                    .or_else(|| peer.mac_scope.map(|scope| scope.label()))
-                    .unwrap_or("—")
+                peer.registrant.as_deref().unwrap_or("—"),
+                peer.mac_scope
+                    .map(|scope| scope.label())
+                    .unwrap_or("unavailable")
             );
         }
     }

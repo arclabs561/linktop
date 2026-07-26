@@ -131,7 +131,13 @@ evidence includes the host-visible path context and makes the default-gateway
 role explicit instead of requiring a consumer to reproduce presentation
 logic. Its typed path-filter result comes from the peer collector's actual
 interface-prefix scope read; coverage cannot be declared complete from a
-separate link snapshot when that read failed or raced. `linktop.speed_experiment.v1`
+separate link snapshot when that read failed or raced. An additive optional
+`path_context.link_evidence` object preserves the
+network-name and BSSID visibility state, association, host addresses, derived
+default-path prefixes, and effective resolvers supplied by that observation.
+It is host-visible link evidence, not a physical-place assertion or a settled
+attachment/overlay decomposition.
+`linktop.speed_experiment.v1`
 separately identifies the explicit bounded active load experiment because it is
 not a passive host-path assessment.
 Earlier raw, unversioned JSON was experimental implementation serialization and

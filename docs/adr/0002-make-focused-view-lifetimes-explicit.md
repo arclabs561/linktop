@@ -114,7 +114,12 @@ explicit finite document contracts. Snapshot, probe, link, and peers emit one
 completion time, acquisition policy and lifetime, typed path assessment,
 evidence coverage, and the complete subject evidence. Link evidence includes interface counters when
 available. Peer evidence includes the current path context and an explicit
-default-gateway role per binding.
+default-gateway role per binding. An additive optional
+`path_context.link_evidence` object carries typed network-name and BSSID
+visibility, association, host addresses, derived default-path prefixes, and
+effective resolvers when the same one-shot observation supplied link evidence.
+It does not claim a physical place or resolve the future
+attachment-versus-overlay model.
 
 The explicit load transaction emits `linktop.speed_experiment.v1` because it is
 a bounded active experiment rather than another passive path observation.
