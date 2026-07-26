@@ -298,18 +298,22 @@ rendered rather than the requested entry subject.
 
 A successful transaction writes one pretty
 `linktop.qa_capture_manifest.v1` JSON document last. It records the normalized
-frame, key, and resize schedule, requested subject, actual rendered view and
-viewport per frame, the producing executable's SHA-256, and the relative name,
-media type, byte length, and SHA-256 of every artifact. Linktop rejects
-pre-existing artifact or manifest paths and verifies completed artifacts
-immediately before atomically publishing the manifest with an exclusive
-same-directory hard link. An interrupted or partial transaction has no
-completion manifest; consumers rehash artifacts to detect any later change.
+frame, key, and resize schedule, requested subject and initial policy, actual
+rendered view, policy, and viewport per frame, a portable transaction ID, UTC
+replay start and completion times, monotonic replay duration, the producing
+executable's SHA-256, and the relative name, media type, byte length, and
+SHA-256 of every artifact. Both lanes freeze the replay completion boundary
+immediately after the last frame and before collector or PTY cleanup. Linktop
+rejects pre-existing artifact or manifest paths and verifies completed
+artifacts immediately before atomically publishing the manifest with an
+exclusive same-directory hard link. An interrupted or partial transaction has
+no completion manifest; consumers rehash artifacts to detect any later change.
 This is a private layout-QA receipt, not network evidence or telemetry, and
 contains no absolute paths or captured network facts. The last `--at` value is
-the transaction lifetime. The output filesystem must support same-directory
-hard links; Linktop probes that capability before the dwell starts so atomic
-no-clobber publication cannot fail only after all frames have been produced.
+the requested replay lifetime; `duration_ms` is the measured monotonic replay
+window. The output filesystem must support same-directory hard links; Linktop
+probes that capability before the dwell starts so atomic no-clobber publication
+cannot fail only after all frames have been produced.
 
 ## Controls
 

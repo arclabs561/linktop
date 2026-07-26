@@ -1717,7 +1717,7 @@ fn render_link_focus(frame: &mut Frame<'_>, area: Rect, app: &App, can_navigate:
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Min(8),
+            Constraint::Min(6),
             Constraint::Length(1),
         ])
         .split(area);
@@ -2743,6 +2743,11 @@ fn render_overview_compact(frame: &mut Frame<'_>, area: Rect, app: &App, can_nav
         ]),
         compact_local_path_line(app, area.width, &ssid),
     ];
+    lines.push(compact_coverage_line(app, area.width));
+    lines.push(Line::from(Span::styled(
+        compact_diagnosis_action(app, &diagnosis, area.width),
+        Style::default().fg(ACCENT),
+    )));
     if diagnosis.context_is_salient {
         lines.push(Line::from(Span::styled(
             fit(
@@ -2751,16 +2756,11 @@ fn render_overview_compact(frame: &mut Frame<'_>, area: Rect, app: &App, can_nav
             ),
             Style::default().fg(INK),
         )));
-    } else {
-        lines.push(compact_coverage_line(app, area.width));
     }
     if app.probe_policy().is_active() {
         lines.push(gateway_summary_line(app, area.width));
     } else {
         lines.push(compact_workload_line(app, area.width));
-    }
-    if diagnosis.context_is_salient {
-        lines.push(compact_coverage_line(app, area.width));
     }
     lines.push(Line::from(vec![
         Span::styled("context   ", Style::default().fg(MUTED)),
@@ -2772,10 +2772,6 @@ fn render_overview_compact(frame: &mut Frame<'_>, area: Rect, app: &App, can_nav
             Style::default().fg(INK),
         ),
     ]));
-    lines.push(Line::from(Span::styled(
-        compact_diagnosis_action(app, &diagnosis, area.width),
-        Style::default().fg(ACCENT),
-    )));
     if app.probe_policy().is_active() {
         lines.extend(app.probes.iter().map(|probe| {
             let latency = probe
@@ -3396,17 +3392,21 @@ mod tests {
             is_default: true,
             is_temporary: false,
         }];
-        let backend = TestBackend::new(60, 12);
+        let backend = TestBackend::new(60, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| render(frame, &app, MonitorMode::Link, 0, false))
             .unwrap();
         let rendered = buffer_text(terminal.backend());
+        assert!(rendered.contains("LINKTOP"));
+        assert!(rendered.contains("LOCAL LINK"));
+        assert!(rendered.contains("PASSIVE"));
         assert!(rendered.contains("LOCAL LINK / PASSIVE ONLY"));
         assert!(rendered.contains("en0 [wifi / house-wifi]"));
         assert!(rendered.contains("address   192.168.1.10"));
         assert!(rendered.contains("resolver  192.168.1.1 +1"));
-        assert!(rendered.contains("traffic   sampling"));
+        assert!(rendered.contains("q"));
+        assert!(rendered.contains("quit"));
         assert!(!rendered.contains("focused local evidence"));
     }
 
@@ -3449,6 +3449,14 @@ mod tests {
         app.link.link_type = Some("wifi".into());
         app.link.ssid = Some("house-wifi".into());
         app.link.gateway = Some("192.168.1.1".into());
+        app.history_context = Some(HistoryContext {
+            kind: crate::model::HistoryContextKind::Recurring,
+            summary: "recurring network context · 3 prior observations".into(),
+            compact_summary: "recurring · 3 prior · place unknown".into(),
+            context_anchor: "gateway link binding observed".into(),
+            place_authority: "unknown".into(),
+            evidence: "netmon host-path v0".into(),
+        });
         app.link.resolvers = vec!["192.168.1.1".into()];
         app.link.addresses = (1..=5)
             .map(|index| Address {
@@ -3887,8 +3895,7 @@ mod tests {
         assert!(rendered.contains("en0 [wifi / house-wifi]"));
         assert!(rendered.contains("gw 192.168.1.1"));
         assert!(rendered.contains("coverage"));
-        assert!(rendered.contains("process"));
-        assert!(rendered.contains("probes:off"));
+        assert!(rendered.contains("next:"));
         assert!(rendered.contains("1/2/3"));
         assert!(rendered.contains("LIVE"));
     }
@@ -4046,7 +4053,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_passive_overview_promotes_the_busiest_process() {
+    fn compact_passive_overview_promotes_the_busiest_process_after_core_operator_rows() {
         let mut app = App::new();
         app.workload = WorkloadSnapshot {
             health: Health::Ok,
@@ -4060,7 +4067,7 @@ mod tests {
                 transmitted_bytes_per_second: 2_048,
             }],
         };
-        let backend = TestBackend::new(60, 10);
+        let backend = TestBackend::new(60, 11);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))

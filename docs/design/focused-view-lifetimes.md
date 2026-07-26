@@ -265,7 +265,12 @@ boundary; only their aggregate cache-dwell summary does.
 Ratatui `TestBackend` renders canonical overview, link, and peers fixtures at wide,
 shallow, narrow, and tall terminal sizes. Tests assert the important content contract:
 the focused subject remains visible, truncation is declared, headers and footers fit,
-and no panel is selected merely because its border technically fits.
+and no panel is selected merely because its border technically fits. The
+minimum supported 60×10 frame preserves the live subject/policy header and
+operator-control footer in every view. Its overview body reserves the remaining
+four rows for diagnosis, current path, evidence coverage or blind spot, and one
+complete bounded action; change, workload, and configuration context are
+admitted as height grows.
 
 The built-in `screenshot` transaction runs any live subject against the same monitor,
 model, and Ratatui renderer in a fixed-size headless terminal. Repeatable,
@@ -306,15 +311,18 @@ scheduled and actual time, actual rendered view, and actual viewport.
 After every requested frame and all of its artifacts succeed, the transaction
 atomically publishes one pretty-printed `linktop.qa_capture_manifest.v1`. It
 records producer/version and executable SHA-256, deterministic or native lane,
-requested subject, scene/stage, policy, normalized frame/key/resize schedules,
-and each frame's scheduled/actual time, viewport, and rendered view. Artifact
-entries use only relative names and include media type, byte length, and SHA-256.
-Artifact creation rejects pre-existing paths. Publication rereads the files and
-checks frame completeness, order, byte length, and digest, then installs the
-completed private temporary inode at a new final path using an exclusive
-same-directory hard link; the native lane also matches the visible header to the
-recorded view and policy. Failure or interruption leaves no completion manifest.
-Consumers rehash artifacts to detect
+requested subject, scene/stage, initial policy, normalized frame/key/resize
+schedules, portable transaction identity, UTC replay start/completion times,
+measured monotonic replay duration, and each frame's scheduled/actual time,
+actual policy, viewport, and rendered view. Both lanes freeze replay completion
+immediately after the final frame and before collector or PTY cleanup. Artifact
+entries use only relative names and include media type, byte length, and
+SHA-256. Artifact creation rejects pre-existing paths.
+Publication rereads the files and checks frame completeness, order, byte
+length, and digest, then installs the completed private temporary inode at a new
+final path using an exclusive same-directory hard link; the native lane also
+matches the visible header to the recorded view and policy. Failure or
+interruption leaves no completion manifest. Consumers rehash artifacts to detect
 changes after the pre-publication verification point. The manifest contains no
 absolute paths or captured network facts and remains a private QA receipt, not
 Netmon evidence, telemetry, or permission to retain observed data.
