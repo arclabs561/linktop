@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
+use std::time::Instant;
 
 use crate::model::{
     Health, InterfaceCounters, LinkSnapshot, MacScope, Peer, PeerPathFilter, PeerSnapshot,
@@ -23,6 +24,29 @@ pub enum ObservationSubject {
 pub struct Acquisition {
     pub policy: ProbePolicy,
     pub lifetime: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+}
+
+#[derive(Debug)]
+pub struct AcquisitionWindow {
+    started_at: String,
+    started: Instant,
+}
+
+impl AcquisitionWindow {
+    pub fn start() -> Self {
+        Self {
+            started_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            started: Instant::now(),
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.started.elapsed().as_millis().min(u64::MAX as u128) as u64
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -50,11 +74,18 @@ pub struct ObservationDocument<E> {
 }
 
 impl<E> ObservationDocument<E> {
-    pub fn new(subject: ObservationSubject, assessment: SnapshotSummary, evidence: E) -> Self {
+    pub fn new(
+        subject: ObservationSubject,
+        assessment: SnapshotSummary,
+        evidence: E,
+        window: &AcquisitionWindow,
+    ) -> Self {
         Self::at(
             subject,
             assessment,
             evidence,
+            window.started_at.clone(),
+            window.elapsed_ms(),
             Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         )
     }
@@ -63,6 +94,8 @@ impl<E> ObservationDocument<E> {
         subject: ObservationSubject,
         assessment: SnapshotSummary,
         evidence: E,
+        started_at: String,
+        elapsed_ms: u64,
         completed_at: String,
     ) -> Self {
         Self {
@@ -73,6 +106,8 @@ impl<E> ObservationDocument<E> {
             acquisition: Acquisition {
                 policy: assessment.probe_policy,
                 lifetime: "one_observation",
+                started_at: Some(started_at),
+                elapsed_ms: Some(elapsed_ms),
             },
             assessment,
             evidence,
@@ -185,14 +220,16 @@ pub struct SpeedExperimentDocument<E> {
 }
 
 impl<E> SpeedExperimentDocument<E> {
-    pub fn new(evidence: E) -> Self {
+    pub fn new(evidence: E, window: &AcquisitionWindow) -> Self {
         Self::at(
             evidence,
+            window.started_at.clone(),
+            window.elapsed_ms(),
             Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         )
     }
 
-    fn at(evidence: E, completed_at: String) -> Self {
+    fn at(evidence: E, started_at: String, elapsed_ms: u64, completed_at: String) -> Self {
         Self {
             schema: SPEED_EXPERIMENT_SCHEMA_V1,
             producer: Producer::LINKTOP,
@@ -201,6 +238,8 @@ impl<E> SpeedExperimentDocument<E> {
             acquisition: Acquisition {
                 policy: ProbePolicy::Active,
                 lifetime: "bounded_experiment",
+                started_at: Some(started_at),
+                elapsed_ms: Some(elapsed_ms),
             },
             evidence,
         }
@@ -362,6 +401,8 @@ mod tests {
             ObservationSubject::Link,
             passive_summary(EvidenceCoverage::Partial),
             evidence,
+            "2026-07-26T19:59:59Z".into(),
+            1_250,
             "2026-07-26T20:00:00Z".into(),
         );
         let value = serde_json::to_value(document).unwrap();
@@ -373,6 +414,8 @@ mod tests {
         assert_eq!(value["completed_at"], "2026-07-26T20:00:00Z");
         assert_eq!(value["acquisition"]["policy"], "passive");
         assert_eq!(value["acquisition"]["lifetime"], "one_observation");
+        assert_eq!(value["acquisition"]["started_at"], "2026-07-26T19:59:59Z");
+        assert_eq!(value["acquisition"]["elapsed_ms"], 1_250);
         assert_eq!(value["assessment"]["path_status"], "untested");
         assert_eq!(value["assessment"]["evidence_coverage"], "partial");
         assert_eq!(value["evidence"]["link"]["interface"], "en0");
@@ -396,6 +439,8 @@ mod tests {
             ObservationSubject::Peers,
             passive_summary(EvidenceCoverage::Complete),
             evidence,
+            "2026-07-26T19:59:59Z".into(),
+            100,
             "2026-07-26T20:00:00Z".into(),
         );
         let value = serde_json::to_value(document).unwrap();
@@ -411,6 +456,8 @@ mod tests {
     fn speed_experiment_uses_a_distinct_versioned_active_contract() {
         let document = SpeedExperimentDocument::at(
             serde_json::json!({"duration_s": 10}),
+            "2026-07-26T20:00:00Z".into(),
+            10_250,
             "2026-07-26T20:00:10Z".into(),
         );
         let value = serde_json::to_value(document).unwrap();
@@ -421,7 +468,40 @@ mod tests {
         assert_eq!(value["completed_at"], "2026-07-26T20:00:10Z");
         assert_eq!(value["acquisition"]["policy"], "active");
         assert_eq!(value["acquisition"]["lifetime"], "bounded_experiment");
+        assert_eq!(value["acquisition"]["started_at"], "2026-07-26T20:00:00Z");
+        assert_eq!(value["acquisition"]["elapsed_ms"], 10_250);
         assert_eq!(value["evidence"]["duration_s"], 10);
+    }
+
+    #[test]
+    fn production_constructors_measure_the_monotonic_acquisition_window() {
+        let window = AcquisitionWindow {
+            started_at: "2026-07-26T20:00:00Z".into(),
+            started: Instant::now()
+                .checked_sub(std::time::Duration::from_millis(10))
+                .unwrap(),
+        };
+        let observation = ObservationDocument::new(
+            ObservationSubject::Snapshot,
+            passive_summary(EvidenceCoverage::Unavailable),
+            serde_json::json!({"fixture": true}),
+            &window,
+        );
+        let observation = serde_json::to_value(observation).unwrap();
+        assert_eq!(
+            observation["acquisition"]["started_at"],
+            "2026-07-26T20:00:00Z"
+        );
+        assert!(observation["acquisition"]["elapsed_ms"].as_u64().unwrap() >= 10);
+
+        let experiment =
+            SpeedExperimentDocument::new(serde_json::json!({"fixture": true}), &window);
+        let experiment = serde_json::to_value(experiment).unwrap();
+        assert_eq!(
+            experiment["acquisition"]["started_at"],
+            "2026-07-26T20:00:00Z"
+        );
+        assert!(experiment["acquisition"]["elapsed_ms"].as_u64().unwrap() >= 10);
     }
 
     #[test]
@@ -443,6 +523,8 @@ mod tests {
             ObservationSubject::Snapshot,
             snapshot_summary,
             HostPathEvidence::new(&snapshot_report),
+            "2026-07-26T19:59:59Z".into(),
+            125,
             "2026-07-26T20:00:00Z".into(),
         );
         assert_golden(
@@ -477,6 +559,8 @@ mod tests {
             ObservationSubject::Probe,
             probe_summary,
             HostPathEvidence::new(&probe_report),
+            "2026-07-26T19:59:45Z".into(),
+            15_000,
             "2026-07-26T20:00:00Z".into(),
         );
         assert_golden(
@@ -492,6 +576,8 @@ mod tests {
                 link: &link,
                 interface_counters: Some(&link_counters),
             },
+            "2026-07-26T19:59:59Z".into(),
+            50,
             "2026-07-26T20:00:00Z".into(),
         );
         assert_golden(&link_document, include_str!("output/fixtures/v1/link.json"));
@@ -500,6 +586,8 @@ mod tests {
             ObservationSubject::Peers,
             passive_summary(EvidenceCoverage::Complete),
             PeerEvidence::new(&link, &peers),
+            "2026-07-26T19:59:59Z".into(),
+            75,
             "2026-07-26T20:00:00Z".into(),
         );
         assert_golden(
@@ -523,8 +611,12 @@ mod tests {
                 retransmits: Some(1),
             },
         };
-        let speed_document =
-            SpeedExperimentDocument::at(&speed_report, "2026-07-26T20:00:10Z".into());
+        let speed_document = SpeedExperimentDocument::at(
+            &speed_report,
+            "2026-07-26T20:00:00Z".into(),
+            10_250,
+            "2026-07-26T20:00:10Z".into(),
+        );
         assert_golden(
             &speed_document,
             include_str!("output/fixtures/v1/speed.json"),

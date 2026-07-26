@@ -8,7 +8,9 @@
   "completed_at": "2026-07-26T20:00:10Z",
   "acquisition": {
     "policy": "active",
-    "lifetime": "bounded_experiment"
+    "lifetime": "bounded_experiment",
+    "started_at": "2026-07-26T20:00:00Z",
+    "elapsed_ms": 10250
   },
   "evidence": {
     "tool": "iperf3",

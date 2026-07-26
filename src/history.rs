@@ -12,9 +12,7 @@ use netmon_replay::{
     summarize_context_recurrence,
 };
 
-use crate::model::{
-    App, EvidenceCoverage, HistoryContext, HistoryContextKind, LinkSnapshot, MonitorUpdate,
-};
+use crate::model::{App, HistoryContext, HistoryContextKind, LinkSnapshot, MonitorUpdate};
 
 pub struct HistorySession {
     path: PathBuf,
@@ -197,12 +195,10 @@ fn observation_from_app(app: &App) -> HostPathObservationV0 {
             &mut missing_sources,
         );
     }
-    let coverage = if missing_sources.is_empty() {
-        match app.evidence_coverage() {
-            EvidenceCoverage::Complete => CoverageStateV0::Complete,
-            EvidenceCoverage::Unavailable => CoverageStateV0::Unavailable,
-            EvidenceCoverage::Collecting | EvidenceCoverage::Partial => CoverageStateV0::Partial,
-        }
+    let coverage = if observed_sources.is_empty() {
+        CoverageStateV0::Unavailable
+    } else if missing_sources.is_empty() {
+        CoverageStateV0::Complete
     } else {
         CoverageStateV0::Partial
     };
@@ -303,6 +299,15 @@ fn coverage_sources(link: &LinkSnapshot) -> (Vec<String>, Vec<String>) {
                 .and_then(|value| value.associated_bssid.as_ref())
                 .is_some(),
             "associated_bssid",
+            &mut observed,
+            &mut missing,
+        );
+        source(
+            link.network_configuration
+                .as_deref()
+                .and_then(|value| value.connection_id.as_ref())
+                .is_some(),
+            "association_id",
             &mut observed,
             &mut missing,
         );
@@ -611,7 +616,9 @@ fn make_private_file(_path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Address, NetworkConfiguration};
+    use crate::model::{
+        Address, MacScope, NetworkConfiguration, Peer, PeerPathFilter, PeerSnapshot, ProbePolicy,
+    };
 
     fn app(ssid: &str, gateway: &str, bssid: &str) -> App {
         let mut app = App::new();
@@ -663,11 +670,102 @@ mod tests {
         record
     }
 
+    fn with_gateway_binding(mut app: App) -> App {
+        app.peers = PeerSnapshot {
+            health: crate::model::Health::Ok,
+            detail: "complete native cache".into(),
+            path_filter: PeerPathFilter::Applied,
+            sources: vec!["arp -an".into(), "ndp -an".into()],
+            failed_sources: Vec::new(),
+            oui_source: None,
+            peers: vec![Peer {
+                address: app.link.gateway.clone().unwrap(),
+                mac: Some("02:00:00:ff:00:01".into()),
+                interface: app.link.interface.clone(),
+                state: Some("REACHABLE".into()),
+                binding_conflict: false,
+                mac_scope: Some(MacScope::Local),
+                registrant: None,
+            }],
+        };
+        app
+    }
+
     #[test]
     fn maps_host_address_to_network_prefix() {
         assert_eq!(
             path_prefixes(&app("network-a", "192.0.2.1", "02:00:00:00:00:01").link),
             vec!["192.0.2.0/24"]
+        );
+    }
+
+    #[test]
+    fn history_coverage_describes_only_the_serialized_passive_evidence() {
+        let passive = with_gateway_binding(app("network-a", "192.0.2.1", "02:00:00:00:00:01"));
+        let mut active = with_gateway_binding(app("network-a", "192.0.2.1", "02:00:00:00:00:01"));
+        let mut degraded_peers =
+            with_gateway_binding(app("network-a", "192.0.2.1", "02:00:00:00:00:01"));
+        active.set_probe_policy(ProbePolicy::Active);
+        degraded_peers.peers.health = crate::model::Health::Degraded;
+        degraded_peers
+            .peers
+            .failed_sources
+            .push("unrelated NDP source".into());
+
+        assert_ne!(passive.evidence_coverage(), active.evidence_coverage());
+        let passive_record = observation_from_app(&passive);
+        let active_record = observation_from_app(&active);
+        let degraded_peer_record = observation_from_app(&degraded_peers);
+
+        assert_eq!(
+            passive_record.policy,
+            CollectionPolicyV0::passive_host_local()
+        );
+        assert_eq!(
+            active_record.policy,
+            CollectionPolicyV0::passive_host_local()
+        );
+        assert_eq!(passive_record.coverage, active_record.coverage);
+        assert_eq!(passive_record.coverage, degraded_peer_record.coverage);
+        assert_eq!(active_record.coverage.state, CoverageStateV0::Complete);
+        assert!(active_record.coverage.missing_sources.is_empty());
+    }
+
+    #[test]
+    fn history_coverage_distinguishes_partial_and_unavailable_record_sources() {
+        let mut partial = with_gateway_binding(app("network-a", "192.0.2.1", "02:00:00:00:00:01"));
+        partial.link.resolvers.clear();
+        let partial = observation_from_app(&partial);
+        assert_eq!(partial.coverage.state, CoverageStateV0::Partial);
+        assert_eq!(
+            partial.coverage.missing_sources,
+            vec!["resolver_configuration"]
+        );
+
+        let unavailable = observation_from_app(&App::new());
+        assert_eq!(unavailable.coverage.state, CoverageStateV0::Unavailable);
+        assert!(unavailable.coverage.observed_sources.is_empty());
+        assert!(!unavailable.coverage.missing_sources.is_empty());
+    }
+
+    #[test]
+    fn missing_wifi_association_id_is_a_declared_coverage_gap() {
+        let mut current = with_gateway_binding(app("network-a", "192.0.2.1", "02:00:00:00:00:01"));
+        current
+            .link
+            .network_configuration
+            .as_deref_mut()
+            .unwrap()
+            .connection_id = None;
+
+        let record = observation_from_app(&current);
+
+        assert_eq!(record.coverage.state, CoverageStateV0::Partial);
+        assert!(
+            record
+                .coverage
+                .missing_sources
+                .contains(&"association_id".into())
         );
     }
 

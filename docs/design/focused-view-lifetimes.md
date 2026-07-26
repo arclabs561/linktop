@@ -123,7 +123,8 @@ collected.
 
 `linktop.observation.v1` identifies one snapshot, probe, link, or peers
 observation. It includes the producer version, subject, completion time,
-acquisition policy and lifetime, the typed path assessment and evidence
+wall-clock acquisition start, monotonic elapsed time, acquisition policy and
+lifetime, the typed path assessment and evidence
 coverage, and subject
 evidence. Link evidence includes interface counters when acquired. Peer
 evidence includes the host-visible path context and makes the default-gateway
