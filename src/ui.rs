@@ -65,6 +65,12 @@ fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, can_navigate: b
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
         .split(vertical[3]);
+    if !app.probe_policy().is_active() {
+        render_overview_evidence(frame, main[0], app);
+        render_events(frame, main[1], app);
+        render_footer(frame, vertical[4], app, MonitorMode::Overview, can_navigate);
+        return;
+    }
     let left = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
@@ -82,8 +88,9 @@ fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, can_navigate: b
 }
 
 fn render_overview_evidence(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let mut lines = vec![gateway_summary_line(app, area.width)];
+    let mut lines = Vec::new();
     if app.probe_policy().is_active() {
+        lines.push(gateway_summary_line(app, area.width));
         lines.extend(app.probes.iter().map(|probe| {
             let latency = probe
                 .latency_ms
@@ -115,9 +122,9 @@ fn render_overview_evidence(frame: &mut Frame<'_>, area: Rect, app: &App) {
         }));
     } else {
         lines.push(Line::from(vec![
-            Span::styled("probes     ", Style::default().fg(MUTED)),
+            Span::styled("policy     ", Style::default().fg(MUTED)),
             Span::styled(
-                "off · next-hop/DNS/HTTPS/public egress untested · [a] enable",
+                "passive host-local · no active probes · [a] enables bounded path diagnosis",
                 Style::default().fg(INK),
             ),
         ]));
@@ -186,6 +193,22 @@ fn render_overview_evidence(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Style::default().fg(INK),
         ),
     ]));
+    let content_rows = usize::from(area.height.saturating_sub(2));
+    if let Some(history) = &app.history_context {
+        if content_rows >= lines.len() + 2 {
+            lines.extend([
+                Line::from(vec![
+                    Span::styled("anchor     ", Style::default().fg(MUTED)),
+                    Span::styled(history.context_anchor.clone(), Style::default().fg(INK)),
+                ]),
+                Line::from(vec![
+                    Span::styled("place      ", Style::default().fg(MUTED)),
+                    Span::styled(history.place_authority.clone(), Style::default().fg(INK)),
+                ]),
+            ]);
+        }
+    }
+    lines.truncate(content_rows);
     frame.render_widget(
         Paragraph::new(lines).block(instrument_block(" EVIDENCE LEDGER ")),
         area,
@@ -1070,6 +1093,7 @@ fn render_probes(frame: &mut Frame<'_>, area: Rect, app: &App) {
         );
         return;
     }
+    let detail_width = usize::from(area.width.saturating_sub(2)).saturating_sub(45);
     let lines: Vec<Line<'_>> = app
         .probes
         .iter()
@@ -1099,7 +1123,10 @@ fn render_probes(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     ),
                     Style::default().fg(MUTED),
                 ),
-                Span::styled(format!("  {}", probe.detail), Style::default().fg(MUTED)),
+                Span::styled(
+                    format!("  {}", fit(&probe.detail, detail_width)),
+                    Style::default().fg(MUTED),
+                ),
             ])
         })
         .collect();
@@ -1130,7 +1157,7 @@ fn render_events(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .collect();
     frame.render_widget(
         Paragraph::new(lines)
-            .block(instrument_block(" EVENT BUS "))
+            .block(instrument_block(" SESSION EVENTS "))
             .wrap(Wrap { trim: true }),
         area,
     );
@@ -1217,9 +1244,12 @@ fn render_scope(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Line::from(vec![
                 Span::styled(" local  ", Style::default().fg(MUTED)),
                 Span::styled(
-                    format!(
-                        "{default_addresses} default / {} total address(es)",
-                        app.link.addresses.len()
+                    fit(
+                        &format!(
+                            "{default_addresses} default / {} total address(es)",
+                            app.link.addresses.len()
+                        ),
+                        value_width,
                     ),
                     Style::default().fg(INK),
                 ),
@@ -1227,9 +1257,12 @@ fn render_scope(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Line::from(vec![
                 Span::styled(" cache  ", Style::default().fg(MUTED)),
                 Span::styled(
-                    format!(
-                        "{} via {source} / {completeness}",
-                        peer_session_summary(app)
+                    fit(
+                        &format!(
+                            "{} via {source} / {completeness}",
+                            peer_session_summary(app)
+                        ),
+                        value_width,
                     ),
                     Style::default().fg(INK),
                 ),
@@ -1237,11 +1270,14 @@ fn render_scope(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Line::from(vec![
                 Span::styled(" probes ", Style::default().fg(MUTED)),
                 Span::styled(
-                    if app.probe_policy().is_active() {
-                        "active · next-hop periodic · DNS/HTTPS 60s · egress on demand"
-                    } else {
-                        "off · next-hop/DNS/HTTPS/public egress untested"
-                    },
+                    fit(
+                        if app.probe_policy().is_active() {
+                            "active · next-hop periodic · DNS/HTTPS 60s · egress on demand"
+                        } else {
+                            "off · next-hop/DNS/HTTPS/public egress untested"
+                        },
+                        value_width,
+                    ),
                     Style::default().fg(INK),
                 ),
             ]),
@@ -1251,16 +1287,22 @@ fn render_scope(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Line::from(vec![
                     Span::styled(" sources", Style::default().fg(MUTED)),
                     Span::styled(
-                        " route/DHCP · 802.11 · counters/nettop · ARP/NDP",
+                        fit(
+                            "route/DHCP · 802.11 · counters/nettop · ARP/NDP",
+                            value_width,
+                        ),
                         Style::default().fg(INK),
                     ),
                 ]),
                 Line::from(vec![
                     Span::styled(" fence  ", Style::default().fg(MUTED)),
                     Span::styled(
-                        format!(
-                            "generation {}; stale workers rejected; route gaps held 3s",
-                            app.path_generation
+                        fit(
+                            &format!(
+                                "generation {}; stale workers rejected; route gaps held 3s",
+                                app.path_generation
+                            ),
+                            value_width,
                         ),
                         Style::default().fg(INK),
                     ),
@@ -2094,9 +2136,9 @@ fn render_footer(
     if area.width < 100 {
         if can_navigate && area.width < 76 {
             let probes = if app.probe_policy().is_active() {
-                "active"
+                "probes:on"
             } else {
-                "passive"
+                "probes:off"
             };
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
@@ -2767,7 +2809,9 @@ mod tests {
         assert!(rendered.contains("DIAGNOSIS"));
         assert!(rendered.contains("LOCAL PATH"));
         assert!(rendered.contains("PASSIVE"));
-        assert!(rendered.contains("PASSIVE OBSERVATIONS"));
+        assert!(rendered.contains("EVIDENCE LEDGER"));
+        assert!(rendered.contains("SESSION EVENTS"));
+        assert!(!rendered.contains("ACTIVE PROBES / OFF"));
         assert!(rendered.contains("reachability is not tested"));
     }
 
@@ -2819,11 +2863,12 @@ mod tests {
         assert!(rendered.contains("next-hop RTT"));
         assert!(rendered.contains("4 ms"));
         assert!(rendered.contains("now"));
+        assert!(rendered.contains("ACTIVE PROBES"));
         assert_eq!(app.gateway_samples.back(), Some(&4));
     }
 
     #[test]
-    fn short_terminal_uses_dense_summary_instead_of_squashed_panels() {
+    fn wide_passive_terminal_uses_evidence_and_events_without_probe_panel_sprawl() {
         let app = App::new();
         let backend = TestBackend::new(160, 26);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -2832,9 +2877,11 @@ mod tests {
             .unwrap();
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("DIAGNOSIS"));
-        assert!(rendered.contains("EVIDENCE / ACTIVITY BOUNDARY"));
+        assert!(rendered.contains("EVIDENCE LEDGER"));
         assert!(rendered.contains("neighbor cache pending"));
-        assert!(rendered.contains("EVENT BUS"));
+        assert!(rendered.contains("SESSION EVENTS"));
+        assert!(!rendered.contains("ACTIVE PROBES / OFF"));
+        assert!(!rendered.contains("EVIDENCE / ACTIVITY BOUNDARY"));
         assert!(!rendered.contains("LOCAL ADDRESSES"));
     }
 
@@ -3052,7 +3099,7 @@ mod tests {
         assert!(rendered.contains("gw 192.168.1.1"));
         assert!(rendered.contains("coverage"));
         assert!(rendered.contains("process"));
-        assert!(rendered.contains("passive"));
+        assert!(rendered.contains("probes:off"));
         assert!(rendered.contains("1/2/3"));
         assert!(rendered.contains("LIVE"));
     }
