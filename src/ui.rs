@@ -2091,20 +2091,9 @@ fn render_peers_focus(
 fn render_peer_table(frame: &mut Frame<'_>, area: Rect, app: &App, peer_offset: usize) {
     let peers = ordered_peers(app);
     let content_rows = area.height.saturating_sub(2) as usize;
+    let capacity = peer_table_capacity(area);
     let wide = area.width >= 104;
     let tight = area.width < 76;
-    let rows_per_peer = if wide {
-        1
-    } else if tight {
-        3
-    } else {
-        2
-    };
-    let header_rows = usize::from(wide && content_rows > 0);
-    let capacity = content_rows
-        .saturating_sub(header_rows)
-        .checked_div(rows_per_peer)
-        .unwrap_or(0);
     let offset = peer_offset.min(peers.len().saturating_sub(capacity.max(1)));
     let end = (offset + capacity).min(peers.len());
     let mut lines = Vec::new();
@@ -2148,6 +2137,32 @@ fn render_peer_table(frame: &mut Frame<'_>, area: Rect, app: &App, peer_offset: 
         ))),
         area,
     );
+}
+
+pub(crate) fn peer_page_capacity(area: Rect) -> usize {
+    let table_height = if area.height < 21 {
+        area.height.saturating_sub(4)
+    } else {
+        area.height.saturating_sub(11)
+    };
+    peer_table_capacity(Rect::new(area.x, area.y, area.width, table_height))
+}
+
+fn peer_table_capacity(area: Rect) -> usize {
+    let content_rows = area.height.saturating_sub(2) as usize;
+    let wide = area.width >= 104;
+    let rows_per_peer = if wide {
+        1
+    } else if area.width < 76 {
+        3
+    } else {
+        2
+    };
+    let header_rows = usize::from(wide && content_rows > 0);
+    content_rows
+        .saturating_sub(header_rows)
+        .checked_div(rows_per_peer)
+        .unwrap_or(0)
 }
 
 fn peer_wide_line<'a>(peer: &'a Peer, app: &App, address_width: usize) -> Line<'a> {
@@ -2256,7 +2271,7 @@ fn peer_narrow_lines<'a>(peer: &'a Peer, app: &App, width: u16) -> Vec<Line<'a>>
                 Style::default().fg(if gateway { ACCENT } else { MUTED }),
             ),
             Span::styled(
-                format!("{:<7}", peer.interface.as_deref().unwrap_or("?")),
+                format!("{:<7} ", fit(peer.interface.as_deref().unwrap_or("?"), 7)),
                 Style::default().fg(MUTED),
             ),
             Span::styled(peer.address.as_str(), Style::default().fg(INK)),
