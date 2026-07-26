@@ -176,11 +176,15 @@ Each successful transaction now writes one pretty-printed
 `linktop.qa_capture_manifest.v1` document after all requested frames and
 artifacts have completed. The manifest records the Linktop producer, version,
 and executable SHA-256, deterministic or native lane, requested subject, scene
-and stage, passive or active policy, normalized frame/key/resize schedules, and
-per-frame scheduled and actual elapsed milliseconds, actual viewport, and
-rendered view. Each artifact entry contains a relative file name, media type,
-byte length, and SHA-256 digest. Native visible text is derived from the same
-ANSI pane snapshot used by the ANSI and HTML artifacts.
+and stage, initial passive or active policy, normalized frame/key/resize
+schedules, and a portable transaction ID, UTC replay start/completion
+timestamps, monotonic replay duration, and per-frame scheduled and actual
+elapsed milliseconds, actual viewport, policy after replayed toggles, and
+rendered view. Both lanes freeze the replay completion boundary immediately
+after the last frame and before collector or PTY cleanup. Each artifact entry
+contains a relative file name, media type, byte length, and SHA-256 digest.
+Native visible text is derived from the same ANSI pane snapshot used by the
+ANSI and HTML artifacts.
 
 Before publication, Linktop verifies that the completed frame count and order
 match the normalized request and rereads every artifact to verify its length and
@@ -204,4 +208,6 @@ telemetry, or a durable observation record. It contains no absolute paths or
 captured network facts; those remain inside the caller-selected private frame
 artifacts. Its digest records the artifact bytes verified immediately before
 publication and makes later changes detectable, but does not authorize
-publication or retention.
+publication or retention. Wall-clock timestamps order receipts for human QA;
+`duration_ms` and frame `actual_ms` remain the monotonic timing authority if the
+host clock steps during a capture.

@@ -1,5 +1,9 @@
 {
   "schema": "linktop.qa_capture_manifest.v1",
+  "transaction_id": "transaction-001",
+  "started_at": "2026-07-26T18:00:00.000Z",
+  "completed_at": "2026-07-26T18:00:01.004Z",
+  "duration_ms": 1004,
   "producer": {
     "name": "linktop",
     "version": "0.1.0",
@@ -7,13 +11,17 @@
   },
   "lane": "deterministic",
   "requested_subject": "overview",
-  "scene": "dense-peers",
-  "policy": "passive",
+  "scene": "live",
+  "initial_policy": "passive",
   "replay": {
     "frames_ms": [
       1000
     ],
     "keys": [
+      {
+        "at_ms": 1000,
+        "key": "a"
+      },
       {
         "at_ms": 1000,
         "key": "3"
@@ -33,9 +41,9 @@
     {
       "index": 1,
       "rendered_view": "peers",
-      "scene": "dense-peers",
-      "stage": "final",
-      "policy": "passive",
+      "scene": "live",
+      "stage": "observed",
+      "policy": "active",
       "scheduled_ms": 1000,
       "actual_ms": 1004,
       "viewport": {

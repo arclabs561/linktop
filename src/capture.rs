@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use chrono::Local;
+use chrono::{Local, SecondsFormat, Utc};
 use clap::ValueEnum;
 use crossterm::event::KeyCode;
 use ratatui::Terminal;
@@ -403,13 +403,30 @@ struct QaResizeAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct QaCaptureManifest {
     schema: &'static str,
+    transaction_id: String,
+    started_at: String,
+    completed_at: String,
+    duration_ms: u64,
     producer: QaProducer,
     lane: &'static str,
     requested_subject: &'static str,
     scene: &'static str,
-    policy: &'static str,
+    initial_policy: &'static str,
     replay: QaReplay,
     frames: Vec<QaFrame>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QaManifestMetadata {
+    transaction_id: String,
+    started_at: String,
+    completed_at: String,
+    duration_ms: u64,
+    native: bool,
+    requested_mode: MonitorMode,
+    probe_policy: ProbePolicy,
+    scene: Option<CaptureScene>,
+    executable_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -499,16 +516,27 @@ fn manifest_stem(
 }
 
 fn qa_manifest(
-    native: bool,
-    requested_mode: MonitorMode,
-    probe_policy: ProbePolicy,
-    scene: Option<CaptureScene>,
-    executable_sha256: String,
+    metadata: QaManifestMetadata,
     replay: QaReplay,
     frames: Vec<QaFrame>,
 ) -> QaCaptureManifest {
+    let QaManifestMetadata {
+        transaction_id,
+        started_at,
+        completed_at,
+        duration_ms,
+        native,
+        requested_mode,
+        probe_policy,
+        scene,
+        executable_sha256,
+    } = metadata;
     QaCaptureManifest {
         schema: QA_MANIFEST_SCHEMA,
+        transaction_id,
+        started_at,
+        completed_at,
+        duration_ms,
         producer: QaProducer {
             name: env!("CARGO_PKG_NAME"),
             version: env!("CARGO_PKG_VERSION"),
@@ -517,7 +545,7 @@ fn qa_manifest(
         lane: if native { "native" } else { "deterministic" },
         requested_subject: subject_name(requested_mode),
         scene: scene.map_or("live", CaptureScene::label),
-        policy: policy_name(probe_policy),
+        initial_policy: policy_name(probe_policy),
         replay,
         frames,
     }
@@ -536,6 +564,10 @@ fn policy_name(policy: ProbePolicy) -> &'static str {
     } else {
         "passive"
     }
+}
+
+fn utc_timestamp() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
 fn qa_frame(metadata: QaFrameMetadata, artifacts: Vec<QaArtifact>) -> QaFrame {
@@ -594,6 +626,7 @@ pub fn run(request: CaptureRequest) -> Result<()> {
     } else {
         net::start_monitor(interval, mode, probe_policy)
     };
+    let replay_started_at = utc_timestamp();
     let started_at = Instant::now();
     let mut app = App::with_probe_policy(probe_policy);
     let mut interaction = InteractionState {
@@ -691,17 +724,25 @@ pub fn run(request: CaptureRequest) -> Result<()> {
         Ok(manifest_frames)
     })();
 
+    let replay_duration_ms = duration_millis(started_at.elapsed());
+    let replay_completed_at = utc_timestamp();
     controls.send(MonitorControl::Stop).ok();
     monitor
         .join()
         .map_err(|_| anyhow::anyhow!("monitor thread panicked during capture"))?;
     let frames = result?;
     let manifest = qa_manifest(
-        false,
-        mode,
-        probe_policy,
-        scene,
-        executable_sha256,
+        QaManifestMetadata {
+            transaction_id: session,
+            started_at: replay_started_at,
+            completed_at: replay_completed_at,
+            duration_ms: replay_duration_ms,
+            native: false,
+            requested_mode: mode,
+            probe_policy,
+            scene,
+            executable_sha256,
+        },
         replay,
         frames,
     );
@@ -795,6 +836,7 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
     resize_native(&server, session, size)?;
 
     wait_for_native_ready(&server, session, size, NATIVE_READY_TIMEOUT, &interrupt)?;
+    let replay_started_at = utc_timestamp();
     let started_at = Instant::now();
     let mut current_size = size;
     let mut frame_index = 0_usize;
@@ -894,12 +936,20 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
             artifacts.html.display()
         );
     }
+    let replay_duration_ms = duration_millis(started_at.elapsed());
+    let replay_completed_at = utc_timestamp();
     let manifest = qa_manifest(
-        true,
-        mode,
-        probe_policy,
-        scene,
-        executable_sha256,
+        QaManifestMetadata {
+            transaction_id: session_id,
+            started_at: replay_started_at,
+            completed_at: replay_completed_at,
+            duration_ms: replay_duration_ms,
+            native: true,
+            requested_mode: mode,
+            probe_policy,
+            scene,
+            executable_sha256,
+        },
         replay,
         manifest_frames,
     );
@@ -1559,6 +1609,24 @@ fn verify_manifest_publication_support(directory: &Path) -> Result<()> {
 
 fn verify_manifest_artifacts(directory: &Path, manifest: &QaCaptureManifest) -> Result<()> {
     anyhow::ensure!(
+        !manifest.transaction_id.is_empty()
+            && manifest.transaction_id.len() <= 128
+            && manifest
+                .transaction_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+        "QA manifest transaction ID is not a bounded portable identifier"
+    );
+    for (field, timestamp) in [
+        ("started_at", manifest.started_at.as_str()),
+        ("completed_at", manifest.completed_at.as_str()),
+    ] {
+        anyhow::ensure!(
+            timestamp.ends_with('Z') && chrono::DateTime::parse_from_rfc3339(timestamp).is_ok(),
+            "QA manifest {field} is not an RFC 3339 UTC timestamp"
+        );
+    }
+    anyhow::ensure!(
         manifest.producer.executable_sha256.len() == 64
             && manifest
                 .producer
@@ -1573,7 +1641,18 @@ fn verify_manifest_artifacts(directory: &Path, manifest: &QaCaptureManifest) -> 
         manifest.frames.len(),
         manifest.replay.frames_ms.len()
     );
+    let maximum_frame_ms = manifest
+        .frames
+        .iter()
+        .map(|frame| frame.actual_ms)
+        .max()
+        .unwrap_or(0);
+    anyhow::ensure!(
+        manifest.duration_ms >= maximum_frame_ms,
+        "QA manifest duration ends before its final completed frame"
+    );
     let mut names = BTreeSet::new();
+    let mut previous_actual_ms = None;
     for (offset, (frame, requested_ms)) in manifest
         .frames
         .iter()
@@ -1591,6 +1670,12 @@ fn verify_manifest_artifacts(directory: &Path, manifest: &QaCaptureManifest) -> 
             "QA frame {} was recorded before its scheduled time",
             frame.index
         );
+        anyhow::ensure!(
+            previous_actual_ms.is_none_or(|previous| frame.actual_ms >= previous),
+            "QA frame {} actual time precedes the previous completed frame",
+            frame.index
+        );
+        previous_actual_ms = Some(frame.actual_ms);
         anyhow::ensure!(
             !frame.artifacts.is_empty(),
             "QA frame {} has no completed artifacts",
@@ -2251,25 +2336,35 @@ mod tests {
             QaArtifact::read(&directory.0, &artifact_path, "text/plain; charset=utf-8").unwrap();
         let replay = ReplayPlan::new(
             &[1],
-            &["1:3".parse::<ScheduledKey>().unwrap()],
+            &[
+                "1:a".parse::<ScheduledKey>().unwrap(),
+                "1:3".parse::<ScheduledKey>().unwrap(),
+            ],
             &["1:80x20".parse::<ScheduledResize>().unwrap()],
-            Some(CaptureScene::DensePeers),
+            None,
         )
         .unwrap()
         .manifest_replay();
         let manifest = qa_manifest(
-            false,
-            MonitorMode::Overview,
-            ProbePolicy::Passive,
-            Some(CaptureScene::DensePeers),
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            QaManifestMetadata {
+                transaction_id: "transaction-001".into(),
+                started_at: "2026-07-26T18:00:00.000Z".into(),
+                completed_at: "2026-07-26T18:00:01.004Z".into(),
+                duration_ms: 1_004,
+                native: false,
+                requested_mode: MonitorMode::Overview,
+                probe_policy: ProbePolicy::Passive,
+                scene: None,
+                executable_sha256:
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            },
             replay,
             vec![qa_frame(
                 QaFrameMetadata {
                     index: 1,
                     rendered_mode: MonitorMode::Peers,
-                    probe_policy: ProbePolicy::Passive,
-                    scene: Some(CaptureScene::DensePeers),
+                    probe_policy: ProbePolicy::Active,
+                    scene: None,
                     scheduled: Duration::from_secs(1),
                     actual: Duration::from_millis(1_004),
                     viewport: CaptureSize {
@@ -2281,15 +2376,40 @@ mod tests {
             )],
         );
 
+        let mut invalid = manifest.clone();
+        invalid.transaction_id = "not/portable".into();
+        assert!(verify_manifest_artifacts(&directory.0, &invalid).is_err());
+        let mut invalid = manifest.clone();
+        invalid.started_at = "2026-07-26 18:00:00".into();
+        assert!(verify_manifest_artifacts(&directory.0, &invalid).is_err());
+        let mut invalid = manifest.clone();
+        invalid.duration_ms = 1_003;
+        assert!(verify_manifest_artifacts(&directory.0, &invalid).is_err());
+        let mut invalid = manifest.clone();
+        invalid.replay.frames_ms.push(1_001);
+        let mut second = invalid.frames[0].clone();
+        second.index = 2;
+        second.scheduled_ms = 1_001;
+        second.actual_ms = 1_003;
+        invalid.frames.push(second);
+        let error = verify_manifest_artifacts(&directory.0, &invalid)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("precedes the previous completed frame"));
+
         let manifest_path = write_manifest(&directory.0, "capture", &manifest).unwrap();
         let document = fs::read_to_string(manifest_path).unwrap();
+        let expected =
+            include_str!("capture/fixtures/v1/qa_capture_manifest.json").replace("\r\n", "\n");
         assert_eq!(
-            document,
-            include_str!("capture/fixtures/v1/qa_capture_manifest.json")
+            document, expected,
+            "golden manifest must match after normalizing checkout line endings"
         );
         let value: serde_json::Value = serde_json::from_str(&document).unwrap();
         assert_eq!(value["schema"], QA_MANIFEST_SCHEMA);
+        assert_eq!(value["initial_policy"], "passive");
         assert_eq!(value["frames"][0]["rendered_view"], "peers");
+        assert_eq!(value["frames"][0]["policy"], "active");
         assert!(
             value["frames"][0]["artifacts"][0]["name"]
                 .as_str()
@@ -2301,11 +2421,18 @@ mod tests {
     fn qa_manifest_is_absent_when_a_requested_frame_is_incomplete() {
         let directory = TestDirectory::new("qa-manifest-incomplete");
         let manifest = qa_manifest(
-            false,
-            MonitorMode::Overview,
-            ProbePolicy::Passive,
-            None,
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            QaManifestMetadata {
+                transaction_id: "transaction-incomplete".into(),
+                started_at: "2026-07-26T18:00:00.000Z".into(),
+                completed_at: "2026-07-26T18:00:01.000Z".into(),
+                duration_ms: 1_000,
+                native: false,
+                requested_mode: MonitorMode::Overview,
+                probe_policy: ProbePolicy::Passive,
+                scene: None,
+                executable_sha256:
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            },
             QaReplay {
                 frames_ms: vec![1_000, 2_000],
                 keys: Vec::new(),
@@ -2327,11 +2454,18 @@ mod tests {
             QaArtifact::read(&directory.0, &artifact_path, "text/plain; charset=utf-8").unwrap();
         fs::write(&artifact_path, b"changed\n").unwrap();
         let manifest = qa_manifest(
-            false,
-            MonitorMode::Overview,
-            ProbePolicy::Passive,
-            None,
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            QaManifestMetadata {
+                transaction_id: "transaction-integrity".into(),
+                started_at: "2026-07-26T18:00:00.000Z".into(),
+                completed_at: "2026-07-26T18:00:01.001Z".into(),
+                duration_ms: 1_001,
+                native: false,
+                requested_mode: MonitorMode::Overview,
+                probe_policy: ProbePolicy::Passive,
+                scene: None,
+                executable_sha256:
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            },
             QaReplay {
                 frames_ms: vec![1_000],
                 keys: Vec::new(),
@@ -2379,11 +2513,18 @@ mod tests {
             .join(format!(".capture.tmp-{}", std::process::id()));
         fs::write(&temporary, b"other transaction\n").unwrap();
         let manifest = qa_manifest(
-            false,
-            MonitorMode::Overview,
-            ProbePolicy::Passive,
-            None,
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            QaManifestMetadata {
+                transaction_id: "transaction-temp-no-clobber".into(),
+                started_at: "2026-07-26T18:00:00.000Z".into(),
+                completed_at: "2026-07-26T18:00:01.000Z".into(),
+                duration_ms: 1_000,
+                native: false,
+                requested_mode: MonitorMode::Overview,
+                probe_policy: ProbePolicy::Passive,
+                scene: None,
+                executable_sha256:
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            },
             QaReplay {
                 frames_ms: Vec::new(),
                 keys: Vec::new(),

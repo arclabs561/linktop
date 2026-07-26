@@ -61,12 +61,14 @@ focused link and peers views. Resolver lists, cache counts, and source
 provenance remain in the overview evidence ledger but do not outrank a
 transition or anomaly.
 
-The compact overview is not a shrunken grid. At ten rows it retains the answer,
-local path, coverage, busiest local process group, passive/active state, and
-navigation. At normal width the path card omits duplicate process text because
-the evidence ledger has a complete workload row. At wide width the card adds
-the top process beside radio and interface rates. Zero error/drop deltas do not
-consume the primary telemetry row; nonzero deltas do.
+The compact overview is not a shrunken grid. At the minimum ten rows it retains
+the answer, local path, coverage or blind spot, one complete bounded next
+action, passive/active state, and navigation. A salient transition is the next
+row admitted as height grows; workload and configuration context follow it.
+At normal width the path card omits duplicate process text because the evidence
+ledger has a complete workload row. At wide width the card adds the top process
+beside radio and interface rates. Zero error/drop deltas do not consume the
+primary telemetry row; nonzero deltas do.
 
 ### Represent path changes as typed evidence
 
@@ -186,3 +188,13 @@ information hierarchy. A recurrence or context conflict now outranks static
 inventory when no newer in-session transition exists. The data contract and
 comparison semantics remain Netmon-owned; Linktop owns the explicit local path,
 live collection, and projection.
+
+## Update (2026-07-26): protect the minimum operator transaction
+
+Native 60×10 qualification exposed that a salient change and sampled workload
+could displace both evidence coverage and the next action. The minimum overview
+now reserves its four body rows for answer, path, coverage, and action. Context
+change, workload, configuration detail, and telemetry enter only when another
+row is available. This is a minimum-size safety exception to the normal
+information hierarchy, not a demotion of transition evidence at usable
+heights.
