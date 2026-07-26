@@ -511,6 +511,9 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
     let working_directory = std::env::current_dir().context("read current directory")?;
     let final_seconds = plan.final_frame().as_secs();
 
+    let _guard = TmuxGuard(server.clone());
+    let interrupt = CaptureInterrupt::new().context("install native capture signal handlers")?;
+    interrupt.check()?;
     let mut start = tmux_command(&server);
     configure_native_environment(&mut start, scene);
     start
@@ -558,8 +561,6 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
         "tmux failed to start native capture: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     );
-    let _guard = TmuxGuard(server.clone());
-    let interrupt = CaptureInterrupt::new().context("install native capture signal handlers")?;
     interrupt.check()?;
     disable_native_status(&server, session)?;
     resize_native(&server, session, size)?;

@@ -869,8 +869,12 @@ pub(crate) fn apply_tui_key(
     key: KeyCode,
     peer_page_capacity: usize,
 ) -> InteractionOutcome {
-    let page_capacity = peer_page_capacity.max(1);
-    let maximum_peer_offset = app.peers.peers.len().saturating_sub(page_capacity);
+    let navigation_capacity = peer_page_capacity.max(1);
+    let maximum_peer_offset = if peer_page_capacity == 0 {
+        0
+    } else {
+        app.peers.peers.len().saturating_sub(peer_page_capacity)
+    };
     interaction.peer_offset = interaction.peer_offset.min(maximum_peer_offset);
     match key {
         KeyCode::Char('q') | KeyCode::Esc => return InteractionOutcome::Quit,
@@ -914,10 +918,10 @@ pub(crate) fn apply_tui_key(
         }
         KeyCode::PageDown if interaction.active_mode == MonitorMode::Peers => {
             interaction.peer_offset =
-                (interaction.peer_offset + page_capacity).min(maximum_peer_offset);
+                (interaction.peer_offset + navigation_capacity).min(maximum_peer_offset);
         }
         KeyCode::PageUp if interaction.active_mode == MonitorMode::Peers => {
-            interaction.peer_offset = interaction.peer_offset.saturating_sub(page_capacity);
+            interaction.peer_offset = interaction.peer_offset.saturating_sub(navigation_capacity);
         }
         KeyCode::Home | KeyCode::Char('g') if interaction.active_mode == MonitorMode::Peers => {
             interaction.peer_offset = 0;
@@ -1208,6 +1212,9 @@ mod cli_tests {
         assert_eq!(interaction.peer_offset, 16);
         apply_tui_key(&mut app, &controls, &mut interaction, KeyCode::PageUp, 10);
         assert_eq!(interaction.peer_offset, 6);
+
+        apply_tui_key(&mut app, &controls, &mut interaction, KeyCode::End, 0);
+        assert_eq!(interaction.peer_offset, 0);
     }
 
     #[test]
