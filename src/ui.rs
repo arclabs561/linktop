@@ -2478,27 +2478,40 @@ fn render_footer(
 ) {
     let state = if app.paused { "PAUSED" } else { "LIVE" };
     if area.width < 100 {
-        if can_navigate && area.width < 76 {
-            if mode == MonitorMode::Peers {
-                frame.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        Span::styled(" q ", Style::default().fg(Color::Black).bg(INK)),
-                        Span::styled(" quit  ", Style::default().fg(MUTED)),
-                        Span::styled(" r ", Style::default().fg(Color::Black).bg(INK)),
-                        Span::styled(" refresh  ", Style::default().fg(MUTED)),
-                        Span::styled(" p ", Style::default().fg(Color::Black).bg(INK)),
-                        Span::styled(" pause  ", Style::default().fg(MUTED)),
-                        Span::styled(" j/k ", Style::default().fg(Color::Black).bg(INK)),
-                        Span::styled(" scroll  ", Style::default().fg(MUTED)),
-                        Span::styled(
-                            format!("{state} "),
-                            Style::default().fg(if app.paused { WARN } else { OK }),
-                        ),
-                    ])),
-                    area,
-                );
-                return;
+        if mode == MonitorMode::Peers {
+            let mut spans = vec![
+                Span::styled(" q ", Style::default().fg(Color::Black).bg(INK)),
+                Span::styled(" quit ", Style::default().fg(MUTED)),
+                Span::styled(" r ", Style::default().fg(Color::Black).bg(INK)),
+                Span::styled(" refresh ", Style::default().fg(MUTED)),
+                Span::styled(" p ", Style::default().fg(Color::Black).bg(INK)),
+                Span::styled(" pause ", Style::default().fg(MUTED)),
+                Span::styled(" j/k ", Style::default().fg(Color::Black).bg(INK)),
+                Span::styled(" scroll ", Style::default().fg(MUTED)),
+            ];
+            if can_navigate && area.width >= 76 {
+                spans.extend([
+                    Span::styled(" a ", Style::default().fg(Color::Black).bg(INK)),
+                    Span::styled(
+                        if app.probe_policy().is_active() {
+                            " on "
+                        } else {
+                            " off "
+                        },
+                        Style::default().fg(MUTED),
+                    ),
+                    Span::styled(" 1/2/3 ", Style::default().fg(Color::Black).bg(INK)),
+                    Span::styled(" views ", Style::default().fg(MUTED)),
+                ]);
             }
+            spans.push(Span::styled(
+                format!("{state} "),
+                Style::default().fg(if app.paused { WARN } else { OK }),
+            ));
+            frame.render_widget(Paragraph::new(Line::from(spans)), area);
+            return;
+        }
+        if can_navigate && area.width < 76 {
             let probes = if app.probe_policy().is_active() {
                 "probes:on"
             } else {
@@ -3438,19 +3451,24 @@ mod tests {
 
     #[test]
     fn narrow_peers_labels_cache_extent_and_keeps_operator_controls() {
-        let mut app = App::new();
-        app.peers = peer_fixture(12);
-        let backend = TestBackend::new(62, 16);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| render(frame, &app, MonitorMode::Peers, 0, true))
-            .unwrap();
-        let rendered = buffer_text(terminal.backend());
+        for (columns, rows) in [(62, 16), (80, 20)] {
+            let mut app = App::new();
+            app.peers = peer_fixture(12);
+            let backend = TestBackend::new(columns, rows);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render(frame, &app, MonitorMode::Peers, 0, true))
+                .unwrap();
+            let rendered = buffer_text(terminal.backend());
 
-        assert!(rendered.contains("CACHE 12/12"));
-        assert!(rendered.contains("refresh"));
-        assert!(rendered.contains("pause"));
-        assert!(rendered.contains("scroll"));
+            assert!(rendered.contains("CACHE 12/12"));
+            assert!(rendered.contains("refresh"));
+            assert!(rendered.contains("pause"));
+            assert!(rendered.contains("scroll"));
+            if columns == 80 {
+                assert!(rendered.contains("views"));
+            }
+        }
     }
 
     #[test]
