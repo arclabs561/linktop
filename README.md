@@ -114,8 +114,9 @@ Finite text and the TUI are expert human interfaces, not machine APIs.
 `--json` emits one versioned JSON document for agents and programs:
 `linktop.observation.v1` for snapshot, probe, link, and peers, and
 `linktop.speed_experiment.v1` for the explicit load experiment. Observation
-documents carry the producer version, subject, completion time, acquisition policy/lifetime,
-typed path assessment, evidence coverage, and complete subject evidence.
+documents carry the producer version, subject, wall-clock acquisition start,
+monotonic elapsed duration, completion time, acquisition policy/lifetime, typed
+path assessment, evidence coverage, and complete subject evidence.
 Link JSON includes interface counters when available; peer JSON includes path
 context, the collector's actual path-filter result, and an explicit
 default-gateway role. Use these contracts instead of parsing prose or terminal
@@ -250,6 +251,8 @@ command-line order, and then renders the requested frame. Supported replay keys
 are `r`, `p`, `a`, `1`, `2`, `3`, `tab`, `j`, `k`, `up`, `down`, `page-up`,
 `page-down`, `g`, `G`, `home`, and `end`; terminating keys are rejected because
 the final `--at` remains the transaction boundary.
+Captures may exercise the explicit 40×8 unsupported-size fallback. Evidence
+layouts begin at 60×10 and ask the operator to resize below that floor.
 
 `--scene dense-peers` supplies a passive, synthetic ARP/NDP cache history with
 27 current documentation-range neighbors, overflow, IPv4 and IPv6 rows,
@@ -261,8 +264,9 @@ available for overview and peers screenshots and cannot be combined with
 active probes or history.
 
 Use `--native` to exercise the actual Crossterm alternate-screen application in
-a fixed-size tmux PTY. It saves the visible text, the ANSI terminal frame, and a
-self-contained HTML reconstruction with the terminal colors intact:
+a fixed-size tmux PTY. It captures one ANSI terminal frame, derives visible text
+from those same bytes, and saves a self-contained HTML reconstruction with the
+terminal colors intact:
 
 ```sh
 linktop screenshot overview --native --at 2,5,12 --columns 100 --rows 24
@@ -286,7 +290,23 @@ the ignored `.agents/reports/ui-captures/` directory; `just capture-native`
 selects the PTY lane. Filenames include the subject, live or synthetic scene,
 session, frame index, actual viewport, and scheduled and actual elapsed
 milliseconds so frames from different times, sizes, and runs do not overwrite
-each other. The last `--at` value is the transaction lifetime.
+each other. After replayed view navigation, the filename names the view actually
+rendered rather than the requested entry subject.
+
+A successful transaction writes one pretty
+`linktop.qa_capture_manifest.v1` JSON document last. It records the normalized
+frame, key, and resize schedule, requested subject, actual rendered view and
+viewport per frame, the producing executable's SHA-256, and the relative name,
+media type, byte length, and SHA-256 of every artifact. Linktop rejects
+pre-existing artifact or manifest paths and verifies completed artifacts
+immediately before atomically publishing the manifest with an exclusive
+same-directory hard link. An interrupted or partial transaction has no
+completion manifest; consumers rehash artifacts to detect any later change.
+This is a private layout-QA receipt, not network evidence or telemetry, and
+contains no absolute paths or captured network facts. The last `--at` value is
+the transaction lifetime. The output filesystem must support same-directory
+hard links; Linktop probes that capability before the dwell starts so atomic
+no-clobber publication cannot fail only after all frames have been produced.
 
 ## Controls
 

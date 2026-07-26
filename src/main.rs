@@ -121,10 +121,10 @@ enum Command {
         #[arg(long = "at", required = true, value_delimiter = ',', value_parser = clap::value_parser!(u64).range(1..=86_400))]
         at: Vec<u64>,
         /// Fixed terminal width in columns.
-        #[arg(long, default_value_t = 140, value_parser = clap::value_parser!(u16).range(60..=300))]
+        #[arg(long, default_value_t = 140, value_parser = clap::value_parser!(u16).range(40..=300))]
         columns: u16,
         /// Fixed terminal height in rows.
-        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u16).range(10..=100))]
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u16).range(8..=100))]
         rows: u16,
         /// Private directory for timestamped text and SVG or native ANSI/HTML frames.
         #[arg(long, default_value = "linktop-captures")]

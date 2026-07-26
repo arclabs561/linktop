@@ -15,6 +15,8 @@ const ACCENT: Color = Color::Rgb(37, 203, 216);
 const OK: Color = Color::Rgb(100, 211, 134);
 const WARN: Color = Color::Rgb(242, 190, 70);
 const FAIL: Color = Color::Rgb(244, 91, 105);
+const MIN_EVIDENCE_COLUMNS: u16 = 60;
+const MIN_EVIDENCE_ROWS: u16 = 10;
 
 pub fn render(
     frame: &mut Frame<'_>,
@@ -24,6 +26,10 @@ pub fn render(
     can_navigate: bool,
 ) {
     let area = frame.area();
+    if area.width < MIN_EVIDENCE_COLUMNS || area.height < MIN_EVIDENCE_ROWS {
+        render_terminal_too_small(frame, area, app, mode);
+        return;
+    }
     match mode {
         MonitorMode::Link => {
             render_link_focus(frame, area, app, can_navigate);
@@ -33,6 +39,52 @@ pub fn render(
         }
         MonitorMode::Overview => render_overview(frame, area, app, can_navigate),
     }
+}
+
+fn render_terminal_too_small(frame: &mut Frame<'_>, area: Rect, app: &App, mode: MonitorMode) {
+    let subject = match mode {
+        MonitorMode::Overview => "OVERVIEW",
+        MonitorMode::Link => "LOCAL LINK",
+        MonitorMode::Peers => "NEIGHBORS",
+    };
+    let policy = if app.probe_policy().is_active() {
+        "ACTIVE"
+    } else {
+        "PASSIVE"
+    };
+    let state = if app.paused { "PAUSED" } else { "LIVE" };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(subject, Style::default().fg(ACCENT)),
+            Span::raw(" · "),
+            Span::styled(
+                policy,
+                Style::default().fg(if policy == "ACTIVE" { WARN } else { MUTED }),
+            ),
+            Span::raw(" · "),
+            Span::styled(
+                state,
+                Style::default().fg(if app.paused { WARN } else { OK }),
+            ),
+        ]),
+        Line::from(format!("terminal  {}×{}", area.width, area.height)),
+        Line::from(format!(
+            "minimum   {MIN_EVIDENCE_COLUMNS}×{MIN_EVIDENCE_ROWS}"
+        )),
+        Line::from("resize to inspect evidence"),
+    ];
+    if area.height >= 7 {
+        lines.push(Line::from("q quit"));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(INK)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(GRID))
+                .title(" LINKTOP "),
+        ),
+        area,
+    );
 }
 
 fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, can_navigate: bool) {
@@ -266,7 +318,13 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, mode: MonitorMode
         ),
         MonitorMode::Link => (
             if narrow {
-                "LOCAL LINK"
+                if app.probe_policy().is_active() {
+                    "LOCAL LINK / ACTIVE"
+                } else {
+                    "LOCAL LINK / PASSIVE"
+                }
+            } else if app.probe_policy().is_active() {
+                "LOCAL LINK / ACTIVE PATH CONTEXT"
             } else {
                 "LOCAL LINK / PASSIVE OBSERVATION"
             },
@@ -283,7 +341,13 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, mode: MonitorMode
         ),
         MonitorMode::Peers => (
             if narrow {
-                "NEIGHBORS"
+                if app.probe_policy().is_active() {
+                    "NEIGHBORS / ACTIVE"
+                } else {
+                    "NEIGHBORS / PASSIVE"
+                }
+            } else if app.probe_policy().is_active() {
+                "NEIGHBOR CACHE / ACTIVE PATH CONTEXT"
             } else {
                 "NEIGHBOR CACHE / PASSIVE OBSERVATION"
             },
@@ -309,6 +373,11 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, mode: MonitorMode
         MonitorMode::Link => "DISCOVERING",
         MonitorMode::Overview | MonitorMode::Peers => health.label(),
     };
+    let trailing = if narrow {
+        format!("   {measure} ")
+    } else {
+        format!("   UP {}   {} ", format_duration(app.uptime()), measure)
+    };
     let title = Line::from(vec![
         Span::styled(
             " LINKTOP ",
@@ -325,10 +394,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, mode: MonitorMode
                 .fg(health_color(health))
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!("   UP {}   {} ", format_duration(app.uptime()), measure),
-            Style::default().fg(MUTED),
-        ),
+        Span::styled(trailing, Style::default().fg(MUTED)),
     ]);
     frame.render_widget(
         Paragraph::new(title)
@@ -2479,6 +2545,33 @@ fn render_footer(
     let state = if app.paused { "PAUSED" } else { "LIVE" };
     if area.width < 100 {
         if mode == MonitorMode::Peers {
+            if can_navigate && area.width < 76 {
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(" q ", Style::default().fg(Color::Black).bg(INK)),
+                        Span::styled(" quit ", Style::default().fg(MUTED)),
+                        Span::styled(" j/k ", Style::default().fg(Color::Black).bg(INK)),
+                        Span::styled(" scroll ", Style::default().fg(MUTED)),
+                        Span::styled(" 1/2/3 ", Style::default().fg(Color::Black).bg(INK)),
+                        Span::styled(" views ", Style::default().fg(MUTED)),
+                        Span::styled(" a ", Style::default().fg(Color::Black).bg(INK)),
+                        Span::styled(
+                            if app.probe_policy().is_active() {
+                                " on "
+                            } else {
+                                " off "
+                            },
+                            Style::default().fg(MUTED),
+                        ),
+                        Span::styled(
+                            format!("{state} "),
+                            Style::default().fg(if app.paused { WARN } else { OK }),
+                        ),
+                    ])),
+                    area,
+                );
+                return;
+            }
             let mut spans = vec![
                 Span::styled(" q ", Style::default().fg(Color::Black).bg(INK)),
                 Span::styled(" quit ", Style::default().fg(MUTED)),
@@ -2489,7 +2582,7 @@ fn render_footer(
                 Span::styled(" j/k ", Style::default().fg(Color::Black).bg(INK)),
                 Span::styled(" scroll ", Style::default().fg(MUTED)),
             ];
-            if can_navigate && area.width >= 76 {
+            if can_navigate {
                 spans.extend([
                     Span::styled(" a ", Style::default().fg(Color::Black).bg(INK)),
                     Span::styled(
@@ -3318,6 +3411,38 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_terminal_size_renders_an_explicit_stable_fallback() {
+        let app = App::new();
+        for mode in [MonitorMode::Overview, MonitorMode::Link, MonitorMode::Peers] {
+            let backend = TestBackend::new(40, 8);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render(frame, &app, mode, 0, true))
+                .unwrap();
+            let rendered = buffer_text(terminal.backend());
+            assert!(rendered.contains("terminal  40×8"));
+            assert!(rendered.contains("minimum   60×10"));
+            assert!(rendered.contains("resize to inspect evidence"));
+            assert!(rendered.contains("PASSIVE"));
+            assert!(rendered.contains("q quit"));
+        }
+    }
+
+    #[test]
+    fn minimum_supported_peer_header_keeps_the_complete_cache_extent() {
+        let mut app = App::new();
+        app.peers = peer_fixture(27);
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Peers, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+        assert!(rendered.contains("CACHE 27/27"), "{rendered}");
+        assert!(!rendered.contains("CACHE 27/2 "), "{rendered}");
+    }
+
+    #[test]
     fn compact_link_view_marks_addresses_that_do_not_fit() {
         let mut app = App::new();
         app.link.interface = Some("en0".into());
@@ -3462,10 +3587,13 @@ mod tests {
             let rendered = buffer_text(terminal.backend());
 
             assert!(rendered.contains("CACHE 12/12"));
-            assert!(rendered.contains("refresh"));
-            assert!(rendered.contains("pause"));
             assert!(rendered.contains("scroll"));
             if columns == 80 {
+                assert!(rendered.contains("refresh"));
+                assert!(rendered.contains("pause"));
+                assert!(rendered.contains("views"));
+            } else {
+                assert!(rendered.contains("1/2/3"));
                 assert!(rendered.contains("views"));
             }
         }

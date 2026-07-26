@@ -4,13 +4,13 @@ check:
     cargo +1.88 test
     cargo +1.88 clippy --all-targets -- -D warnings
 
-# Run a real live view headlessly and save private, styled frames at the
-# requested elapsed seconds. Comma-separated times produce several frames.
+# Run a real live view headlessly and save private, styled frames plus a
+# completion-last integrity manifest. Comma-separated times produce several frames.
 capture-ui view="overview" columns="140" rows="30" at="5":
     cargo run --quiet -- screenshot {{view}} --at {{at}} --columns {{columns}} --rows {{rows}} --output-dir .agents/reports/ui-captures
 
 # Exercise the installed TUI path inside a real fixed-size PTY. This requires
-# tmux and emits plain text, ANSI, and a self-contained HTML view.
+# tmux and emits plain text, ANSI, self-contained HTML, and an integrity manifest.
 capture-native view="overview" columns="140" rows="30" at="5":
     cargo run --quiet -- screenshot {{view}} --native --at {{at}} --columns {{columns}} --rows {{rows}} --output-dir .agents/reports/ui-captures
 

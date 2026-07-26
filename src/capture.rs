@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -19,6 +21,8 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::model::{
     Address, App, Health, LinkSnapshot, MacScope, MonitorControl, MonitorMode, MonitorUpdate, Peer,
@@ -33,6 +37,8 @@ const POLL_STEP: Duration = Duration::from_millis(100);
 const NATIVE_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const NATIVE_RENDER_SETTLE: Duration = Duration::from_millis(200);
 const SCREENSHOT_CHILD_SCENE: &str = "LINKTOP_SCREENSHOT_CHILD_SCENE";
+const QA_MANIFEST_SCHEMA: &str = "linktop.qa_capture_manifest.v1";
+static QA_PREFLIGHT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const DENSE_SCENE_GATEWAY: &str = "192.0.2.1";
 const DEFAULT_BACKGROUND: &str = "#11161c";
 const DEFAULT_FOREGROUND: &str = "#c0cad6";
@@ -40,7 +46,7 @@ const CELL_WIDTH: u32 = 9;
 const CELL_HEIGHT: u32 = 18;
 const PADDING: u32 = 18;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CaptureSize {
     pub columns: u16,
     pub rows: u16,
@@ -85,6 +91,26 @@ enum ReplayKey {
 }
 
 impl ReplayKey {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Refresh => "r",
+            Self::Pause => "p",
+            Self::Active => "a",
+            Self::Overview => "1",
+            Self::Link => "2",
+            Self::Peers => "3",
+            Self::Tab => "tab",
+            Self::Down => "down",
+            Self::Up => "up",
+            Self::PageDown => "page-down",
+            Self::PageUp => "page-up",
+            Self::Home => "home",
+            Self::End => "end",
+            Self::Quit => "q",
+            Self::Escape => "esc",
+        }
+    }
+
     fn key_code(self) -> KeyCode {
         match self {
             Self::Refresh => KeyCode::Char('r'),
@@ -185,8 +211,8 @@ impl FromStr for ScheduledResize {
         let (columns, rows) = size
             .split_once(['x', 'X'])
             .ok_or_else(|| "resize must use AT:COLSxROWS".to_string())?;
-        let columns = parse_u16_bound(columns, "columns", 60, 300)?;
-        let rows = parse_u16_bound(rows, "rows", 10, 100)?;
+        let columns = parse_u16_bound(columns, "columns", 40, 300)?;
+        let rows = parse_u16_bound(rows, "rows", 8, 100)?;
         Ok(Self {
             at: parse_action_time(at)?,
             size: CaptureSize { columns, rows },
@@ -309,12 +335,113 @@ impl ReplayPlan {
             .last()
             .expect("validated replay plan is nonempty")
     }
+
+    fn manifest_replay(&self) -> QaReplay {
+        let frames_ms = self
+            .frames
+            .iter()
+            .map(|duration| duration_millis(*duration))
+            .collect();
+        let keys = self
+            .keys
+            .iter()
+            .flat_map(|(at, keys)| {
+                keys.iter().map(|key| QaKeyAction {
+                    at_ms: duration_millis(*at),
+                    key: key.label(),
+                })
+            })
+            .collect();
+        let resizes = self
+            .resizes
+            .iter()
+            .map(|(at, viewport)| QaResizeAction {
+                at_ms: duration_millis(*at),
+                viewport: *viewport,
+            })
+            .collect();
+        QaReplay {
+            frames_ms,
+            keys,
+            resizes,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeKey<'a> {
     Literal(&'a str),
     Named(&'a str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct QaProducer {
+    name: &'static str,
+    version: &'static str,
+    executable_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct QaReplay {
+    frames_ms: Vec<u64>,
+    keys: Vec<QaKeyAction>,
+    resizes: Vec<QaResizeAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct QaKeyAction {
+    at_ms: u64,
+    key: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct QaResizeAction {
+    at_ms: u64,
+    viewport: CaptureSize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct QaCaptureManifest {
+    schema: &'static str,
+    producer: QaProducer,
+    lane: &'static str,
+    requested_subject: &'static str,
+    scene: &'static str,
+    policy: &'static str,
+    replay: QaReplay,
+    frames: Vec<QaFrame>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct QaFrame {
+    index: usize,
+    rendered_view: &'static str,
+    scene: &'static str,
+    stage: &'static str,
+    policy: &'static str,
+    scheduled_ms: u64,
+    actual_ms: u64,
+    viewport: CaptureSize,
+    artifacts: Vec<QaArtifact>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QaFrameMetadata {
+    index: usize,
+    rendered_mode: MonitorMode,
+    probe_policy: ProbePolicy,
+    scene: Option<CaptureScene>,
+    scheduled: Duration,
+    actual: Duration,
+    viewport: CaptureSize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct QaArtifact {
+    name: String,
+    media_type: &'static str,
+    byte_length: u64,
+    sha256: String,
 }
 
 pub struct CaptureRequest {
@@ -356,6 +483,83 @@ impl FrameName<'_> {
     }
 }
 
+fn manifest_stem(
+    requested_subject: &str,
+    scene: Option<CaptureScene>,
+    session: &str,
+    native: bool,
+) -> String {
+    format!(
+        "{}-{}-{}{}-qa-capture-manifest-v1",
+        requested_subject,
+        scene.map_or("live", CaptureScene::label),
+        session,
+        if native { "-native" } else { "" },
+    )
+}
+
+fn qa_manifest(
+    native: bool,
+    requested_mode: MonitorMode,
+    probe_policy: ProbePolicy,
+    scene: Option<CaptureScene>,
+    executable_sha256: String,
+    replay: QaReplay,
+    frames: Vec<QaFrame>,
+) -> QaCaptureManifest {
+    QaCaptureManifest {
+        schema: QA_MANIFEST_SCHEMA,
+        producer: QaProducer {
+            name: env!("CARGO_PKG_NAME"),
+            version: env!("CARGO_PKG_VERSION"),
+            executable_sha256,
+        },
+        lane: if native { "native" } else { "deterministic" },
+        requested_subject: subject_name(requested_mode),
+        scene: scene.map_or("live", CaptureScene::label),
+        policy: policy_name(probe_policy),
+        replay,
+        frames,
+    }
+}
+
+fn current_executable_sha256() -> Result<String> {
+    let executable = std::env::current_exe().context("locate current Linktop executable")?;
+    let bytes = fs::read(&executable)
+        .with_context(|| format!("read current Linktop executable {}", executable.display()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn policy_name(policy: ProbePolicy) -> &'static str {
+    if policy.is_active() {
+        "active"
+    } else {
+        "passive"
+    }
+}
+
+fn qa_frame(metadata: QaFrameMetadata, artifacts: Vec<QaArtifact>) -> QaFrame {
+    QaFrame {
+        index: metadata.index,
+        rendered_view: subject_name(metadata.rendered_mode),
+        scene: metadata.scene.map_or("live", CaptureScene::label),
+        stage: if metadata.scene.is_some() {
+            "final"
+        } else {
+            "observed"
+        },
+        policy: policy_name(metadata.probe_policy),
+        scheduled_ms: duration_millis(metadata.scheduled),
+        actual_ms: duration_millis(metadata.actual),
+        viewport: metadata.viewport,
+        artifacts,
+    }
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 pub fn run(request: CaptureRequest) -> Result<()> {
     let CaptureRequest {
         interval,
@@ -369,16 +573,20 @@ pub fn run(request: CaptureRequest) -> Result<()> {
         scene,
     } = request;
     let plan = ReplayPlan::new(&requested_seconds, &keys, &resizes, scene)?;
+    let replay = plan.manifest_replay();
+    let executable_sha256 = current_executable_sha256()?;
     fs::create_dir_all(&output_directory)
         .with_context(|| format!("create capture directory {}", output_directory.display()))?;
     private_directory(&output_directory)?;
+    verify_manifest_publication_support(&output_directory)?;
 
     let session = format!(
         "{}-{}",
         Local::now().format("%Y%m%dT%H%M%S"),
         std::process::id()
     );
-    let subject = subject_name(mode);
+    let requested_subject = subject_name(mode);
+    let manifest_stem = manifest_stem(requested_subject, scene, &session, false);
     let backend = TestBackend::new(size.columns, size.rows);
     let mut terminal = Terminal::new(backend).context("create capture terminal")?;
     let (updates, controls, monitor) = if scene.is_some() {
@@ -395,8 +603,9 @@ pub fn run(request: CaptureRequest) -> Result<()> {
     };
     let mut current_size = size;
     let mut frame_index = 0_usize;
-    let result = (|| -> Result<()> {
-        for target in plan.timestamps {
+    let result = (|| -> Result<Vec<QaFrame>> {
+        let mut manifest_frames = Vec::with_capacity(plan.frames.len());
+        for target in plan.timestamps.iter().copied() {
             wait_until(target, started_at, &updates, &mut app, None)?;
             drain_updates(&updates, &mut app, None)?;
             if let Some(scene) = scene {
@@ -442,8 +651,10 @@ pub fn run(request: CaptureRequest) -> Result<()> {
                 })
                 .context("render capture frame")?;
             let elapsed = started_at.elapsed();
+            let rendered_mode = interaction.active_mode;
+            let rendered_view = subject_name(rendered_mode);
             let stem = FrameName {
-                subject,
+                subject: rendered_view,
                 scene,
                 session: &session,
                 native: false,
@@ -454,9 +665,21 @@ pub fn run(request: CaptureRequest) -> Result<()> {
             }
             .stem();
             let artifacts = write_frame(&output_directory, &stem, frame.buffer)?;
+            manifest_frames.push(qa_frame(
+                QaFrameMetadata {
+                    index: frame_index,
+                    rendered_mode,
+                    probe_policy: app.probe_policy(),
+                    scene,
+                    scheduled: target,
+                    actual: elapsed,
+                    viewport: current_size,
+                },
+                artifacts.manifest_records(&output_directory)?,
+            ));
             println!(
                 "captured {} frame {} at {:.1}s (scheduled {:.1}s, {})\n  text {}\n  image {}",
-                subject,
+                rendered_view,
                 frame_index,
                 elapsed.as_secs_f64(),
                 target.as_secs_f64(),
@@ -465,14 +688,26 @@ pub fn run(request: CaptureRequest) -> Result<()> {
                 artifacts.svg.display()
             );
         }
-        Ok(())
+        Ok(manifest_frames)
     })();
 
     controls.send(MonitorControl::Stop).ok();
     monitor
         .join()
         .map_err(|_| anyhow::anyhow!("monitor thread panicked during capture"))?;
-    result
+    let frames = result?;
+    let manifest = qa_manifest(
+        false,
+        mode,
+        probe_policy,
+        scene,
+        executable_sha256,
+        replay,
+        frames,
+    );
+    let manifest_path = write_manifest(&output_directory, &manifest_stem, &manifest)?;
+    println!("  manifest {}", manifest_path.display());
+    Ok(())
 }
 
 pub fn run_native(request: CaptureRequest) -> Result<()> {
@@ -488,21 +723,25 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
         scene,
     } = request;
     let plan = ReplayPlan::new(&requested_seconds, &keys, &resizes, scene)?;
+    let replay = plan.manifest_replay();
+    let executable_sha256 = current_executable_sha256()?;
     fs::create_dir_all(&output_directory)
         .with_context(|| format!("create capture directory {}", output_directory.display()))?;
     private_directory(&output_directory)?;
+    verify_manifest_publication_support(&output_directory)?;
 
     let session_id = format!(
         "{}-{}",
         Local::now().format("%Y%m%dT%H%M%S"),
         std::process::id()
     );
-    let subject = subject_name(mode);
+    let requested_subject = subject_name(mode);
     let server = format!("linktop-native-{}", std::process::id());
     let session = "capture";
     let binary = std::env::current_exe().context("locate current linktop executable")?;
     let working_directory = std::env::current_dir().context("read current directory")?;
     let final_seconds = plan.final_frame().as_secs();
+    let manifest_stem = manifest_stem(requested_subject, scene, &session_id, true);
 
     let _guard = TmuxGuard(server.clone());
     let interrupt = CaptureInterrupt::new().context("install native capture signal handlers")?;
@@ -559,7 +798,15 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
     let started_at = Instant::now();
     let mut current_size = size;
     let mut frame_index = 0_usize;
-    for target in plan.timestamps {
+    let mut projected_app = App::with_probe_policy(probe_policy);
+    let mut projected_interaction = InteractionState {
+        active_mode: mode,
+        peer_offset: 0,
+        can_navigate: mode == MonitorMode::Overview,
+    };
+    let (projected_controls, _projected_controls_rx) = mpsc::channel();
+    let mut manifest_frames = Vec::with_capacity(plan.frames.len());
+    for target in plan.timestamps.iter().copied() {
         wait_for_elapsed(target, started_at, &interrupt)?;
         let mut acted = false;
         if let Some(size) = plan.resizes.get(&target).copied() {
@@ -570,6 +817,22 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
         if let Some(keys) = plan.keys.get(&target) {
             for key in keys {
                 send_native_key(&server, session, key.tmux_key())?;
+                let outcome = apply_tui_key(
+                    &mut projected_app,
+                    &projected_controls,
+                    &mut projected_interaction,
+                    key.key_code(),
+                    ui::peer_page_capacity(Rect::new(
+                        0,
+                        0,
+                        current_size.columns,
+                        current_size.rows,
+                    )),
+                );
+                anyhow::ensure!(
+                    outcome == InteractionOutcome::Continue,
+                    "terminating keys cannot be replayed"
+                );
             }
             acted = true;
         }
@@ -590,8 +853,10 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
         frame_index += 1;
         verify_native_size(&server, session, current_size)?;
         let elapsed = started_at.elapsed();
+        let rendered_mode = projected_interaction.active_mode;
+        let rendered_view = subject_name(rendered_mode);
         let stem = FrameName {
-            subject,
+            subject: rendered_view,
             scene,
             session: &session_id,
             native: true,
@@ -601,15 +866,25 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
             actual: elapsed,
         }
         .stem();
-        let artifacts = write_native_frame(
-            &output_directory,
-            &stem,
-            &capture_pane(&server, session, false)?,
-            &capture_pane(&server, session, true)?,
-        )?;
+        let ansi_frame = capture_pane(&server, session, true)?;
+        let text_frame = strip_ansi_escapes::strip_str(&ansi_frame);
+        verify_captured_state(&text_frame, rendered_mode, projected_app.probe_policy())?;
+        let artifacts = write_native_frame(&output_directory, &stem, &text_frame, &ansi_frame)?;
+        manifest_frames.push(qa_frame(
+            QaFrameMetadata {
+                index: frame_index,
+                rendered_mode,
+                probe_policy: projected_app.probe_policy(),
+                scene,
+                scheduled: target,
+                actual: elapsed,
+                viewport: current_size,
+            },
+            artifacts.manifest_records(&output_directory)?,
+        ));
         println!(
             "captured native {} frame {} at {:.1}s (scheduled {:.1}s, {})\n  text {}\n  ansi {}\n  html {}",
-            subject,
+            rendered_view,
             frame_index,
             elapsed.as_secs_f64(),
             target.as_secs_f64(),
@@ -619,6 +894,61 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
             artifacts.html.display()
         );
     }
+    let manifest = qa_manifest(
+        true,
+        mode,
+        probe_policy,
+        scene,
+        executable_sha256,
+        replay,
+        manifest_frames,
+    );
+    let manifest_path = write_manifest(&output_directory, &manifest_stem, &manifest)?;
+    println!("  manifest {}", manifest_path.display());
+    Ok(())
+}
+
+fn verify_captured_state(frame: &str, mode: MonitorMode, policy: ProbePolicy) -> Result<()> {
+    let header = frame.lines().take(3).collect::<Vec<_>>().join("\n");
+    let footer = frame.lines().next_back().unwrap_or_default();
+    let matches = match mode {
+        MonitorMode::Overview => {
+            header.contains("OVERVIEW")
+                || header.contains("NETWORK CONTEXT")
+                || header.contains("PATH DIAGNOSIS / ACTIVE")
+        }
+        MonitorMode::Link => header.contains("LOCAL LINK"),
+        MonitorMode::Peers => header.contains("NEIGHBORS") || header.contains("NEIGHBOR CACHE"),
+    };
+    anyhow::ensure!(
+        matches,
+        "native terminal frame did not render the expected {} view",
+        subject_name(mode)
+    );
+    let visible_policy = |text: &str| {
+        if text.contains("PATH DIAGNOSIS / ACTIVE")
+            || text.contains("LOCAL LINK / ACTIVE")
+            || text.contains("NEIGHBOR CACHE / ACTIVE")
+            || text.contains("NEIGHBORS / ACTIVE")
+            || text.contains("probes:on")
+            || text.contains("· ACTIVE ·")
+        {
+            Some(ProbePolicy::Active)
+        } else if text.contains("PASSIVE")
+            || text.contains("probes:off")
+            || text.contains("· PASSIVE ·")
+        {
+            Some(ProbePolicy::Passive)
+        } else {
+            None
+        }
+    };
+    let observed_policy = visible_policy(&header).or_else(|| visible_policy(footer));
+    anyhow::ensure!(
+        observed_policy == Some(policy),
+        "native terminal frame did not render the expected {} policy",
+        policy_name(policy)
+    );
     Ok(())
 }
 
@@ -1113,15 +1443,182 @@ struct NativeCaptureArtifacts {
     html: PathBuf,
 }
 
+impl CaptureArtifacts {
+    fn manifest_records(&self, directory: &Path) -> Result<Vec<QaArtifact>> {
+        Ok(vec![
+            QaArtifact::read(directory, &self.text, "text/plain; charset=utf-8")?,
+            QaArtifact::read(directory, &self.svg, "image/svg+xml")?,
+        ])
+    }
+}
+
+impl NativeCaptureArtifacts {
+    fn manifest_records(&self, directory: &Path) -> Result<Vec<QaArtifact>> {
+        Ok(vec![
+            QaArtifact::read(directory, &self.text, "text/plain; charset=utf-8")?,
+            QaArtifact::read(
+                directory,
+                &self.ansi,
+                "application/vnd.linktop.terminal-ansi",
+            )?,
+            QaArtifact::read(directory, &self.html, "text/html; charset=utf-8")?,
+        ])
+    }
+}
+
+impl QaArtifact {
+    fn read(directory: &Path, path: &Path, media_type: &'static str) -> Result<Self> {
+        let name = relative_artifact_name(directory, path)?;
+        let bytes =
+            fs::read(path).with_context(|| format!("read QA artifact {}", path.display()))?;
+        Ok(Self {
+            name,
+            media_type,
+            byte_length: u64::try_from(bytes.len()).context("QA artifact is too large")?,
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+        })
+    }
+}
+
+fn relative_artifact_name(directory: &Path, path: &Path) -> Result<String> {
+    let relative = path.strip_prefix(directory).with_context(|| {
+        format!(
+            "QA artifact {} is outside capture directory {}",
+            path.display(),
+            directory.display()
+        )
+    })?;
+    let mut components = relative.components();
+    let component = components
+        .next()
+        .context("QA artifact name must not be empty")?;
+    anyhow::ensure!(
+        components.next().is_none()
+            && matches!(component, std::path::Component::Normal(_))
+            && !relative.is_absolute(),
+        "QA artifact name must be one relative path component"
+    );
+    relative
+        .to_str()
+        .map(str::to_owned)
+        .context("QA artifact name is not valid UTF-8")
+}
+
+fn write_manifest(directory: &Path, stem: &str, manifest: &QaCaptureManifest) -> Result<PathBuf> {
+    let path = directory.join(format!("{stem}.json"));
+    let temporary = directory.join(format!(".{stem}.tmp-{}", std::process::id()));
+    ensure_path_absent(&path, "QA manifest")?;
+    let mut temporary_created = false;
+    let result = (|| -> Result<()> {
+        let mut document =
+            serde_json::to_vec_pretty(manifest).context("serialize QA capture manifest")?;
+        document.push(b'\n');
+        write_private_new(&temporary, &document)?;
+        temporary_created = true;
+        verify_manifest_artifacts(directory, manifest)?;
+        publish_private_new(&temporary, &path)?;
+        Ok(())
+    })();
+    if result.is_err() && temporary_created {
+        let _ = fs::remove_file(&temporary);
+    }
+    result?;
+    Ok(path)
+}
+
+fn publish_private_new(temporary: &Path, path: &Path) -> Result<()> {
+    fs::hard_link(temporary, path)
+        .with_context(|| format!("publish new QA capture manifest {}", path.display()))?;
+    // The final name now references a complete inode. Failure to remove the
+    // private temporary name cannot make the published manifest incomplete.
+    let _ = fs::remove_file(temporary);
+    Ok(())
+}
+
+fn verify_manifest_publication_support(directory: &Path) -> Result<()> {
+    let sequence = QA_PREFLIGHT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let identity = format!("{}-{sequence}", std::process::id());
+    let temporary = directory.join(format!(".linktop-hard-link-probe-{identity}.tmp"));
+    let published = directory.join(format!(".linktop-hard-link-probe-{identity}.published"));
+    write_private_new(&temporary, b"linktop manifest publication preflight\n")?;
+    let linked = fs::hard_link(&temporary, &published);
+    let _ = fs::remove_file(&temporary);
+    if let Err(error) = linked {
+        anyhow::bail!(
+            "QA capture output filesystem must support same-directory hard links for atomic no-clobber manifest publication: {error}"
+        );
+    }
+    fs::remove_file(&published).with_context(|| {
+        format!(
+            "remove QA manifest publication preflight {}",
+            published.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn verify_manifest_artifacts(directory: &Path, manifest: &QaCaptureManifest) -> Result<()> {
+    anyhow::ensure!(
+        manifest.producer.executable_sha256.len() == 64
+            && manifest
+                .producer
+                .executable_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "QA manifest producer executable digest is not lowercase SHA-256"
+    );
+    anyhow::ensure!(
+        manifest.frames.len() == manifest.replay.frames_ms.len(),
+        "QA manifest has {} completed frames for {} requested frame times",
+        manifest.frames.len(),
+        manifest.replay.frames_ms.len()
+    );
+    let mut names = BTreeSet::new();
+    for (offset, (frame, requested_ms)) in manifest
+        .frames
+        .iter()
+        .zip(&manifest.replay.frames_ms)
+        .enumerate()
+    {
+        anyhow::ensure!(
+            frame.index == offset + 1 && frame.scheduled_ms == *requested_ms,
+            "QA frame {} does not match normalized requested frame {}ms",
+            frame.index,
+            requested_ms
+        );
+        anyhow::ensure!(
+            frame.actual_ms >= frame.scheduled_ms,
+            "QA frame {} was recorded before its scheduled time",
+            frame.index
+        );
+        anyhow::ensure!(
+            !frame.artifacts.is_empty(),
+            "QA frame {} has no completed artifacts",
+            frame.index
+        );
+        for expected in &frame.artifacts {
+            anyhow::ensure!(
+                names.insert(expected.name.as_str()),
+                "QA artifact {:?} appears more than once in the manifest",
+                expected.name
+            );
+            let path = directory.join(&expected.name);
+            let actual = QaArtifact::read(directory, &path, expected.media_type)?;
+            anyhow::ensure!(
+                actual.byte_length == expected.byte_length && actual.sha256 == expected.sha256,
+                "QA artifact {:?} changed before manifest completion",
+                expected.name
+            );
+        }
+    }
+    Ok(())
+}
+
 fn write_frame(directory: &Path, stem: &str, buffer: &Buffer) -> Result<CaptureArtifacts> {
     let text = directory.join(format!("{stem}.txt"));
     let svg = directory.join(format!("{stem}.svg"));
-    fs::write(&text, buffer_text(buffer))
-        .with_context(|| format!("write text frame {}", text.display()))?;
-    fs::write(&svg, buffer_svg(buffer))
-        .with_context(|| format!("write SVG frame {}", svg.display()))?;
-    private_file(&text)?;
-    private_file(&svg)?;
+    write_private_new(&text, buffer_text(buffer).as_bytes())?;
+    write_private_new(&svg, buffer_svg(buffer).as_bytes())?;
     Ok(CaptureArtifacts { text, svg })
 }
 
@@ -1137,16 +1634,40 @@ fn write_native_frame(
     let converted =
         ansi_to_html::convert(ansi_frame).context("convert native ANSI frame to HTML")?;
     let document = native_html_document(&converted);
-    fs::write(&text, text_frame)
-        .with_context(|| format!("write native text frame {}", text.display()))?;
-    fs::write(&ansi, ansi_frame)
-        .with_context(|| format!("write native ANSI frame {}", ansi.display()))?;
-    fs::write(&html, document)
-        .with_context(|| format!("write native HTML frame {}", html.display()))?;
-    for path in [&text, &ansi, &html] {
-        private_file(path)?;
-    }
+    write_private_new(&text, text_frame.as_bytes())?;
+    write_private_new(&ansi, ansi_frame.as_bytes())?;
+    write_private_new(&html, document.as_bytes())?;
     Ok(NativeCaptureArtifacts { text, ansi, html })
+}
+
+fn ensure_path_absent(path: &Path, kind: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("inspect {kind} path {}", path.display())),
+        Ok(_) => anyhow::bail!("{kind} path already exists: {}", path.display()),
+    }
+}
+
+fn write_private_new(path: &Path, contents: &[u8]) -> Result<()> {
+    let mut created = false;
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .with_context(|| format!("create private QA artifact {}", path.display()))?;
+        created = true;
+        private_file(path)?;
+        file.write_all(contents)
+            .with_context(|| format!("write private QA artifact {}", path.display()))?;
+        file.flush()
+            .with_context(|| format!("flush private QA artifact {}", path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() && created {
+        let _ = fs::remove_file(path);
+    }
+    result
 }
 
 fn native_html_document(frame: &str) -> String {
@@ -1356,9 +1877,31 @@ fn private_file(_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
     use ratatui::layout::Rect;
 
     use super::*;
+
+    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            let serial = NEXT_TEST_DIRECTORY.fetch_add(1, AtomicOrdering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("linktop-{label}-{}-{serial}", std::process::id()));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn capture_schedule_sorts_and_deduplicates_times() {
@@ -1394,8 +1937,9 @@ mod tests {
             }
         );
         assert!("0:j".parse::<ScheduledKey>().is_err());
-        assert!("2:59x20".parse::<ScheduledResize>().is_err());
-        assert!("2:80x9".parse::<ScheduledResize>().is_err());
+        assert!("2:40x8".parse::<ScheduledResize>().is_ok());
+        assert!("2:39x20".parse::<ScheduledResize>().is_err());
+        assert!("2:80x7".parse::<ScheduledResize>().is_err());
         assert!("2:bogus".parse::<ScheduledKey>().is_err());
     }
 
@@ -1459,6 +2003,57 @@ mod tests {
         assert_eq!(ReplayKey::Tab.tmux_key(), NativeKey::Named("Tab"));
         assert_eq!(ReplayKey::PageUp.tmux_key(), NativeKey::Named("PPage"));
         assert_eq!(ReplayKey::PageDown.tmux_key(), NativeKey::Named("NPage"));
+    }
+
+    #[test]
+    fn frame_names_and_manifest_view_follow_replayed_navigation() {
+        let mut app = App::with_probe_policy(ProbePolicy::Passive);
+        let (controls, _controls_rx) = mpsc::channel();
+        let mut interaction = InteractionState {
+            active_mode: MonitorMode::Overview,
+            peer_offset: 0,
+            can_navigate: true,
+        };
+        apply_tui_key(
+            &mut app,
+            &controls,
+            &mut interaction,
+            ReplayKey::Peers.key_code(),
+            1,
+        );
+        assert_eq!(interaction.active_mode, MonitorMode::Peers);
+        let stem = FrameName {
+            subject: subject_name(interaction.active_mode),
+            scene: Some(CaptureScene::DensePeers),
+            session: "session",
+            native: false,
+            index: 1,
+            size: CaptureSize {
+                columns: 80,
+                rows: 20,
+            },
+            scheduled: Duration::from_secs(1),
+            actual: Duration::from_millis(1_004),
+        }
+        .stem();
+        assert!(stem.starts_with("peers-dense-peers-session-frame001-"));
+
+        apply_tui_key(
+            &mut app,
+            &controls,
+            &mut interaction,
+            ReplayKey::Tab.key_code(),
+            1,
+        );
+        assert_eq!(interaction.active_mode, MonitorMode::Overview);
+        apply_tui_key(
+            &mut app,
+            &controls,
+            &mut interaction,
+            ReplayKey::Active.key_code(),
+            1,
+        );
+        assert_eq!(app.probe_policy(), ProbePolicy::Active);
     }
 
     #[test]
@@ -1572,5 +2167,240 @@ mod tests {
         assert!(html.contains("<!doctype html>"));
         assert!(html.contains("white-space: pre"));
         assert!(html.contains("<span style='color:#0f0'>OK</span>"));
+    }
+
+    #[test]
+    fn native_plain_frame_is_derived_from_the_same_ansi_snapshot() {
+        let ansi = "\u{1b}[36mLINKTOP\u{1b}[0m  PASSIVE";
+        assert_eq!(strip_ansi_escapes::strip_str(ansi), "LINKTOP  PASSIVE");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_writer_rejects_preexisting_symlinks_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TestDirectory::new("qa-artifact-symlink");
+        let target = directory.0.join("outside-target");
+        let artifact = directory.0.join("frame.txt");
+        fs::write(&target, b"preserve\n").unwrap();
+        symlink(&target, &artifact).unwrap();
+
+        assert!(write_private_new(&artifact, b"replacement\n").is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"preserve\n");
+        assert!(
+            fs::symlink_metadata(&artifact)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn native_view_verification_binds_manifest_identity_to_visible_header() {
+        verify_captured_state(
+            "│ LINKTOP   NETWORK CONTEXT  PASSIVE │",
+            MonitorMode::Overview,
+            ProbePolicy::Passive,
+        )
+        .unwrap();
+        verify_captured_state(
+            "│ LINKTOP   LOCAL LINK / PASSIVE  OBSERVED │",
+            MonitorMode::Link,
+            ProbePolicy::Passive,
+        )
+        .unwrap();
+        verify_captured_state(
+            "│ LINKTOP   NEIGHBORS / ACTIVE  OK │",
+            MonitorMode::Peers,
+            ProbePolicy::Active,
+        )
+        .unwrap();
+        assert!(
+            verify_captured_state(
+                "│ LINKTOP   LOCAL LINK / PASSIVE  OBSERVED │",
+                MonitorMode::Peers,
+                ProbePolicy::Passive,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_captured_state(
+                "│ LINKTOP   NEIGHBORS / PASSIVE  OK │",
+                MonitorMode::Peers,
+                ProbePolicy::Active,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_captured_state(
+                "┌ LIVE STATUS ┐\n│ LINKTOP   NEIGHBORS / ACTIVE  OK │\n└─────────────┘\n┌ PASSIVE NEIGHBORS ┐",
+                MonitorMode::Peers,
+                ProbePolicy::Passive,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn qa_manifest_is_pretty_versioned_and_written_after_complete_artifacts() {
+        let directory = TestDirectory::new("qa-manifest-golden");
+        let artifact_path = directory.0.join("peers-frame001.txt");
+        fs::write(&artifact_path, b"frame\n").unwrap();
+        let artifact =
+            QaArtifact::read(&directory.0, &artifact_path, "text/plain; charset=utf-8").unwrap();
+        let replay = ReplayPlan::new(
+            &[1],
+            &["1:3".parse::<ScheduledKey>().unwrap()],
+            &["1:80x20".parse::<ScheduledResize>().unwrap()],
+            Some(CaptureScene::DensePeers),
+        )
+        .unwrap()
+        .manifest_replay();
+        let manifest = qa_manifest(
+            false,
+            MonitorMode::Overview,
+            ProbePolicy::Passive,
+            Some(CaptureScene::DensePeers),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            replay,
+            vec![qa_frame(
+                QaFrameMetadata {
+                    index: 1,
+                    rendered_mode: MonitorMode::Peers,
+                    probe_policy: ProbePolicy::Passive,
+                    scene: Some(CaptureScene::DensePeers),
+                    scheduled: Duration::from_secs(1),
+                    actual: Duration::from_millis(1_004),
+                    viewport: CaptureSize {
+                        columns: 80,
+                        rows: 20,
+                    },
+                },
+                vec![artifact],
+            )],
+        );
+
+        let manifest_path = write_manifest(&directory.0, "capture", &manifest).unwrap();
+        let document = fs::read_to_string(manifest_path).unwrap();
+        assert_eq!(
+            document,
+            include_str!("capture/fixtures/v1/qa_capture_manifest.json")
+        );
+        let value: serde_json::Value = serde_json::from_str(&document).unwrap();
+        assert_eq!(value["schema"], QA_MANIFEST_SCHEMA);
+        assert_eq!(value["frames"][0]["rendered_view"], "peers");
+        assert!(
+            value["frames"][0]["artifacts"][0]["name"]
+                .as_str()
+                .is_some_and(|name| !Path::new(name).is_absolute())
+        );
+    }
+
+    #[test]
+    fn qa_manifest_is_absent_when_a_requested_frame_is_incomplete() {
+        let directory = TestDirectory::new("qa-manifest-incomplete");
+        let manifest = qa_manifest(
+            false,
+            MonitorMode::Overview,
+            ProbePolicy::Passive,
+            None,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            QaReplay {
+                frames_ms: vec![1_000, 2_000],
+                keys: Vec::new(),
+                resizes: Vec::new(),
+            },
+            Vec::new(),
+        );
+        let path = directory.0.join("capture.json");
+        assert!(write_manifest(&directory.0, "capture", &manifest).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn qa_manifest_is_absent_when_artifact_integrity_changes() {
+        let directory = TestDirectory::new("qa-manifest-integrity");
+        let artifact_path = directory.0.join("overview-frame001.txt");
+        fs::write(&artifact_path, b"original\n").unwrap();
+        let artifact =
+            QaArtifact::read(&directory.0, &artifact_path, "text/plain; charset=utf-8").unwrap();
+        fs::write(&artifact_path, b"changed\n").unwrap();
+        let manifest = qa_manifest(
+            false,
+            MonitorMode::Overview,
+            ProbePolicy::Passive,
+            None,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            QaReplay {
+                frames_ms: vec![1_000],
+                keys: Vec::new(),
+                resizes: Vec::new(),
+            },
+            vec![qa_frame(
+                QaFrameMetadata {
+                    index: 1,
+                    rendered_mode: MonitorMode::Overview,
+                    probe_policy: ProbePolicy::Passive,
+                    scene: None,
+                    scheduled: Duration::from_secs(1),
+                    actual: Duration::from_millis(1_001),
+                    viewport: CaptureSize {
+                        columns: 80,
+                        rows: 20,
+                    },
+                },
+                vec![artifact],
+            )],
+        );
+        let path = directory.0.join("capture.json");
+        assert!(write_manifest(&directory.0, "capture", &manifest).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn manifest_publication_cannot_replace_a_concurrently_created_path() {
+        let directory = TestDirectory::new("qa-manifest-no-clobber");
+        let temporary = directory.0.join(".capture.tmp");
+        let published = directory.0.join("capture.json");
+        fs::write(&temporary, b"new manifest\n").unwrap();
+        fs::write(&published, b"existing manifest\n").unwrap();
+
+        assert!(publish_private_new(&temporary, &published).is_err());
+        assert_eq!(fs::read(&published).unwrap(), b"existing manifest\n");
+        assert_eq!(fs::read(&temporary).unwrap(), b"new manifest\n");
+    }
+
+    #[test]
+    fn manifest_failure_does_not_remove_a_preexisting_temporary_path() {
+        let directory = TestDirectory::new("qa-manifest-temp-no-clobber");
+        let temporary = directory
+            .0
+            .join(format!(".capture.tmp-{}", std::process::id()));
+        fs::write(&temporary, b"other transaction\n").unwrap();
+        let manifest = qa_manifest(
+            false,
+            MonitorMode::Overview,
+            ProbePolicy::Passive,
+            None,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            QaReplay {
+                frames_ms: Vec::new(),
+                keys: Vec::new(),
+                resizes: Vec::new(),
+            },
+            Vec::new(),
+        );
+
+        assert!(write_manifest(&directory.0, "capture", &manifest).is_err());
+        assert_eq!(fs::read(&temporary).unwrap(), b"other transaction\n");
+        assert!(!directory.0.join("capture.json").exists());
+    }
+
+    #[test]
+    fn capture_preflights_atomic_manifest_publication_in_the_output_directory() {
+        let directory = TestDirectory::new("qa-manifest-preflight");
+        verify_manifest_publication_support(&directory.0).unwrap();
+        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 0);
     }
 }
