@@ -114,6 +114,11 @@ These states can change independently:
 - a session with only one restricted macOS association may know the current
   route but have insufficient evidence for any place claim.
 
+Until attachment, effective route, and overlay are represented as separate
+typed evidence, a non-default addressed interface is labelled conservatively as
+an `other addressed interface`. Default-route selection alone does not prove
+that another interface is a tunnel, overlay, physical underlay, or attachment.
+
 The ordinary passive host view may observe only the current association,
 platform configuration, and native cache. Ambient AP scans, packet/RF capture,
 controller queries, external geolocation, and active discovery each have a

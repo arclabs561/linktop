@@ -197,4 +197,6 @@ now reserves its four body rows for answer, path, coverage, and action. Context
 change, workload, configuration detail, and telemetry enter only when another
 row is available. This is a minimum-size safety exception to the normal
 information hierarchy, not a demotion of transition evidence at usable
-heights.
+heights. At wide passive sizes, a path-dwell panel with no valid counter, radio,
+workload, or neighbor-cache samples collapses to one evidence-gap row so empty
+zero/unavailable metrics do not displace consequential events.
