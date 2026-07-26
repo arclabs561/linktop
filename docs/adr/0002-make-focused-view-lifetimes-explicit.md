@@ -129,3 +129,19 @@ new optional evidence is additive. A removal, reinterpretation, type change, or
 required-nesting change creates a new schema discriminator. Exact readable
 golden documents for every finite JSON subject gate the complete wire shape so
 an internal model edit cannot silently alter v1.
+
+## Update (2026-07-26): bind finite JSON to its acquisition window
+
+Add optional `acquisition.started_at` and monotonic `acquisition.elapsed_ms`
+fields to every emitted v1 observation and speed experiment. `completed_at`
+alone could not tell a machine consumer when a bounded active transaction
+started or how long its evidence collection actually took. Wall-clock start
+and completion support cross-observer alignment; monotonic elapsed time avoids
+claiming duration from wall-clock subtraction.
+
+Also scope live CLI options to the subjects that implement them. Focused link
+and peers help advertises interval, plain stream, and dwell controls; screenshot
+help advertises only its observation interval; snapshot, probe, and speed help
+no longer offers live options that runtime would reject or ignore. This changes
+neither acquisition policy nor the existing before-or-after-subcommand
+compatibility path.

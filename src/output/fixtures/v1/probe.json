@@ -8,7 +8,9 @@
   "completed_at": "2026-07-26T20:00:00Z",
   "acquisition": {
     "policy": "active",
-    "lifetime": "one_observation"
+    "lifetime": "one_observation",
+    "started_at": "2026-07-26T19:59:45Z",
+    "elapsed_ms": 15000
   },
   "assessment": {
     "probe_policy": "active",

@@ -176,3 +176,17 @@ multi-modal schema gate. A binary release therefore does not turn their Rust API
 into a semver compatibility promise. Linktop retains the exact HTTPS revision
 pin until that gate passes; it does not depend on a mutable branch, sibling
 checkout, installed Netmon executable, or human-readable CLI output.
+
+## Update (2026-07-26): scope coverage to the serialized passive record
+
+The host-path record's `policy` and `coverage` describe only evidence serialized
+into that record. Linktop derives coverage from the declared route, next-hop,
+resolver, address, association, BSSID, and gateway-binding source set. Active
+probe state, interface counters, radio telemetry, workload accounting, and
+other peer-cache health cannot make an otherwise identical passive history
+record partial because those observations are not represented in the v0
+payload.
+
+This preserves the existing decision that active probes are not smuggled into
+passive durable context and prevents the same stored evidence from changing
+meaning merely because the enclosing overview enabled another collector.

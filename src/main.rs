@@ -18,7 +18,7 @@ use std::sync::mpsc::{Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -39,25 +39,31 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Seconds between live observations and, when enabled, next-hop RTT probes.
-    #[arg(long, global = true, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..=60))]
-    interval: u64,
-
-    /// Stream the live monitor as append-only text instead of opening the TUI.
-    #[arg(long, global = true)]
-    plain: bool,
-
-    /// Exit a live overview, link, or peers view after this many seconds.
-    #[arg(long, global = true, value_parser = clap::value_parser!(u64).range(1..=86_400))]
-    dwell: Option<u64>,
+    #[command(flatten)]
+    live: LiveOptions,
 
     /// Enable next-hop, DNS, HTTPS, and public-egress probes in the overview.
     #[arg(long)]
     active: bool,
 
     /// Read, compare, and append private host-path evidence at PATH (or LINKTOP_HISTORY).
-    #[arg(long, global = true, value_name = "PATH")]
+    #[arg(long, value_name = "PATH")]
     history: Option<PathBuf>,
+}
+
+#[derive(Debug, Args, Default)]
+struct LiveOptions {
+    /// Seconds between live observations and, when enabled, next-hop RTT probes (default: 2).
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=60))]
+    interval: Option<u64>,
+
+    /// Stream the live monitor as append-only text instead of opening the TUI.
+    #[arg(long)]
+    plain: bool,
+
+    /// Exit a live overview, link, or peers view after this many seconds.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=86_400))]
+    dwell: Option<u64>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -80,12 +86,16 @@ enum Command {
         /// Emit stable machine-readable JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        live: LiveOptions,
     },
     /// Show the native neighbor cache without probing the LAN.
     Peers {
         /// Emit stable machine-readable JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        live: LiveOptions,
     },
     /// Run an explicit bounded iperf3 TCP test with gateway latency under load.
     Speed {
@@ -125,6 +135,9 @@ enum Command {
         /// Enable active path probes in an overview capture.
         #[arg(long)]
         active: bool,
+        /// Seconds between observations while rendering the live view (default: 2).
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=60))]
+        interval: Option<u64>,
         /// Replay a key at an elapsed second (for example `--key 2:3`).
         #[arg(long = "key", value_name = "AT:KEY")]
         keys: Vec<capture::ScheduledKey>,
@@ -185,44 +198,44 @@ pub(crate) enum InteractionOutcome {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let interval = Duration::from_secs(cli.interval);
-    let dwell = cli.dwell.map(Duration::from_secs);
-    let plain = cli.plain;
-    let explicit_history = cli.history.clone();
-    let probe_policy = if cli.active {
+    let Cli {
+        command,
+        live: root_live,
+        active,
+        history: explicit_history,
+    } = Cli::parse();
+    let probe_policy = if active {
         ProbePolicy::Active
     } else {
         ProbePolicy::Passive
     };
     let terminal_stdin = io::stdin().is_terminal();
     let terminal_stdout = io::stdout().is_terminal();
-    let live_output = choose_live_output(terminal_stdin, terminal_stdout, plain, dwell);
-    let default_history = resolve_default_history(
-        explicit_history.clone(),
-        std::env::var_os("LINKTOP_HISTORY"),
-        live_output != LiveOutput::Once,
-    );
-    match cli.command {
+    match command {
         Some(Command::Snapshot { json }) => {
-            reject_live_options("snapshot", plain, dwell)?;
-            reject_root_active("snapshot", cli.active)?;
+            reject_live_options("snapshot", &root_live)?;
+            reject_root_active("snapshot", active)?;
             reject_history("snapshot", explicit_history.as_ref())?;
             snapshot(json)
         }
         Some(Command::Probe { json }) => {
-            reject_live_options("probe", plain, dwell)?;
-            reject_root_active("probe", cli.active)?;
+            reject_live_options("probe", &root_live)?;
+            reject_root_active("probe", active)?;
             reject_history("probe", explicit_history.as_ref())?;
             probe(json)
         }
-        Some(Command::Link { json }) => {
-            reject_root_active("link", cli.active)?;
+        Some(Command::Link { json, live }) => {
+            reject_root_active("link", active)?;
             reject_history("link", explicit_history.as_ref())?;
+            let live = merge_live_options(root_live, live)?;
             if json {
-                reject_live_options("link --json", plain, dwell)?;
+                reject_live_options("link --json", &live)?;
                 link(true)
             } else {
+                let interval = live.interval();
+                let dwell = live.dwell();
+                let live_output =
+                    choose_live_output(terminal_stdin, terminal_stdout, live.plain, dwell);
                 match live_output {
                     LiveOutput::Tui => run_tui(
                         interval,
@@ -242,13 +255,18 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Some(Command::Peers { json }) => {
-            reject_root_active("peers", cli.active)?;
+        Some(Command::Peers { json, live }) => {
+            reject_root_active("peers", active)?;
             reject_history("peers", explicit_history.as_ref())?;
+            let live = merge_live_options(root_live, live)?;
             if json {
-                reject_live_options("peers --json", plain, dwell)?;
+                reject_live_options("peers --json", &live)?;
                 peers(true)
             } else {
+                let interval = live.interval();
+                let dwell = live.dwell();
+                let live_output =
+                    choose_live_output(terminal_stdin, terminal_stdout, live.plain, dwell);
                 match live_output {
                     LiveOutput::Tui => run_tui(
                         interval,
@@ -274,8 +292,8 @@ fn main() -> Result<()> {
             duration,
             json,
         }) => {
-            reject_live_options("speed", plain, dwell)?;
-            reject_root_active("speed", cli.active)?;
+            reject_live_options("speed", &root_live)?;
+            reject_root_active("speed", active)?;
             reject_history("speed", explicit_history.as_ref())?;
             speed(&host, port, Duration::from_secs(duration), json)
         }
@@ -286,17 +304,19 @@ fn main() -> Result<()> {
             rows,
             output_dir,
             native,
-            active,
+            active: capture_active,
+            interval,
             keys,
             resizes,
             scene,
         }) => {
-            reject_live_options("screenshot", plain, dwell)?;
-            reject_root_active("screenshot", cli.active)?;
+            reject_live_lifetime_options("screenshot", root_live.plain, root_live.dwell())?;
+            let interval = merge_interval(root_live.interval, interval)?;
+            reject_root_active("screenshot", active)?;
             reject_history("screenshot", explicit_history.as_ref())?;
             let mode = view.into();
             anyhow::ensure!(
-                !active || mode == MonitorMode::Overview,
+                !capture_active || mode == MonitorMode::Overview,
                 "screenshot --active is only valid for the overview"
             );
             if scene.is_some() {
@@ -305,11 +325,11 @@ fn main() -> Result<()> {
                     "screenshot --scene dense-peers is only valid for overview or peers"
                 );
                 anyhow::ensure!(
-                    !active,
+                    !capture_active,
                     "screenshot --scene dense-peers cannot be combined with --active"
                 );
             }
-            let capture_policy = if active {
+            let capture_policy = if capture_active {
                 ProbePolicy::Active
             } else {
                 ProbePolicy::Passive
@@ -332,28 +352,73 @@ fn main() -> Result<()> {
                 capture::run(request)
             }
         }
-        None => match live_output {
-            LiveOutput::Tui => run_tui(
-                interval,
-                MonitorMode::Overview,
-                dwell,
-                probe_policy,
-                default_history,
-            ),
-            LiveOutput::Plain => run_plain(
-                interval,
-                MonitorMode::Overview,
-                dwell,
-                probe_policy,
-                default_history,
-            ),
-            LiveOutput::Once if default_history.is_some() => {
-                anyhow::bail!("--history requires a live terminal or --plain")
+        None => {
+            let interval = root_live.interval();
+            let dwell = root_live.dwell();
+            let live_output =
+                choose_live_output(terminal_stdin, terminal_stdout, root_live.plain, dwell);
+            let default_history = resolve_default_history(
+                explicit_history,
+                std::env::var_os("LINKTOP_HISTORY"),
+                live_output != LiveOutput::Once,
+            );
+            match live_output {
+                LiveOutput::Tui => run_tui(
+                    interval,
+                    MonitorMode::Overview,
+                    dwell,
+                    probe_policy,
+                    default_history,
+                ),
+                LiveOutput::Plain => run_plain(
+                    interval,
+                    MonitorMode::Overview,
+                    dwell,
+                    probe_policy,
+                    default_history,
+                ),
+                LiveOutput::Once if default_history.is_some() => {
+                    anyhow::bail!("--history requires a live terminal or --plain")
+                }
+                LiveOutput::Once if probe_policy.is_active() => probe(false),
+                LiveOutput::Once => snapshot(false),
             }
-            LiveOutput::Once if probe_policy.is_active() => probe(false),
-            LiveOutput::Once => snapshot(false),
-        },
+        }
     }
+}
+
+impl LiveOptions {
+    fn interval(&self) -> Duration {
+        Duration::from_secs(self.interval.unwrap_or(2))
+    }
+
+    fn dwell(&self) -> Option<Duration> {
+        self.dwell.map(Duration::from_secs)
+    }
+}
+
+fn merge_interval(root: Option<u64>, command: Option<u64>) -> Result<Duration> {
+    anyhow::ensure!(
+        root.is_none() || command.is_none(),
+        "--interval may be specified either before or after the subcommand, not both"
+    );
+    Ok(Duration::from_secs(command.or(root).unwrap_or(2)))
+}
+
+fn merge_live_options(root: LiveOptions, command: LiveOptions) -> Result<LiveOptions> {
+    anyhow::ensure!(
+        root.interval.is_none() || command.interval.is_none(),
+        "--interval may be specified either before or after the subcommand, not both"
+    );
+    anyhow::ensure!(
+        root.dwell.is_none() || command.dwell.is_none(),
+        "--dwell may be specified either before or after the subcommand, not both"
+    );
+    Ok(LiveOptions {
+        interval: command.interval.or(root.interval),
+        plain: root.plain || command.plain,
+        dwell: command.dwell.or(root.dwell),
+    })
 }
 
 fn choose_live_output(
@@ -373,7 +438,15 @@ fn choose_live_output(
     }
 }
 
-fn reject_live_options(subject: &str, plain: bool, dwell: Option<Duration>) -> Result<()> {
+fn reject_live_options(subject: &str, live: &LiveOptions) -> Result<()> {
+    anyhow::ensure!(
+        live.interval.is_none(),
+        "--interval cannot be combined with {subject}"
+    );
+    reject_live_lifetime_options(subject, live.plain, live.dwell())
+}
+
+fn reject_live_lifetime_options(subject: &str, plain: bool, dwell: Option<Duration>) -> Result<()> {
     anyhow::ensure!(!plain, "--plain cannot be combined with {subject}");
     anyhow::ensure!(dwell.is_none(), "--dwell cannot be combined with {subject}");
     Ok(())
@@ -410,6 +483,7 @@ fn resolve_default_history(
 }
 
 fn snapshot(json: bool) -> Result<()> {
+    let window = output::AcquisitionWindow::start();
     let report = net::collect_passive_snapshot();
     if json {
         let evidence = output::HostPathEvidence::new(&report);
@@ -417,6 +491,7 @@ fn snapshot(json: bool) -> Result<()> {
             output::ObservationSubject::Snapshot,
             report.summary,
             evidence,
+            &window,
         );
         output::print_json(&document)?;
     } else {
@@ -494,6 +569,7 @@ fn snapshot(json: bool) -> Result<()> {
 }
 
 fn probe(json: bool) -> Result<()> {
+    let window = output::AcquisitionWindow::start();
     let report = net::collect_snapshot(Duration::from_secs(15));
     if json {
         let evidence = output::HostPathEvidence::new(&report);
@@ -501,6 +577,7 @@ fn probe(json: bool) -> Result<()> {
             output::ObservationSubject::Probe,
             report.summary,
             evidence,
+            &window,
         );
         output::print_json(&document)?;
     } else {
@@ -571,6 +648,7 @@ fn probe(json: bool) -> Result<()> {
 }
 
 fn link(json: bool) -> Result<()> {
+    let window = output::AcquisitionWindow::start();
     let link = net::collect_link_snapshot();
     let counters = link
         .interface
@@ -586,6 +664,7 @@ fn link(json: bool) -> Result<()> {
             output::ObservationSubject::Link,
             assessment,
             evidence,
+            &window,
         );
         output::print_json(&document)?;
         return Ok(());
@@ -648,6 +727,7 @@ fn link(json: bool) -> Result<()> {
 }
 
 fn peers(json: bool) -> Result<()> {
+    let window = output::AcquisitionWindow::start();
     let link = net::collect_link();
     let report = peers::collect(&link);
     let assessment = model::passive_peer_summary(&report);
@@ -657,6 +737,7 @@ fn peers(json: bool) -> Result<()> {
             output::ObservationSubject::Peers,
             assessment,
             evidence,
+            &window,
         );
         output::print_json(&document)?;
     } else {
@@ -702,9 +783,10 @@ fn peers(json: bool) -> Result<()> {
 }
 
 fn speed(host: &str, port: u16, duration: Duration, json: bool) -> Result<()> {
+    let window = output::AcquisitionWindow::start();
     let report = speed::run(host, port, duration)?;
     if json {
-        let document = output::SpeedExperimentDocument::new(&report);
+        let document = output::SpeedExperimentDocument::new(&report, &window);
         output::print_json(&document)?;
         return Ok(());
     }
@@ -1083,8 +1165,8 @@ mod cli_tests {
         let active =
             Cli::try_parse_from(["linktop", "--active", "--plain", "--dwell", "5"]).unwrap();
         assert!(active.active);
-        assert!(active.plain);
-        assert_eq!(active.dwell, Some(5));
+        assert!(active.live.plain);
+        assert_eq!(active.live.dwell, Some(5));
 
         let probe = Cli::try_parse_from(["linktop", "probe", "--json"]).unwrap();
         assert!(matches!(probe.command, Some(Command::Probe { json: true })));
@@ -1127,10 +1209,62 @@ mod cli_tests {
             "3",
         ])
         .unwrap();
-        assert!(cli.plain);
-        assert_eq!(cli.dwell, Some(7));
-        assert_eq!(cli.interval, 3);
-        assert!(matches!(cli.command, Some(Command::Peers { json: false })));
+        let Some(Command::Peers { json, live }) = cli.command else {
+            panic!("peers command was not parsed");
+        };
+        assert!(!json);
+        assert!(live.plain);
+        assert_eq!(live.dwell, Some(7));
+        assert_eq!(live.interval, Some(3));
+    }
+
+    #[test]
+    fn subcommand_help_only_advertises_options_the_subject_accepts() {
+        use clap::CommandFactory;
+
+        let mut command = Cli::command();
+        let mut root_help = Vec::new();
+        command.write_long_help(&mut root_help).unwrap();
+        let root_help = String::from_utf8(root_help).unwrap();
+        assert!(root_help.contains("default: 2"));
+
+        let mut command = Cli::command();
+        let snapshot = command
+            .find_subcommand_mut("snapshot")
+            .expect("snapshot subcommand");
+        let mut snapshot_help = Vec::new();
+        snapshot.write_long_help(&mut snapshot_help).unwrap();
+        let snapshot_help = String::from_utf8(snapshot_help).unwrap();
+        assert!(!snapshot_help.contains("--interval"));
+        assert!(!snapshot_help.contains("--plain"));
+        assert!(!snapshot_help.contains("--dwell"));
+        assert!(!snapshot_help.contains("--history"));
+
+        let mut command = Cli::command();
+        let peers = command
+            .find_subcommand_mut("peers")
+            .expect("peers subcommand");
+        let mut peers_help = Vec::new();
+        peers.write_long_help(&mut peers_help).unwrap();
+        let peers_help = String::from_utf8(peers_help).unwrap();
+        assert!(peers_help.contains("--interval"));
+        assert!(peers_help.contains("default: 2"));
+        assert!(peers_help.contains("--plain"));
+        assert!(peers_help.contains("--dwell"));
+        assert!(!peers_help.contains("--history"));
+
+        let mut command = Cli::command();
+        let screenshot = command
+            .find_subcommand_mut("screenshot")
+            .expect("screenshot subcommand");
+        let mut screenshot_help = Vec::new();
+        screenshot.write_long_help(&mut screenshot_help).unwrap();
+        let screenshot_help = String::from_utf8(screenshot_help).unwrap();
+        assert!(screenshot_help.contains("--interval"));
+        assert!(screenshot_help.contains("default: 2"));
+        assert!(!screenshot_help.contains("--plain"));
+        assert!(!screenshot_help.contains("--dwell"));
+        assert!(!screenshot_help.contains("--history"));
     }
 
     #[test]
@@ -1251,8 +1385,26 @@ mod cli_tests {
 
     #[test]
     fn transactional_commands_reject_live_lifetimes() {
-        assert!(reject_live_options("snapshot", true, Some(Duration::from_secs(2))).is_err());
-        assert!(reject_live_options("speed", false, Some(Duration::from_secs(2))).is_err());
+        assert!(
+            reject_live_options(
+                "snapshot",
+                &LiveOptions {
+                    interval: Some(2),
+                    ..LiveOptions::default()
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            reject_live_options(
+                "speed",
+                &LiveOptions {
+                    dwell: Some(2),
+                    ..LiveOptions::default()
+                }
+            )
+            .is_err()
+        );
         assert!(
             reject_history(
                 "screenshot",
