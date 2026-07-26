@@ -67,7 +67,22 @@ fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, can_navigate: b
         .split(vertical[3]);
     if !app.probe_policy().is_active() {
         render_overview_evidence(frame, main[0], app);
-        render_events(frame, main[1], app);
+        if area.height < 28 {
+            render_events(frame, main[1], app);
+            render_footer(frame, vertical[4], app, MonitorMode::Overview, can_navigate);
+            return;
+        }
+        let dwell_height = if main[1].height >= 14 {
+            11
+        } else {
+            main[1].height.saturating_sub(2).max(1)
+        };
+        let context = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(dwell_height), Constraint::Min(2)])
+            .split(main[1]);
+        render_path_dwell(frame, context[0], app);
+        render_events(frame, context[1], app);
         render_footer(frame, vertical[4], app, MonitorMode::Overview, can_navigate);
         return;
     }
@@ -83,7 +98,11 @@ fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, can_navigate: b
     render_latency(frame, left[0], app);
     render_events(frame, left[1], app);
     render_probes(frame, right[0], app);
-    render_scope(frame, right[1], app);
+    if area.height >= 28 {
+        render_active_path_dwell(frame, right[1], app);
+    } else {
+        render_scope(frame, right[1], app);
+    }
     render_footer(frame, vertical[4], app, MonitorMode::Overview, can_navigate);
 }
 
@@ -1161,6 +1180,284 @@ fn render_events(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+fn render_path_dwell(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let dwell = &app.path_dwell;
+    let interface = &dwell.interface;
+    let radio = &dwell.wifi;
+    let workload = &dwell.workload;
+    let peers = app.peer_dwell_summary();
+    let value_width = usize::from(area.width.saturating_sub(14));
+    let current_rate = interface.current_rate.as_ref().map_or_else(
+        || "unavailable".into(),
+        |rate| {
+            format!(
+                "rx {} / tx {}",
+                crate::speed::human_rate(Some(rate.received_bits_per_second)),
+                crate::speed::human_rate(Some(rate.transmitted_bits_per_second))
+            )
+        },
+    );
+    let peak_rate = match (
+        interface.peak_received_bits_per_second,
+        interface.peak_transmitted_bits_per_second,
+    ) {
+        (Some(received), Some(transmitted)) => format!(
+            "rx {} / tx {}",
+            crate::speed::human_rate(Some(received)),
+            crate::speed::human_rate(Some(transmitted))
+        ),
+        _ => "unavailable".into(),
+    };
+    let radio_signal = match (
+        radio.latest_signal_dbm,
+        radio.worst_signal_dbm,
+        radio.latest_signal_percent,
+        radio.worst_signal_percent,
+    ) {
+        (Some(latest), Some(worst), _, _) => {
+            format!("RSSI latest {latest:.0}, worst {worst:.0} dBm")
+        }
+        (_, _, Some(latest), Some(worst)) => {
+            format!("signal latest {latest:.0}%, worst {worst:.0}%")
+        }
+        _ => "signal unavailable".into(),
+    };
+    let process_windows = dwell_process_windows(workload);
+    let lines = vec![
+        dwell_line(
+            "window",
+            format!(
+                "generation {} / {} / bounded in-memory evidence",
+                app.path_generation,
+                format_duration(app.uptime().saturating_sub(app.path_observed_since))
+            ),
+            value_width,
+        ),
+        dwell_line(
+            "interface",
+            format!(
+                "n={} valid={} reset={} errors=+{} drops=+{}",
+                interface.samples,
+                interface.valid_intervals,
+                interface.counter_resets,
+                interface.error_delta,
+                interface.drop_delta
+            ),
+            value_width,
+        ),
+        dwell_line(
+            "deltas",
+            format!(
+                "bytes rx={} tx={} / packets rx={} tx={}",
+                human_bytes(interface.received_bytes_delta),
+                human_bytes(interface.transmitted_bytes_delta),
+                interface.received_packets_delta,
+                interface.transmitted_packets_delta
+            ),
+            value_width,
+        ),
+        dwell_line("latest rate", current_rate, value_width),
+        dwell_line("peak rate", peak_rate, value_width),
+        dwell_line(
+            "radio",
+            format!(
+                "n={} / ch {} Δ{} / {radio_signal}",
+                radio.samples,
+                radio
+                    .latest_channel
+                    .map(|channel| channel.to_string())
+                    .unwrap_or_else(|| "unavailable".into()),
+                radio.channel_changes
+            ),
+            value_width,
+        ),
+        dwell_line(
+            "neighbors",
+            format!(
+                "cached={} observed={} changed={} absent={} ≠ liveness",
+                peers.current, peers.observed, peers.changed, peers.disappeared
+            ),
+            value_width,
+        ),
+        dwell_line(
+            "workload",
+            format!(
+                "n={} span={}; sampled windows ≠ session traffic",
+                workload.sampled_windows,
+                format_duration(workload.observed)
+            ),
+            value_width,
+        ),
+        dwell_line("processes", process_windows, value_width),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).block(instrument_block(" SINCE PATH CHANGE ")),
+        area,
+    );
+}
+
+fn render_active_path_dwell(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let interface = &app.path_dwell.interface;
+    let wifi = &app.path_dwell.wifi;
+    let workload = &app.path_dwell.workload;
+    let peers = app.peer_dwell_summary();
+    let value_width = usize::from(area.width.saturating_sub(13));
+    let rate = interface.current_rate.as_ref().map_or_else(
+        || "latest unavailable".into(),
+        |current| {
+            format!(
+                "latest rx {} tx {}",
+                dwell_rate(current.received_bits_per_second),
+                dwell_rate(current.transmitted_bits_per_second)
+            )
+        },
+    );
+    let peak = match (
+        interface.peak_received_bits_per_second,
+        interface.peak_transmitted_bits_per_second,
+    ) {
+        (Some(received), Some(transmitted)) => format!(
+            "peak rx {} tx {}",
+            dwell_rate(received),
+            dwell_rate(transmitted)
+        ),
+        _ => "peak unavailable".into(),
+    };
+    let radio = match (wifi.latest_signal_dbm, wifi.worst_signal_dbm) {
+        (Some(latest), Some(worst)) => format!(
+            "n={} RSSI latest {latest:.0} worst {worst:.0} dBm ch {} Δ{}",
+            wifi.samples,
+            wifi.latest_channel
+                .map(|channel| channel.to_string())
+                .unwrap_or_else(|| "unavailable".into()),
+            wifi.channel_changes
+        ),
+        _ => format!(
+            "n={} signal unavailable ch {} Δ{}",
+            wifi.samples,
+            wifi.latest_channel
+                .map(|channel| channel.to_string())
+                .unwrap_or_else(|| "unavailable".into()),
+            wifi.channel_changes
+        ),
+    };
+    let lines = vec![
+        dwell_line(
+            "interface",
+            format!(
+                "n={} valid={} · {rate} · {peak}",
+                interface.samples, interface.valid_intervals
+            ),
+            value_width,
+        ),
+        dwell_line(
+            "deltas",
+            format!(
+                "rx {} tx {} · errors +{} drops +{} reset {}",
+                human_bytes(interface.received_bytes_delta),
+                human_bytes(interface.transmitted_bytes_delta),
+                interface.error_delta,
+                interface.drop_delta,
+                interface.counter_resets
+            ),
+            value_width,
+        ),
+        dwell_line("radio", radio, value_width),
+        dwell_line(
+            "workload",
+            format!(
+                "n={} span={} · {}",
+                workload.sampled_windows,
+                format_duration(workload.observed),
+                dwell_process_windows(workload)
+            ),
+            value_width,
+        ),
+        dwell_line(
+            "neighbors",
+            format!(
+                "cached={} observed={} changed={} absent={} ≠ liveness",
+                peers.current, peers.observed, peers.changed, peers.disappeared
+            ),
+            value_width,
+        ),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).block(instrument_block(&format!(
+            " PATH DWELL / PASSIVE SOURCES / GENERATION {} ",
+            app.path_generation
+        ))),
+        area,
+    );
+}
+
+fn dwell_process_windows(workload: &crate::model::WorkloadDwell) -> String {
+    if workload.sampled_windows == 0 {
+        return "not sampled; no successful workload window".into();
+    }
+    let latest = workload
+        .latest_window_top
+        .as_ref()
+        .map_or_else(|| "none attributed".into(), sampled_process);
+    let peak = workload
+        .peak_window_top
+        .as_ref()
+        .map_or_else(|| "none attributed".into(), sampled_process);
+    if workload.latest_window_top == workload.peak_window_top {
+        format!("latest=peak {latest}")
+    } else {
+        format!("latest {latest} / peak {peak}")
+    }
+}
+
+fn dwell_line(label: &'static str, value: String, value_width: usize) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label:<11} "), Style::default().fg(MUTED)),
+        Span::styled(fit(&value, value_width), Style::default().fg(INK)),
+    ])
+}
+
+fn sampled_process(process: &crate::model::ProcessTraffic) -> String {
+    format!(
+        "{}{} {}",
+        process.process,
+        if process.processes > 1 {
+            format!("×{}", process.processes)
+        } else {
+            String::new()
+        },
+        dwell_rate(
+            process
+                .received_bytes_per_second
+                .saturating_add(process.transmitted_bytes_per_second) as f64
+                * 8.0
+        )
+    )
+}
+
+fn dwell_rate(bits_per_second: f64) -> String {
+    if bits_per_second < 1_000.0 {
+        format!("{bits_per_second:.0}bit/s")
+    } else if bits_per_second < 1_000_000.0 {
+        format!("{:.1}Kbit/s", bits_per_second / 1_000.0)
+    } else if bits_per_second < 1_000_000_000.0 {
+        format!("{:.1}Mbit/s", bits_per_second / 1_000_000.0)
+    } else {
+        format!("{:.1}Gbit/s", bits_per_second / 1_000_000_000.0)
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    let mut value = bytes as f64;
+    for unit in ["B", "KB", "MB", "GB", "TB"] {
+        if value < 1_000.0 || unit == "TB" {
+            return format!("{value:.1} {unit}");
+        }
+        value /= 1_000.0;
+    }
+    unreachable!()
 }
 
 fn render_addresses(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -2792,8 +3089,8 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        Address, HistoryContext, LinkSnapshot, MonitorUpdate, ProbeKind, ProbePolicy, ProbeResult,
-        ProcessTraffic, WorkloadSnapshot,
+        Address, HistoryContext, InterfaceCounters, LinkSnapshot, MonitorUpdate, ProbeKind,
+        ProbePolicy, ProbeResult, ProcessTraffic, WifiTelemetry, WorkloadSnapshot,
     };
 
     #[test]
@@ -2880,6 +3177,7 @@ mod tests {
         assert!(rendered.contains("EVIDENCE LEDGER"));
         assert!(rendered.contains("neighbor cache pending"));
         assert!(rendered.contains("SESSION EVENTS"));
+        assert!(!rendered.contains("SINCE PATH CHANGE"));
         assert!(!rendered.contains("ACTIVE PROBES / OFF"));
         assert!(!rendered.contains("EVIDENCE / ACTIVITY BOUNDARY"));
         assert!(!rendered.contains("LOCAL ADDRESSES"));
@@ -3079,6 +3377,185 @@ mod tests {
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("cache 30/30"));
         assert!(!rendered.contains("192.168.1.1"));
+    }
+
+    #[test]
+    fn wide_passive_overview_tells_the_path_scoped_dwell_story() {
+        let app = dwell_overview_fixture();
+        let backend = TestBackend::new(160, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+
+        assert!(rendered.contains("SINCE PATH CHANGE"));
+        assert!(rendered.contains("generation 1"));
+        assert!(rendered.contains("n=2 valid=1 reset=0"));
+        assert!(rendered.contains("bytes rx=1.0 KB tx=2.0 KB"));
+        assert!(rendered.contains("latest rate"));
+        assert!(rendered.contains("peak rate"));
+        assert!(rendered.contains("RSSI latest -72, worst -72 dBm"));
+        assert!(rendered.contains("ch 44 Δ1"), "{rendered}");
+        assert!(rendered.contains("n=2 span=00:02"));
+        assert!(rendered.contains("sampled windows ≠ session traffic"));
+        assert!(rendered.contains("latest codex"));
+        assert!(rendered.contains("peak browser"));
+        assert!(rendered.contains("≠ liveness"));
+    }
+
+    #[test]
+    fn passive_dwell_panel_appears_only_when_the_boundary_layout_can_fit_it() {
+        let app = dwell_overview_fixture();
+        for height in [25, 26, 27] {
+            let backend = TestBackend::new(120, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+                .unwrap();
+            let rendered = buffer_text(terminal.backend());
+            assert!(rendered.contains("DIAGNOSIS"), "{height}\n{rendered}");
+            assert!(rendered.contains("EVIDENCE LEDGER"), "{height}\n{rendered}");
+            assert!(rendered.contains("SESSION EVENTS"), "{height}\n{rendered}");
+            assert!(
+                !rendered.contains("SINCE PATH CHANGE"),
+                "{height}\n{rendered}"
+            );
+            assert!(!rendered.contains("latest rate"), "{height}\n{rendered}");
+        }
+
+        let backend = TestBackend::new(120, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+        assert!(rendered.contains("SINCE PATH CHANGE"), "{rendered}");
+        assert!(rendered.contains("processes"), "{rendered}");
+        assert!(rendered.contains("SESSION EVENTS"), "{rendered}");
+    }
+
+    #[test]
+    fn fresh_workload_dwell_is_not_presented_as_latest_equals_peak() {
+        let app = App::new();
+        let backend = TestBackend::new(160, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+
+        assert!(rendered.contains("not sampled; no successful workload window"));
+        assert!(!rendered.contains("latest=peak none"));
+    }
+
+    #[test]
+    fn wide_active_overview_keeps_causal_probes_and_passive_path_dwell() {
+        let mut app = dwell_overview_fixture();
+        app.set_probe_policy(ProbePolicy::Active);
+        app.apply(MonitorUpdate::ProbeFinished {
+            generation: 1,
+            kind: ProbeKind::Gateway,
+            result: ProbeResult {
+                health: Health::Ok,
+                detail: "gateway replied".into(),
+                latency_ms: Some(4.0),
+                metrics: None,
+            },
+        });
+        let backend = TestBackend::new(160, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+
+        assert!(rendered.contains("NEXT-HOP RTT"), "{rendered}");
+        assert!(rendered.contains("ACTIVE PROBES"), "{rendered}");
+        assert!(rendered.contains("next-hop RTT"), "{rendered}");
+        assert!(
+            rendered.contains("PATH DWELL / PASSIVE SOURCES"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("interface"), "{rendered}");
+        assert!(rendered.contains("workload"), "{rendered}");
+        assert!(rendered.contains("neighbors"), "{rendered}");
+    }
+
+    #[test]
+    fn active_boundary_layout_defers_dwell_until_all_compact_rows_fit() {
+        let mut app = dwell_overview_fixture();
+        app.set_probe_policy(ProbePolicy::Active);
+        for height in [25, 26, 27] {
+            let backend = TestBackend::new(120, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+                .unwrap();
+            let rendered = buffer_text(terminal.backend());
+            assert!(rendered.contains("ACTIVE PROBES"), "{height}\n{rendered}");
+            assert!(
+                rendered.contains("EVIDENCE / ACTIVITY BOUNDARY"),
+                "{height}\n{rendered}"
+            );
+            assert!(
+                !rendered.contains("PATH DWELL / PASSIVE SOURCES"),
+                "{height}\n{rendered}"
+            );
+        }
+
+        let backend = TestBackend::new(120, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+        assert!(rendered.contains("ACTIVE PROBES"), "{rendered}");
+        assert!(
+            rendered.contains("PATH DWELL / PASSIVE SOURCES"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("neighbors"), "{rendered}");
+    }
+
+    #[test]
+    fn normal_overview_keeps_operator_priority_without_dwell_detail() {
+        let app = dwell_overview_fixture();
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+
+        assert!(rendered.contains("DIAGNOSIS"));
+        assert!(rendered.contains("workstation ──▶ en0"));
+        assert!(rendered.contains("coverage"));
+        assert!(rendered.contains("next:"));
+        assert!(!rendered.contains("SINCE PATH CHANGE"));
+        assert!(!rendered.contains("sampled windows ≠ session traffic"));
+    }
+
+    #[test]
+    fn tight_overview_keeps_diagnosis_path_coverage_and_action_without_dwell_detail() {
+        let app = dwell_overview_fixture();
+        let backend = TestBackend::new(70, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+
+        assert!(
+            rendered.contains("local interface counters increased"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("path"));
+        assert!(rendered.contains("en0 [wifi / house]"));
+        assert!(rendered.contains("coverage"));
+        assert!(rendered.contains("next:"));
+        assert!(!rendered.contains("SINCE PATH CHANGE"));
+        assert!(!rendered.contains("latest rate"));
     }
 
     #[test]
@@ -3432,6 +3909,90 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn dwell_overview_fixture() -> App {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: LinkSnapshot {
+                host: "workstation".into(),
+                interface: Some("en0".into()),
+                link_type: Some("wifi".into()),
+                ssid: Some("house".into()),
+                gateway: Some("192.168.1.1".into()),
+                resolvers: vec!["192.168.1.1".into()],
+                ..LinkSnapshot::empty()
+            },
+        });
+        let counters =
+            |received_bytes, transmitted_bytes, received_packets, transmitted_packets| {
+                InterfaceCounters {
+                    interface: "en0".into(),
+                    received_bytes,
+                    transmitted_bytes,
+                    received_packets,
+                    transmitted_packets,
+                    receive_errors: u64::from(received_bytes > 1_000),
+                    transmit_errors: 0,
+                    drops: u64::from(received_bytes > 1_000),
+                }
+            };
+        app.apply(MonitorUpdate::Traffic {
+            generation: 1,
+            counters: Some(counters(1_000, 2_000, 10, 20)),
+        });
+        app.apply(MonitorUpdate::Traffic {
+            generation: 1,
+            counters: Some(counters(2_000, 4_000, 30, 60)),
+        });
+        for (signal, channel) in [(-55.0, 36), (-72.0, 44)] {
+            app.apply(MonitorUpdate::Wifi {
+                generation: 1,
+                ssid: None,
+                telemetry: Some(WifiTelemetry {
+                    signal_dbm: Some(signal),
+                    noise_dbm: Some(-90.0),
+                    signal_percent: None,
+                    channel: Some(channel),
+                    channel_width_mhz: Some(80),
+                    frequency_mhz: None,
+                    band: Some("5 GHz".into()),
+                    phy: Some("802.11ax".into()),
+                    tx_rate_mbps: Some(600.0),
+                    rx_rate_mbps: None,
+                    mcs: None,
+                }),
+            });
+        }
+        for (process, received, transmitted) in [("browser", 8_192, 4_096), ("codex", 4_096, 2_048)]
+        {
+            app.apply(MonitorUpdate::Workload {
+                generation: 1,
+                snapshot: WorkloadSnapshot {
+                    health: Health::Ok,
+                    detail: "sampled process window".into(),
+                    source: Some("nettop".into()),
+                    interval: Duration::from_secs(1),
+                    processes: vec![ProcessTraffic {
+                        process: process.into(),
+                        processes: 1,
+                        received_bytes_per_second: received,
+                        transmitted_bytes_per_second: transmitted,
+                    }],
+                },
+            });
+        }
+        let peers = peer_fixture(1);
+        app.apply(MonitorUpdate::Peers {
+            generation: 1,
+            snapshot: peers.clone(),
+        });
+        app.apply(MonitorUpdate::Peers {
+            generation: 1,
+            snapshot: peers,
+        });
+        app
     }
 
     fn buffer_text(backend: &TestBackend) -> String {

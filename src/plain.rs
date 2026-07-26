@@ -4,7 +4,9 @@ use std::time::Duration;
 use chrono::{Local, SecondsFormat};
 
 use crate::model::{
-    App, EvidenceCoverage, LinkSnapshot, MonitorUpdate, Peer, PeerSnapshot, ProbeKind, Situation,
+    App, DwellCollectorScope, DwellPathIdentity, EvidenceCoverage, LinkSnapshot,
+    MAX_COMPLETED_PATH_DWELLS, MonitorUpdate, PathDwell, Peer, PeerDwellSummary, PeerSnapshot,
+    ProbeKind, Situation,
 };
 
 #[derive(Debug, Clone)]
@@ -180,6 +182,209 @@ pub fn format_update(update: &MonitorUpdate, before: &PlainState, app: &App) -> 
         ));
     }
     lines
+}
+
+pub fn format_dwell_summary(app: &App, scope: DwellCollectorScope) -> Vec<String> {
+    let mut lines = vec![format!(
+        "LINKTOP DWELL SUMMARY  collector_scope={} completed_generations={}/{} [bounded process-local evidence]",
+        scope.label,
+        app.completed_path_dwells.len(),
+        MAX_COMPLETED_PATH_DWELLS
+    )];
+    for completed in &app.completed_path_dwells {
+        lines.extend(format_generation_dwell(
+            completed.generation,
+            "completed",
+            &completed.identity,
+            completed.observed,
+            &completed.dwell,
+            completed.peers,
+            scope,
+        ));
+    }
+    let identity = DwellPathIdentity::from_link(&app.link);
+    lines.extend(format_generation_dwell(
+        app.path_generation,
+        "current",
+        &identity,
+        app.uptime().saturating_sub(app.path_observed_since),
+        &app.path_dwell,
+        app.peer_dwell_summary(),
+        scope,
+    ));
+    lines
+}
+
+#[allow(clippy::too_many_arguments)]
+fn format_generation_dwell(
+    generation: u64,
+    state: &str,
+    identity: &DwellPathIdentity,
+    observed: Duration,
+    dwell: &PathDwell,
+    peers: PeerDwellSummary,
+    scope: DwellCollectorScope,
+) -> Vec<String> {
+    let interface = &dwell.interface;
+    let wifi = &dwell.wifi;
+    let workload = &dwell.workload;
+    let current_rate = interface.current_rate.as_ref().map_or_else(
+        || "unavailable".into(),
+        |rate| {
+            format!(
+                "rx={} tx={}",
+                crate::speed::human_rate(Some(rate.received_bits_per_second)),
+                crate::speed::human_rate(Some(rate.transmitted_bits_per_second))
+            )
+        },
+    );
+    let peak_rate = match (
+        interface.peak_received_bits_per_second,
+        interface.peak_transmitted_bits_per_second,
+    ) {
+        (Some(received), Some(transmitted)) => format!(
+            "rx={} tx={}",
+            crate::speed::human_rate(Some(received)),
+            crate::speed::human_rate(Some(transmitted))
+        ),
+        _ => "unavailable".into(),
+    };
+    let signal = match (
+        wifi.latest_signal_dbm,
+        wifi.worst_signal_dbm,
+        wifi.latest_signal_percent,
+        wifi.worst_signal_percent,
+    ) {
+        (Some(latest), Some(worst), _, _) => {
+            format!("latest={latest:.0}dBm worst={worst:.0}dBm")
+        }
+        (_, _, Some(latest), Some(worst)) => {
+            format!("latest={latest:.0}% worst={worst:.0}%")
+        }
+        _ => "latest=unavailable worst=unavailable".into(),
+    };
+    let (latest_process, peak_process) = if workload.sampled_windows == 0 {
+        ("not sampled".into(), "not sampled".into())
+    } else {
+        (
+            workload.latest_window_top.as_ref().map_or_else(
+                || "none attributed in latest sampled window".into(),
+                sampled_process,
+            ),
+            workload.peak_window_top.as_ref().map_or_else(
+                || "none attributed in sampled windows".into(),
+                sampled_process,
+            ),
+        )
+    };
+    let mut lines = vec![format!(
+        "SUMMARY SINCE PATH CHANGE  generation={generation} state={state} observed={} path=\"{}\" association={} resolvers={} address_boundaries={}",
+        compact_duration(observed),
+        identity.operator_label(),
+        identity.connection_id.as_deref().unwrap_or("unavailable"),
+        identity.resolvers.len(),
+        identity.address_boundaries.len()
+    )];
+    if scope.interface {
+        lines.extend([
+        format!(
+            "interface  samples={} valid_intervals={} counter_resets={} delta_bytes=rx:{} tx:{} delta_packets=rx:{} tx:{} errors=+{} drops=+{} [source: kernel interface counters]",
+            interface.samples,
+            interface.valid_intervals,
+            interface.counter_resets,
+            human_bytes(interface.received_bytes_delta),
+            human_bytes(interface.transmitted_bytes_delta),
+            interface.received_packets_delta,
+            interface.transmitted_packets_delta,
+            interface.error_delta,
+            interface.drop_delta
+        ),
+        format!("rates      latest={current_rate} peak={peak_rate} [valid counter intervals only]"),
+        ]);
+    } else {
+        lines.push(format!(
+            "interface  not collected [collector scope: {}]",
+            scope.label
+        ));
+    }
+    if scope.wifi {
+        lines.push(
+        format!(
+            "radio      samples={} {signal} channel={} observed_channel_changes={} [source: platform link telemetry]",
+            wifi.samples,
+            wifi.latest_channel
+                .map(|channel| channel.to_string())
+                .unwrap_or_else(|| "unavailable".into()),
+            wifi.channel_changes
+        ),
+        );
+    } else {
+        lines.push(format!(
+            "radio      not collected [collector scope: {}]",
+            scope.label
+        ));
+    }
+    if scope.workload {
+        lines.push(
+        format!(
+            "workload   sampled_windows={} observed={} latest_window_top={latest_process} peak_window_top={peak_process} [sampled host process-accounting windows; not session traffic share]",
+            workload.sampled_windows,
+            compact_duration(workload.observed)
+        ),
+        );
+    } else {
+        lines.push(format!(
+            "workload   not collected [collector scope: {}]",
+            scope.label
+        ));
+    }
+    if scope.peers {
+        lines.push(
+        format!(
+            "neighbors  cached={} observed={} changed={} absent_from_latest_complete_cache={} [native cache evidence; not liveness, identity, activity, or traffic]",
+            peers.current, peers.observed, peers.changed, peers.disappeared
+        ));
+    } else {
+        lines.push(format!(
+            "neighbors  not collected [collector scope: {}]",
+            scope.label
+        ));
+    }
+    lines
+}
+
+fn compact_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    }
+}
+
+fn sampled_process(process: &crate::model::ProcessTraffic) -> String {
+    format!(
+        "{}{} rx={} tx={}",
+        process.process,
+        if process.processes > 1 {
+            format!("×{}", process.processes)
+        } else {
+            String::new()
+        },
+        crate::speed::human_rate(Some(process.received_bytes_per_second as f64 * 8.0)),
+        crate::speed::human_rate(Some(process.transmitted_bytes_per_second as f64 * 8.0))
+    )
+}
+
+fn human_bytes(bytes: u64) -> String {
+    let mut value = bytes as f64;
+    for unit in ["B", "KB", "MB", "GB", "TB"] {
+        if value < 1_000.0 || unit == "TB" {
+            return format!("{value:.1}{unit}");
+        }
+        value /= 1_000.0;
+    }
+    unreachable!()
 }
 
 fn path_changed(before: &LinkSnapshot, after: &LinkSnapshot) -> bool {
@@ -386,7 +591,10 @@ pub(crate) fn format_elapsed(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Health, ProbePolicy, ProbeResult, ProcessTraffic, WorkloadSnapshot};
+    use crate::model::{
+        Health, InterfaceDwell, InterfaceRate, MonitorMode, ProbePolicy, ProbeResult,
+        ProcessTraffic, WifiDwell, WorkloadDwell, WorkloadSnapshot,
+    };
 
     #[test]
     fn live_probe_line_is_append_only_plain_text() {
@@ -446,6 +654,182 @@ mod tests {
         assert!(rendered.contains("rx=32.77 Kbit/s"));
         assert!(rendered.contains("window: 1s"));
         assert!(rendered.contains("source: nettop external-interface deltas"));
+    }
+
+    #[test]
+    fn dwell_final_summary_uses_bounded_generation_scoped_evidence() {
+        let mut app = App::new();
+        app.path_generation = 7;
+        app.path_dwell.interface = InterfaceDwell {
+            samples: 3,
+            valid_intervals: 2,
+            received_bytes_delta: 12_000,
+            transmitted_bytes_delta: 4_000,
+            received_packets_delta: 120,
+            transmitted_packets_delta: 40,
+            current_rate: Some(InterfaceRate {
+                received_bits_per_second: 32_000.0,
+                transmitted_bits_per_second: 8_000.0,
+                received_packets_per_second: 10.0,
+                transmitted_packets_per_second: 4.0,
+                error_delta: 1,
+                drop_delta: 2,
+            }),
+            peak_received_bits_per_second: Some(64_000.0),
+            peak_transmitted_bits_per_second: Some(16_000.0),
+            error_delta: 1,
+            drop_delta: 2,
+            counter_resets: 1,
+        };
+        app.path_dwell.wifi = WifiDwell {
+            samples: 4,
+            latest_signal_dbm: Some(-63.0),
+            worst_signal_dbm: Some(-78.0),
+            latest_channel: Some(44),
+            channel_changes: 2,
+            ..WifiDwell::default()
+        };
+        app.path_dwell.workload = WorkloadDwell {
+            sampled_windows: 2,
+            observed: Duration::from_secs(2),
+            latest_window_top: Some(ProcessTraffic {
+                process: "codex".into(),
+                processes: 2,
+                received_bytes_per_second: 4_096,
+                transmitted_bytes_per_second: 2_048,
+            }),
+            peak_window_top: Some(ProcessTraffic {
+                process: "browser".into(),
+                processes: 1,
+                received_bytes_per_second: 8_192,
+                transmitted_bytes_per_second: 4_096,
+            }),
+        };
+        let peers = PeerSnapshot {
+            health: Health::Ok,
+            detail: "1 cached peer".into(),
+            sources: vec!["arp -an".into()],
+            failed_sources: Vec::new(),
+            oui_source: None,
+            peers: vec![Peer {
+                address: "192.168.1.9".into(),
+                mac: Some("aa:bb:cc:dd:ee:ff".into()),
+                interface: Some("en0".into()),
+                state: Some("STALE".into()),
+                binding_conflict: false,
+                mac_scope: Some(crate::model::MacScope::Universal),
+                registrant: Some("Example Networks".into()),
+            }],
+        };
+        app.apply(MonitorUpdate::Peers {
+            generation: 7,
+            snapshot: peers.clone(),
+        });
+        app.apply(MonitorUpdate::Peers {
+            generation: 7,
+            snapshot: peers,
+        });
+
+        let rendered =
+            format_dwell_summary(&app, MonitorMode::Overview.dwell_collector_scope()).join("\n");
+        assert!(rendered.starts_with("LINKTOP DWELL SUMMARY"));
+        assert!(rendered.contains("SUMMARY SINCE PATH CHANGE"));
+        assert!(rendered.contains("generation=7"));
+        assert!(rendered.contains("samples=3 valid_intervals=2 counter_resets=1"));
+        assert!(rendered.contains("delta_bytes=rx:12.0KB tx:4.0KB"));
+        assert!(rendered.contains("latest=rx=32.00 Kbit/s tx=8.00 Kbit/s"));
+        assert!(rendered.contains("peak=rx=64.00 Kbit/s tx=16.00 Kbit/s"));
+        assert!(rendered.contains("latest=-63dBm worst=-78dBm"));
+        assert!(rendered.contains("observed_channel_changes=2"));
+        assert!(rendered.contains("sampled_windows=2 observed=2s"));
+        assert!(rendered.contains("latest_window_top=codex×2"));
+        assert!(rendered.contains("peak_window_top=browser"));
+        assert!(rendered.contains("not session traffic share"));
+        assert!(rendered.contains("native cache evidence; not liveness"));
+        assert!(!rendered.contains("location"));
+        assert!(!rendered.contains("device traffic"));
+    }
+
+    #[test]
+    fn empty_dwell_final_summary_reports_missing_windows_instead_of_zero_activity() {
+        let app = App::new();
+        let rendered =
+            format_dwell_summary(&app, MonitorMode::Overview.dwell_collector_scope()).join("\n");
+
+        assert!(rendered.contains("samples=0 valid_intervals=0"));
+        assert!(rendered.contains("latest=unavailable peak=unavailable"));
+        assert!(rendered.contains("latest=unavailable worst=unavailable"));
+        assert!(rendered.contains("sampled_windows=0 observed=0s"));
+        assert!(rendered.contains("latest_window_top=not sampled"));
+        assert!(rendered.contains("peak_window_top=not sampled"));
+        assert!(!rendered.contains("latest=peak"));
+        assert!(!rendered.contains("no traffic"));
+        assert!(!rendered.contains("inactive"));
+    }
+
+    #[test]
+    fn dwell_final_summary_reports_completed_and_current_path_generations() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: LinkSnapshot {
+                host: "workstation".into(),
+                interface: Some("en0".into()),
+                link_type: Some("wifi".into()),
+                ssid: Some("house".into()),
+                gateway: Some("192.168.1.1".into()),
+                resolvers: vec!["192.168.1.1".into()],
+                ..LinkSnapshot::empty()
+            },
+        });
+        app.path_dwell.interface.samples = 3;
+        app.path_dwell.workload.sampled_windows = 1;
+        app.path_dwell.workload.observed = Duration::from_secs(1);
+        app.apply(MonitorUpdate::Link {
+            generation: 2,
+            snapshot: LinkSnapshot {
+                host: "workstation".into(),
+                interface: Some("en0".into()),
+                link_type: Some("wifi".into()),
+                ssid: Some("hotspot".into()),
+                gateway: Some("172.20.10.1".into()),
+                resolvers: vec!["172.20.10.1".into()],
+                ..LinkSnapshot::empty()
+            },
+        });
+        app.path_dwell.interface.samples = 2;
+
+        let rendered =
+            format_dwell_summary(&app, MonitorMode::Overview.dwell_collector_scope()).join("\n");
+
+        assert!(rendered.contains("completed_generations=1/8"));
+        assert!(rendered.contains("generation=1 state=completed"));
+        assert!(rendered.contains("[wifi / house]"));
+        assert!(rendered.contains("generation=2 state=current"));
+        assert!(rendered.contains("[wifi / hotspot]"));
+        assert_eq!(rendered.matches("SUMMARY SINCE PATH CHANGE").count(), 2);
+        assert!(rendered.contains("samples=3"));
+        assert!(rendered.contains("samples=2"));
+    }
+
+    #[test]
+    fn focused_mode_dwell_summaries_name_collectors_that_were_not_run() {
+        let app = App::new();
+        let link = format_dwell_summary(&app, MonitorMode::Link.dwell_collector_scope()).join("\n");
+        assert!(link.contains("collector_scope=link"));
+        assert!(link.contains("interface  samples=0"));
+        assert!(link.contains("radio      samples=0"));
+        assert!(link.contains("workload   not collected [collector scope: link]"));
+        assert!(link.contains("neighbors  not collected [collector scope: link]"));
+
+        let peers =
+            format_dwell_summary(&app, MonitorMode::Peers.dwell_collector_scope()).join("\n");
+        assert!(peers.contains("collector_scope=peers"));
+        assert!(peers.contains("interface  not collected [collector scope: peers]"));
+        assert!(peers.contains("radio      not collected [collector scope: peers]"));
+        assert!(peers.contains("workload   not collected [collector scope: peers]"));
+        assert!(peers.contains("neighbors  cached=0 observed=0"));
+        assert!(!peers.contains("interface  samples=0"));
     }
 
     #[test]

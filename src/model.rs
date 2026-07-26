@@ -11,6 +11,7 @@ pub const MAX_GATEWAY_SAMPLES: usize = 90;
 pub const GATEWAY_ASSESSMENT_WINDOW: usize = 20;
 pub const MIN_GATEWAY_ASSESSMENT_SAMPLES: usize = 5;
 pub const MAX_EVENTS: usize = 64;
+pub const MAX_COMPLETED_PATH_DWELLS: usize = 8;
 pub const MAX_PATH_PROBE_EVIDENCE_AGE: Duration = Duration::from_secs(75);
 pub const MAX_PUBLIC_EGRESS_EVIDENCE_AGE: Duration = Duration::from_secs(300);
 
@@ -150,6 +151,106 @@ pub struct InterfaceRate {
     pub drop_delta: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct InterfaceDwell {
+    pub samples: u64,
+    pub valid_intervals: u64,
+    pub received_bytes_delta: u64,
+    pub transmitted_bytes_delta: u64,
+    pub received_packets_delta: u64,
+    pub transmitted_packets_delta: u64,
+    pub current_rate: Option<InterfaceRate>,
+    pub peak_received_bits_per_second: Option<f64>,
+    pub peak_transmitted_bits_per_second: Option<f64>,
+    pub error_delta: u64,
+    pub drop_delta: u64,
+    pub counter_resets: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WifiDwell {
+    pub samples: u64,
+    pub latest_signal_dbm: Option<f64>,
+    pub worst_signal_dbm: Option<f64>,
+    pub latest_signal_percent: Option<f64>,
+    pub worst_signal_percent: Option<f64>,
+    pub latest_channel: Option<u32>,
+    pub channel_changes: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WorkloadDwell {
+    pub sampled_windows: u64,
+    pub observed: Duration,
+    pub latest_window_top: Option<ProcessTraffic>,
+    pub peak_window_top: Option<ProcessTraffic>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PathDwell {
+    pub interface: InterfaceDwell,
+    pub wifi: WifiDwell,
+    pub workload: WorkloadDwell,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DwellPathIdentity {
+    pub host: String,
+    pub interface: Option<String>,
+    pub link_type: Option<String>,
+    pub ssid: Option<String>,
+    pub ssid_restricted: bool,
+    pub connection_id: Option<String>,
+    pub gateway: Option<String>,
+    pub resolvers: Vec<String>,
+    pub address_boundaries: Vec<(String, String)>,
+}
+
+impl DwellPathIdentity {
+    pub fn from_link(link: &LinkSnapshot) -> Self {
+        let fingerprint = link.path_fingerprint();
+        Self {
+            host: link.host.clone(),
+            interface: fingerprint.interface,
+            link_type: fingerprint.link_type,
+            ssid: fingerprint.ssid,
+            ssid_restricted: fingerprint.ssid_restricted,
+            connection_id: fingerprint.connection_id,
+            gateway: fingerprint.gateway,
+            resolvers: fingerprint.resolvers,
+            address_boundaries: fingerprint.addresses,
+        }
+    }
+
+    pub fn operator_label(&self) -> String {
+        let interface = self.interface.as_deref().unwrap_or("no default interface");
+        let link_type = self.link_type.as_deref().unwrap_or("unknown link");
+        let network = self
+            .ssid
+            .as_deref()
+            .map(str::to_owned)
+            .or_else(|| {
+                self.ssid_restricted
+                    .then(|| "SSID hidden by platform".into())
+            })
+            .unwrap_or_else(|| "network identity unavailable".into());
+        let gateway = self.gateway.as_deref().unwrap_or("no gateway");
+        format!(
+            "{} → {interface} [{link_type} / {network}] → {gateway}",
+            self.host
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CompletedPathDwell {
+    pub generation: u64,
+    pub identity: DwellPathIdentity,
+    pub observed: Duration,
+    pub dwell: PathDwell,
+    pub peers: PeerDwellSummary,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NetworkConfiguration {
     pub connection_id: Option<String>,
@@ -193,6 +294,109 @@ impl WorkloadSnapshot {
             processes: Vec::new(),
         }
     }
+}
+
+impl PathDwell {
+    fn observe_interface(
+        &mut self,
+        counters: Option<&InterfaceCounters>,
+        interval: Option<&InterfaceInterval>,
+        counter_reset: bool,
+    ) {
+        let interface = &mut self.interface;
+        interface.current_rate = interval.map(|interval| interval.rate.clone());
+        if counters.is_none() {
+            return;
+        }
+        interface.samples = interface.samples.saturating_add(1);
+        if counter_reset {
+            interface.counter_resets = interface.counter_resets.saturating_add(1);
+        }
+        let Some(interval) = interval else {
+            return;
+        };
+        interface.valid_intervals = interface.valid_intervals.saturating_add(1);
+        interface.received_bytes_delta = interface
+            .received_bytes_delta
+            .saturating_add(interval.received_bytes);
+        interface.transmitted_bytes_delta = interface
+            .transmitted_bytes_delta
+            .saturating_add(interval.transmitted_bytes);
+        interface.received_packets_delta = interface
+            .received_packets_delta
+            .saturating_add(interval.received_packets);
+        interface.transmitted_packets_delta = interface
+            .transmitted_packets_delta
+            .saturating_add(interval.transmitted_packets);
+        interface.error_delta = interface
+            .error_delta
+            .saturating_add(interval.rate.error_delta);
+        interface.drop_delta = interface
+            .drop_delta
+            .saturating_add(interval.rate.drop_delta);
+        interface.peak_received_bits_per_second = Some(
+            interface
+                .peak_received_bits_per_second
+                .unwrap_or_default()
+                .max(interval.rate.received_bits_per_second),
+        );
+        interface.peak_transmitted_bits_per_second = Some(
+            interface
+                .peak_transmitted_bits_per_second
+                .unwrap_or_default()
+                .max(interval.rate.transmitted_bits_per_second),
+        );
+    }
+
+    fn observe_wifi(&mut self, telemetry: &WifiTelemetry) {
+        let wifi = &mut self.wifi;
+        wifi.samples = wifi.samples.saturating_add(1);
+        if let Some(signal) = telemetry.signal_dbm {
+            wifi.latest_signal_dbm = Some(signal);
+            wifi.worst_signal_dbm =
+                Some(wifi.worst_signal_dbm.map_or(signal, |old| old.min(signal)));
+        }
+        if let Some(signal) = telemetry.signal_percent {
+            wifi.latest_signal_percent = Some(signal);
+            wifi.worst_signal_percent = Some(
+                wifi.worst_signal_percent
+                    .map_or(signal, |old| old.min(signal)),
+            );
+        }
+        if let Some(channel) = telemetry.channel {
+            if wifi
+                .latest_channel
+                .is_some_and(|previous| previous != channel)
+            {
+                wifi.channel_changes = wifi.channel_changes.saturating_add(1);
+            }
+            wifi.latest_channel = Some(channel);
+        }
+    }
+
+    fn observe_workload(&mut self, snapshot: &WorkloadSnapshot) {
+        if snapshot.health != Health::Ok {
+            return;
+        }
+        let workload = &mut self.workload;
+        workload.sampled_windows = workload.sampled_windows.saturating_add(1);
+        workload.observed = workload.observed.saturating_add(snapshot.interval);
+        workload.latest_window_top = snapshot.processes.first().cloned();
+        if let Some(top) = snapshot.processes.first()
+            && workload
+                .peak_window_top
+                .as_ref()
+                .is_none_or(|peak| process_rate(top) > process_rate(peak))
+        {
+            workload.peak_window_top = Some(top.clone());
+        }
+    }
+}
+
+fn process_rate(process: &ProcessTraffic) -> u64 {
+    process
+        .received_bytes_per_second
+        .saturating_add(process.transmitted_bytes_per_second)
 }
 
 #[derive(Debug, Clone)]
@@ -625,6 +829,43 @@ pub enum MonitorMode {
     Peers,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DwellCollectorScope {
+    pub label: &'static str,
+    pub interface: bool,
+    pub wifi: bool,
+    pub workload: bool,
+    pub peers: bool,
+}
+
+impl MonitorMode {
+    pub const fn dwell_collector_scope(self) -> DwellCollectorScope {
+        match self {
+            Self::Overview => DwellCollectorScope {
+                label: "overview",
+                interface: true,
+                wifi: true,
+                workload: true,
+                peers: true,
+            },
+            Self::Link => DwellCollectorScope {
+                label: "link",
+                interface: true,
+                wifi: true,
+                workload: false,
+                peers: false,
+            },
+            Self::Peers => DwellCollectorScope {
+                label: "peers",
+                interface: false,
+                wifi: false,
+                workload: false,
+                peers: true,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbePolicy {
@@ -665,6 +906,8 @@ pub struct App {
     pub cycles: u64,
     pub path_generation: u64,
     pub path_observed_since: Duration,
+    pub path_dwell: PathDwell,
+    pub completed_path_dwells: VecDeque<CompletedPathDwell>,
     pub last_path_change: Option<PathChange>,
     pub history_context: Option<HistoryContext>,
     pub wifi_observation_settled: bool,
@@ -709,6 +952,8 @@ impl App {
             cycles: 0,
             path_generation: 0,
             path_observed_since: Duration::ZERO,
+            path_dwell: PathDwell::default(),
+            completed_path_dwells: VecDeque::with_capacity(MAX_COMPLETED_PATH_DWELLS),
             last_path_change: None,
             history_context: None,
             wifi_observation_settled: false,
@@ -749,6 +994,21 @@ impl App {
                 let previous_fingerprint = self.link.path_fingerprint();
                 let current_fingerprint = link.path_fingerprint();
                 let previous = self.link.path_label();
+                let observed_at = self.uptime();
+                if !initial {
+                    let peers = self.peer_dwell_summary();
+                    let dwell = std::mem::take(&mut self.path_dwell);
+                    if self.completed_path_dwells.len() == MAX_COMPLETED_PATH_DWELLS {
+                        self.completed_path_dwells.pop_front();
+                    }
+                    self.completed_path_dwells.push_back(CompletedPathDwell {
+                        generation: self.path_generation,
+                        identity: DwellPathIdentity::from_link(&self.link),
+                        observed: observed_at.saturating_sub(self.path_observed_since),
+                        dwell,
+                        peers,
+                    });
+                }
                 self.path_generation = generation;
                 self.path_transition_pending = false;
                 self.link = link;
@@ -760,6 +1020,7 @@ impl App {
                 self.interface_counters_at = None;
                 self.interface_rate = None;
                 self.workload = WorkloadSnapshot::pending();
+                self.path_dwell = PathDwell::default();
                 self.peers = PeerSnapshot::pending();
                 self.wifi_observation_settled = false;
                 self.peer_dwell.clear();
@@ -772,7 +1033,6 @@ impl App {
                     };
                 }
                 let current = self.link.path_label();
-                let observed_at = self.uptime();
                 self.path_observed_since = observed_at;
                 if !initial {
                     self.last_path_change = Some(PathChange {
@@ -812,6 +1072,9 @@ impl App {
             } => {
                 if generation == self.path_generation {
                     self.wifi_observation_settled = true;
+                    if let Some(telemetry) = &telemetry {
+                        self.path_dwell.observe_wifi(telemetry);
+                    }
                     if let Some(ssid) = ssid
                         && (self.link.ssid.as_deref() != Some(ssid.as_str())
                             || self.link.ssid_restricted)
@@ -850,22 +1113,31 @@ impl App {
                     return;
                 }
                 let now = Instant::now();
-                self.interface_rate = self
-                    .interface_counters
-                    .as_ref()
+                let prior = self.interface_counters.as_ref();
+                let interval = prior
                     .zip(self.interface_counters_at)
                     .zip(counters.as_ref())
                     .and_then(|((before, observed_at), after)| {
-                        interface_rate(before, after, now.duration_since(observed_at))
+                        interface_interval(before, after, now.duration_since(observed_at))
                     });
+                let counter_reset = prior
+                    .zip(counters.as_ref())
+                    .is_some_and(|(before, after)| counters_replaced_or_reset(before, after));
+                self.path_dwell.observe_interface(
+                    counters.as_ref(),
+                    interval.as_ref(),
+                    counter_reset,
+                );
+                self.interface_rate = interval.map(|interval| interval.rate);
                 self.interface_counters = counters;
-                self.interface_counters_at = Some(now);
+                self.interface_counters_at = self.interface_counters.as_ref().map(|_| now);
             }
             MonitorUpdate::Workload {
                 generation,
                 snapshot,
             } => {
                 if generation == self.path_generation {
+                    self.path_dwell.observe_workload(&snapshot);
                     self.workload = snapshot;
                 }
             }
@@ -1617,37 +1889,61 @@ fn link_evidence_incomplete(
         || interface_counters.is_none()
 }
 
-fn interface_rate(
+#[derive(Debug, Clone)]
+struct InterfaceInterval {
+    rate: InterfaceRate,
+    received_bytes: u64,
+    transmitted_bytes: u64,
+    received_packets: u64,
+    transmitted_packets: u64,
+}
+
+fn interface_interval(
     before: &InterfaceCounters,
     after: &InterfaceCounters,
     elapsed: Duration,
-) -> Option<InterfaceRate> {
+) -> Option<InterfaceInterval> {
     if before.interface != after.interface || elapsed.is_zero() {
         return None;
     }
     let seconds = elapsed.as_secs_f64();
-    Some(InterfaceRate {
-        received_bits_per_second: after.received_bytes.checked_sub(before.received_bytes)? as f64
-            * 8.0
-            / seconds,
-        transmitted_bits_per_second: after
-            .transmitted_bytes
-            .checked_sub(before.transmitted_bytes)? as f64
-            * 8.0
-            / seconds,
-        received_packets_per_second: after
-            .received_packets
-            .checked_sub(before.received_packets)? as f64
-            / seconds,
-        transmitted_packets_per_second: after
-            .transmitted_packets
-            .checked_sub(before.transmitted_packets)?
-            as f64
-            / seconds,
-        error_delta: after.receive_errors.checked_sub(before.receive_errors)?
-            + after.transmit_errors.checked_sub(before.transmit_errors)?,
-        drop_delta: after.drops.checked_sub(before.drops)?,
+    let received_bytes = after.received_bytes.checked_sub(before.received_bytes)?;
+    let transmitted_bytes = after
+        .transmitted_bytes
+        .checked_sub(before.transmitted_bytes)?;
+    let received_packets = after
+        .received_packets
+        .checked_sub(before.received_packets)?;
+    let transmitted_packets = after
+        .transmitted_packets
+        .checked_sub(before.transmitted_packets)?;
+    let receive_errors = after.receive_errors.checked_sub(before.receive_errors)?;
+    let transmit_errors = after.transmit_errors.checked_sub(before.transmit_errors)?;
+    Some(InterfaceInterval {
+        rate: InterfaceRate {
+            received_bits_per_second: received_bytes as f64 * 8.0 / seconds,
+            transmitted_bits_per_second: transmitted_bytes as f64 * 8.0 / seconds,
+            received_packets_per_second: received_packets as f64 / seconds,
+            transmitted_packets_per_second: transmitted_packets as f64 / seconds,
+            error_delta: receive_errors.checked_add(transmit_errors)?,
+            drop_delta: after.drops.checked_sub(before.drops)?,
+        },
+        received_bytes,
+        transmitted_bytes,
+        received_packets,
+        transmitted_packets,
     })
+}
+
+fn counters_replaced_or_reset(before: &InterfaceCounters, after: &InterfaceCounters) -> bool {
+    before.interface != after.interface
+        || after.received_bytes < before.received_bytes
+        || after.transmitted_bytes < before.transmitted_bytes
+        || after.received_packets < before.received_packets
+        || after.transmitted_packets < before.transmitted_packets
+        || after.receive_errors < before.receive_errors
+        || after.transmit_errors < before.transmit_errors
+        || after.drops < before.drops
 }
 
 #[cfg(test)]
@@ -1909,13 +2205,335 @@ mod tests {
             transmit_errors: 4,
             drops: 5,
         };
-        let rate = interface_rate(&before, &after, Duration::from_secs(2)).unwrap();
+        let rate = interface_interval(&before, &after, Duration::from_secs(2))
+            .unwrap()
+            .rate;
         assert_eq!(rate.received_bits_per_second, 4_000.0);
         assert_eq!(rate.transmitted_bits_per_second, 8_000.0);
         assert_eq!(rate.error_delta, 3);
         assert_eq!(rate.drop_delta, 2);
 
-        assert!(interface_rate(&after, &before, Duration::from_secs(2)).is_none());
+        assert!(interface_interval(&after, &before, Duration::from_secs(2)).is_none());
+    }
+
+    #[test]
+    fn path_dwell_accumulates_valid_interface_radio_and_workload_windows() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: test_link("en0", "house", "192.168.1.1"),
+        });
+        app.apply(MonitorUpdate::Traffic {
+            generation: 1,
+            counters: Some(test_counters("en0", 1_000, 2_000, 10, 20, 1, 2, 3)),
+        });
+        app.interface_counters_at = Some(Instant::now() - Duration::from_secs(2));
+        app.apply(MonitorUpdate::Traffic {
+            generation: 1,
+            counters: Some(test_counters("en0", 2_000, 4_000, 30, 60, 2, 4, 5)),
+        });
+        for (signal, channel) in [(-55.0, 36), (-72.0, 44)] {
+            app.apply(MonitorUpdate::Wifi {
+                generation: 1,
+                ssid: None,
+                telemetry: Some(WifiTelemetry {
+                    signal_dbm: Some(signal),
+                    noise_dbm: Some(-90.0),
+                    signal_percent: None,
+                    channel: Some(channel),
+                    channel_width_mhz: Some(80),
+                    frequency_mhz: None,
+                    band: Some("5 GHz".into()),
+                    phy: Some("802.11ax".into()),
+                    tx_rate_mbps: Some(600.0),
+                    rx_rate_mbps: None,
+                    mcs: None,
+                }),
+            });
+        }
+        for (process, received, transmitted) in [("codex", 4_096, 2_048), ("browser", 8_192, 4_096)]
+        {
+            app.apply(MonitorUpdate::Workload {
+                generation: 1,
+                snapshot: WorkloadSnapshot {
+                    health: Health::Ok,
+                    detail: "sampled process window".into(),
+                    source: Some("nettop".into()),
+                    interval: Duration::from_secs(1),
+                    processes: vec![ProcessTraffic {
+                        process: process.into(),
+                        processes: 1,
+                        received_bytes_per_second: received,
+                        transmitted_bytes_per_second: transmitted,
+                    }],
+                },
+            });
+        }
+
+        let interface = &app.path_dwell.interface;
+        assert_eq!(interface.samples, 2);
+        assert_eq!(interface.valid_intervals, 1);
+        assert_eq!(interface.received_bytes_delta, 1_000);
+        assert_eq!(interface.transmitted_bytes_delta, 2_000);
+        assert_eq!(interface.received_packets_delta, 20);
+        assert_eq!(interface.transmitted_packets_delta, 40);
+        assert_eq!(interface.error_delta, 3);
+        assert_eq!(interface.drop_delta, 2);
+        assert!(interface.current_rate.is_some());
+        assert!(interface.peak_received_bits_per_second.is_some());
+        assert!(interface.peak_transmitted_bits_per_second.is_some());
+
+        let wifi = &app.path_dwell.wifi;
+        assert_eq!(wifi.samples, 2);
+        assert_eq!(wifi.latest_signal_dbm, Some(-72.0));
+        assert_eq!(wifi.worst_signal_dbm, Some(-72.0));
+        assert_eq!(wifi.latest_channel, Some(44));
+        assert_eq!(wifi.channel_changes, 1);
+
+        let workload = &app.path_dwell.workload;
+        assert_eq!(workload.sampled_windows, 2);
+        assert_eq!(workload.observed, Duration::from_secs(2));
+        assert_eq!(
+            workload
+                .latest_window_top
+                .as_ref()
+                .map(|top| top.process.as_str()),
+            Some("browser")
+        );
+        assert_eq!(
+            workload
+                .peak_window_top
+                .as_ref()
+                .map(|top| top.process.as_str()),
+            Some("browser")
+        );
+    }
+
+    #[test]
+    fn confirmed_path_generation_resets_all_dwell_evidence() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: test_link("en0", "house", "192.168.1.1"),
+        });
+        app.apply(MonitorUpdate::Traffic {
+            generation: 1,
+            counters: Some(test_counters("en0", 1, 2, 3, 4, 0, 0, 0)),
+        });
+        app.apply(MonitorUpdate::Wifi {
+            generation: 1,
+            ssid: None,
+            telemetry: Some(WifiTelemetry {
+                signal_dbm: Some(-60.0),
+                noise_dbm: None,
+                signal_percent: None,
+                channel: Some(36),
+                channel_width_mhz: None,
+                frequency_mhz: None,
+                band: None,
+                phy: None,
+                tx_rate_mbps: None,
+                rx_rate_mbps: None,
+                mcs: None,
+            }),
+        });
+        app.apply(MonitorUpdate::Workload {
+            generation: 1,
+            snapshot: WorkloadSnapshot {
+                health: Health::Ok,
+                detail: "empty sampled window".into(),
+                source: Some("nettop".into()),
+                interval: Duration::from_secs(1),
+                processes: Vec::new(),
+            },
+        });
+
+        app.apply(MonitorUpdate::Link {
+            generation: 2,
+            snapshot: test_link("en0", "hotspot", "172.20.10.1"),
+        });
+
+        assert_eq!(app.path_dwell.interface.samples, 0);
+        assert_eq!(app.path_dwell.wifi.samples, 0);
+        assert_eq!(app.path_dwell.workload.sampled_windows, 0);
+        assert_eq!(app.path_dwell.workload.observed, Duration::ZERO);
+    }
+
+    #[test]
+    fn path_switch_retains_typed_completed_generation_dwell() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: test_link("en0", "house", "192.168.1.1"),
+        });
+        app.apply(MonitorUpdate::Traffic {
+            generation: 1,
+            counters: Some(test_counters("en0", 1, 2, 3, 4, 0, 0, 0)),
+        });
+        app.apply(MonitorUpdate::Wifi {
+            generation: 1,
+            ssid: None,
+            telemetry: Some(WifiTelemetry {
+                signal_dbm: Some(-61.0),
+                noise_dbm: None,
+                signal_percent: None,
+                channel: Some(36),
+                channel_width_mhz: None,
+                frequency_mhz: None,
+                band: None,
+                phy: None,
+                tx_rate_mbps: None,
+                rx_rate_mbps: None,
+                mcs: None,
+            }),
+        });
+        app.apply(MonitorUpdate::Workload {
+            generation: 1,
+            snapshot: WorkloadSnapshot {
+                health: Health::Ok,
+                detail: "sampled".into(),
+                source: Some("nettop".into()),
+                interval: Duration::from_secs(1),
+                processes: Vec::new(),
+            },
+        });
+        app.apply(MonitorUpdate::Peers {
+            generation: 1,
+            snapshot: test_peers(Some("02:00:00:00:00:01"), Some("STALE")),
+        });
+
+        app.apply(MonitorUpdate::Link {
+            generation: 2,
+            snapshot: test_link("en0", "hotspot", "172.20.10.1"),
+        });
+
+        assert_eq!(app.completed_path_dwells.len(), 1);
+        let completed = app.completed_path_dwells.front().unwrap();
+        assert_eq!(completed.generation, 1);
+        assert_eq!(completed.identity.host, "workstation");
+        assert_eq!(completed.identity.interface.as_deref(), Some("en0"));
+        assert_eq!(completed.identity.ssid.as_deref(), Some("house"));
+        assert_eq!(completed.identity.gateway.as_deref(), Some("192.168.1.1"));
+        assert_eq!(completed.dwell.interface.samples, 1);
+        assert_eq!(completed.dwell.wifi.samples, 1);
+        assert_eq!(completed.dwell.workload.sampled_windows, 1);
+        assert_eq!(completed.peers.current, 1);
+        assert_eq!(app.path_generation, 2);
+        assert_eq!(app.link.ssid.as_deref(), Some("hotspot"));
+        assert_eq!(app.path_dwell.interface.samples, 0);
+    }
+
+    #[test]
+    fn completed_generation_dwell_ledger_evicts_oldest_at_its_clear_cap() {
+        let mut app = App::new();
+        for generation in 1..=(MAX_COMPLETED_PATH_DWELLS as u64 + 2) {
+            app.apply(MonitorUpdate::Link {
+                generation,
+                snapshot: test_link(
+                    "en0",
+                    &format!("network-{generation}"),
+                    &format!("192.0.2.{generation}"),
+                ),
+            });
+        }
+
+        assert_eq!(app.completed_path_dwells.len(), MAX_COMPLETED_PATH_DWELLS);
+        assert_eq!(
+            app.completed_path_dwells
+                .front()
+                .map(|record| record.generation),
+            Some(2)
+        );
+        assert_eq!(
+            app.completed_path_dwells
+                .back()
+                .map(|record| record.generation),
+            Some(MAX_COMPLETED_PATH_DWELLS as u64 + 1)
+        );
+        assert_eq!(app.path_generation, MAX_COMPLETED_PATH_DWELLS as u64 + 2);
+    }
+
+    #[test]
+    fn counter_wrap_and_interface_replacement_start_new_baselines_without_fake_deltas() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Traffic {
+            generation: 0,
+            counters: Some(test_counters("en0", 1_000, 2_000, 30, 40, 2, 3, 4)),
+        });
+        app.interface_counters_at = Some(Instant::now() - Duration::from_secs(1));
+        app.apply(MonitorUpdate::Traffic {
+            generation: 0,
+            counters: Some(test_counters("en0", 10, 20, 3, 4, 0, 0, 0)),
+        });
+        app.interface_counters_at = Some(Instant::now() - Duration::from_secs(1));
+        app.apply(MonitorUpdate::Traffic {
+            generation: 0,
+            counters: Some(test_counters("en9", 50_000, 60_000, 300, 400, 0, 0, 0)),
+        });
+
+        let dwell = &app.path_dwell.interface;
+        assert_eq!(dwell.samples, 3);
+        assert_eq!(dwell.valid_intervals, 0);
+        assert_eq!(dwell.received_bytes_delta, 0);
+        assert_eq!(dwell.transmitted_bytes_delta, 0);
+        assert_eq!(dwell.received_packets_delta, 0);
+        assert_eq!(dwell.transmitted_packets_delta, 0);
+        assert_eq!(dwell.error_delta, 0);
+        assert_eq!(dwell.drop_delta, 0);
+        assert_eq!(dwell.counter_resets, 2);
+        assert!(dwell.current_rate.is_none());
+    }
+
+    #[test]
+    fn workload_dwell_counts_only_successful_sparse_observation_windows() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Workload {
+            generation: 0,
+            snapshot: WorkloadSnapshot {
+                health: Health::Ok,
+                detail: "sampled".into(),
+                source: Some("nettop".into()),
+                interval: Duration::from_secs(1),
+                processes: vec![ProcessTraffic {
+                    process: "codex".into(),
+                    processes: 2,
+                    received_bytes_per_second: 4_096,
+                    transmitted_bytes_per_second: 2_048,
+                }],
+            },
+        });
+        app.apply(MonitorUpdate::Workload {
+            generation: 0,
+            snapshot: WorkloadSnapshot {
+                health: Health::Unavailable,
+                detail: "collector timed out".into(),
+                source: None,
+                interval: Duration::from_secs(1),
+                processes: Vec::new(),
+            },
+        });
+        app.apply(MonitorUpdate::Workload {
+            generation: 0,
+            snapshot: WorkloadSnapshot {
+                health: Health::Ok,
+                detail: "no attributed bytes in sampled window".into(),
+                source: Some("nettop".into()),
+                interval: Duration::from_secs(2),
+                processes: Vec::new(),
+            },
+        });
+
+        let dwell = &app.path_dwell.workload;
+        assert_eq!(dwell.sampled_windows, 2);
+        assert_eq!(dwell.observed, Duration::from_secs(3));
+        assert!(dwell.latest_window_top.is_none());
+        assert_eq!(
+            dwell
+                .peak_window_top
+                .as_ref()
+                .map(|top| top.process.as_str()),
+            Some("codex")
+        );
     }
 
     #[test]
@@ -2525,6 +3143,29 @@ mod tests {
                 mac_scope: Some(MacScope::Local),
                 registrant: None,
             }],
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn test_counters(
+        interface: &str,
+        received_bytes: u64,
+        transmitted_bytes: u64,
+        received_packets: u64,
+        transmitted_packets: u64,
+        receive_errors: u64,
+        transmit_errors: u64,
+        drops: u64,
+    ) -> InterfaceCounters {
+        InterfaceCounters {
+            interface: interface.into(),
+            received_bytes,
+            transmitted_bytes,
+            received_packets,
+            transmitted_packets,
+            receive_errors,
+            transmit_errors,
+            drops,
         }
     }
 
