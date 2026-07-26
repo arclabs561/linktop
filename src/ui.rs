@@ -1753,7 +1753,14 @@ fn render_peer_table(frame: &mut Frame<'_>, area: Rect, app: &App, peer_offset: 
     let peers = ordered_peers(app);
     let content_rows = area.height.saturating_sub(2) as usize;
     let wide = area.width >= 104;
-    let rows_per_peer = if wide { 1 } else { 2 };
+    let tight = area.width < 76;
+    let rows_per_peer = if wide {
+        1
+    } else if tight {
+        3
+    } else {
+        2
+    };
     let header_rows = usize::from(wide && content_rows > 0);
     let capacity = content_rows
         .saturating_sub(header_rows)
@@ -1774,6 +1781,10 @@ fn render_peer_table(frame: &mut Frame<'_>, area: Rect, app: &App, peer_offset: 
         )));
         for peer in peers.iter().skip(offset).take(capacity) {
             lines.push(peer_wide_line(peer, app, address_width));
+        }
+    } else if tight {
+        for peer in peers.iter().skip(offset).take(capacity) {
+            lines.extend(peer_tight_lines(peer, app, area.width));
         }
     } else {
         for peer in peers.iter().skip(offset).take(capacity) {
@@ -1837,6 +1848,57 @@ fn peer_wide_line<'a>(peer: &'a Peer, app: &App, address_width: usize) -> Line<'
             Style::default().fg(INK),
         ),
     ])
+}
+
+fn peer_tight_lines<'a>(peer: &'a Peer, app: &App, width: u16) -> Vec<Line<'a>> {
+    let gateway = app.link.gateway.as_deref() == Some(peer.address.as_str());
+    let role = if gateway { "gateway" } else { "neighbor" };
+    let state = peer.state.as_deref().unwrap_or("cached");
+    let attention = peer_attention_label(app, peer);
+    let dwell = peer_dwell_tight_label(app, peer);
+    let mac = peer_mac_label(peer);
+    let fixed_width = 7 + mac.chars().count() + 3 + 3 + dwell.chars().count();
+    let attribution_width = usize::from(width)
+        .saturating_sub(2)
+        .saturating_sub(fixed_width)
+        .max(8);
+
+    vec![
+        Line::from(vec![
+            Span::styled(
+                if gateway { " ▶ " } else { "   " },
+                Style::default().fg(if gateway { ACCENT } else { MUTED }),
+            ),
+            Span::styled(
+                format!("{:<7}", peer.interface.as_deref().unwrap_or("?")),
+                Style::default().fg(MUTED),
+            ),
+            Span::styled(
+                format!(" {role}"),
+                Style::default().fg(if gateway { ACCENT } else { MUTED }),
+            ),
+            Span::styled(format!(" · {state}"), Style::default().fg(MUTED)),
+            Span::styled(format!(" · {attention}"), Style::default().fg(INK)),
+        ]),
+        Line::from(vec![
+            Span::styled("   address ", Style::default().fg(MUTED)),
+            Span::styled(
+                fit(&peer.address, usize::from(width.saturating_sub(13)).max(1)),
+                Style::default().fg(INK),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("   mac ", Style::default().fg(MUTED)),
+            Span::styled(mac, Style::default().fg(MUTED)),
+            Span::styled(" · ", Style::default().fg(GRID)),
+            Span::styled(
+                fit(peer_attribution(peer), attribution_width),
+                Style::default().fg(INK),
+            ),
+            Span::styled(" · ", Style::default().fg(GRID)),
+            Span::styled(dwell, Style::default().fg(ACCENT)),
+        ]),
+    ]
 }
 
 fn peer_narrow_lines<'a>(peer: &'a Peer, app: &App, width: u16) -> Vec<Line<'a>> {
@@ -1947,6 +2009,27 @@ fn peer_dwell_compact_label(app: &App, peer: &Peer) -> String {
             format!(" Δ{changes}")
         },
         format_duration(dwell.first_observed),
+        compact_age(age)
+    )
+}
+
+fn peer_dwell_tight_label(app: &App, peer: &Peer) -> String {
+    let Some(dwell) = app.peer_dwell(peer) else {
+        return "current snapshot".into();
+    };
+    let age = app.uptime().saturating_sub(dwell.last_observed);
+    let changes = dwell.state_changes
+        + dwell.binding_changes
+        + dwell.cache_disappearances
+        + dwell.cache_returns;
+    format!(
+        "n={}{} last={}",
+        dwell.observations,
+        if changes == 0 {
+            String::new()
+        } else {
+            format!(" Δ{changes}")
+        },
         compact_age(age)
     )
 }
@@ -2882,6 +2965,59 @@ mod tests {
         assert!(rendered.contains("PASSIVE NEIGHBORS"));
         assert!(rendered.contains("192.168.1.1"));
         assert!(!rendered.contains("OBSERVATION CONTEXT"));
+    }
+
+    #[test]
+    fn tight_peers_view_keeps_ipv6_identity_and_attention_semantics() {
+        let mut app = App::new();
+        app.link.gateway = Some("192.168.1.1".into());
+        let snapshot = crate::model::PeerSnapshot {
+            health: Health::Ok,
+            detail: "2 cached peers; no liveness scan".into(),
+            sources: vec!["arp -an".into(), "ndp -an".into()],
+            failed_sources: Vec::new(),
+            oui_source: Some("Wireshark manuf".into()),
+            peers: vec![
+                Peer {
+                    address: "192.168.1.1".into(),
+                    mac: Some("ac:8b:a9:6d:95:69".into()),
+                    interface: Some("en0".into()),
+                    state: None,
+                    binding_conflict: false,
+                    mac_scope: None,
+                    registrant: Some("Ubiquiti".into()),
+                },
+                Peer {
+                    address: "2606:a800:9f80:3550:1e69:7aff:fe0a:ad6b".into(),
+                    mac: Some("1c:69:7a:0a:ad:6b".into()),
+                    interface: Some("en0".into()),
+                    state: Some("REACHABLE".into()),
+                    binding_conflict: false,
+                    mac_scope: None,
+                    registrant: Some("EliteGroup Computer Systems".into()),
+                },
+            ],
+        };
+        app.apply(MonitorUpdate::Peers {
+            generation: 0,
+            snapshot: snapshot.clone(),
+        });
+        app.apply(MonitorUpdate::Peers {
+            generation: 0,
+            snapshot,
+        });
+
+        let backend = TestBackend::new(70, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Peers, 0, false))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+        assert!(rendered.contains("2606:a800:9f80:3550:1e69:7aff:fe0a:ad6b"));
+        assert!(rendered.contains("REACHABLE · kernel-confirmed"));
+        assert!(rendered.contains("EliteGroup"));
+        assert!(rendered.contains("n=2 last=now"));
+        assert!(rendered.contains("1-2 / 2"));
     }
 
     #[test]
