@@ -124,7 +124,9 @@ fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, can_navigate: b
             render_footer(frame, vertical[4], app, MonitorMode::Overview, can_navigate);
             return;
         }
-        let dwell_height = if main[1].height >= 14 {
+        let dwell_height = if !has_path_dwell_evidence(app) {
+            3
+        } else if main[1].height >= 14 {
             11
         } else {
             main[1].height.saturating_sub(2).max(1)
@@ -265,7 +267,7 @@ fn render_overview_evidence(frame: &mut Frame<'_>, area: Rect, app: &App) {
                         app.peers.sources.join("+")
                     }
                 ),
-                usize::from(area.width.saturating_sub(12)),
+                usize::from(area.width.saturating_sub(13)),
             ),
             Style::default().fg(INK),
         ),
@@ -796,7 +798,7 @@ fn network_configuration_summary(app: &App) -> String {
         .into(),
     );
     let default_interface = app.link.interface.as_deref();
-    let overlays: BTreeSet<_> = app
+    let other_addressed_interfaces: BTreeSet<_> = app
         .link
         .addresses
         .iter()
@@ -804,10 +806,18 @@ fn network_configuration_summary(app: &App) -> String {
         .filter(|address| Some(address.interface.as_str()) != default_interface)
         .map(|address| address.interface.as_str())
         .collect();
-    if !overlays.is_empty() {
+    if !other_addressed_interfaces.is_empty() {
+        let label = if other_addressed_interfaces.len() == 1 {
+            "other addressed interface"
+        } else {
+            "other addressed interfaces"
+        };
         parts.push(format!(
-            "overlay {}",
-            overlays.into_iter().collect::<Vec<_>>().join("+")
+            "{label} {}",
+            other_addressed_interfaces
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join("+")
         ));
     }
     parts.join(" · ")
@@ -820,7 +830,8 @@ fn compact_network_configuration_summary(app: &App) -> String {
         .replace("dual-stack", "v4+v6")
         .replace("IPv4 only", "v4")
         .replace("IPv6 only", "v6")
-        .replace("overlay ", "")
+        .replace("other addressed interfaces ", "other ")
+        .replace("other addressed interface ", "other ")
 }
 
 fn short_clock(value: &str) -> String {
@@ -1278,6 +1289,18 @@ fn render_path_dwell(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let workload = &dwell.workload;
     let peers = app.peer_dwell_summary();
     let value_width = usize::from(area.width.saturating_sub(14));
+    if !has_path_dwell_evidence(app) {
+        frame.render_widget(
+            Paragraph::new(vec![dwell_line(
+                "coverage",
+                "no valid counter, radio, workload, or neighbor-cache dwell samples".into(),
+                value_width,
+            )])
+            .block(instrument_block(" SINCE PATH CHANGE ")),
+            area,
+        );
+        return;
+    }
     let current_rate = interface.current_rate.as_ref().map_or_else(
         || "unavailable".into(),
         |rate| {
@@ -1385,6 +1408,14 @@ fn render_path_dwell(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Paragraph::new(lines).block(instrument_block(" SINCE PATH CHANGE ")),
         area,
     );
+}
+
+fn has_path_dwell_evidence(app: &App) -> bool {
+    let peers = app.peer_dwell_summary();
+    app.path_dwell.interface.samples > 0
+        || app.path_dwell.wifi.samples > 0
+        || app.path_dwell.workload.sampled_windows > 0
+        || peers.observed > 0
 }
 
 fn render_active_path_dwell(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -3378,6 +3409,52 @@ mod tests {
     }
 
     #[test]
+    fn wide_passive_overview_collapses_empty_dwell_evidence() {
+        let app = App::new();
+        let backend = TestBackend::new(160, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+
+        assert!(rendered.contains("SINCE PATH CHANGE"));
+        assert!(rendered.contains("no valid counter, radio, workload"));
+        assert!(!rendered.contains("latest rate"));
+        assert!(rendered.contains("SESSION EVENTS"));
+    }
+
+    #[test]
+    fn evidence_scope_truncation_keeps_its_marker_inside_the_panel() {
+        let mut app = App::new();
+        app.peers.sources =
+            vec!["synthetic ARP cache source with deliberately long acquisition provenance".into()];
+        for (columns, rows) in [(100, 24), (160, 30)] {
+            let backend = TestBackend::new(columns, rows);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+                .unwrap();
+            let rendered = buffer_text(terminal.backend());
+            let scope = rendered
+                .lines()
+                .find(|line| line.contains("scope"))
+                .unwrap();
+            let scope_value = scope
+                .split_once("scope")
+                .unwrap()
+                .1
+                .split('│')
+                .next()
+                .unwrap();
+            assert!(
+                scope_value.contains('…'),
+                "{columns}x{rows} scope line lost its truncation marker:\n{scope}"
+            );
+        }
+    }
+
+    #[test]
     fn shallow_link_view_keeps_operator_evidence_instead_of_wrapped_explanation() {
         let mut app = App::new();
         app.link.interface = Some("en0".into());
@@ -3408,6 +3485,33 @@ mod tests {
         assert!(rendered.contains("q"));
         assert!(rendered.contains("quit"));
         assert!(!rendered.contains("focused local evidence"));
+    }
+
+    #[test]
+    fn non_default_addressed_interfaces_are_not_inferred_to_be_overlays() {
+        let mut app = App::new();
+        app.link.interface = Some("utun4".into());
+        app.link.addresses = vec![
+            Address {
+                interface: "utun4".into(),
+                address: "100.64.0.2".into(),
+                family: 4,
+                is_default: true,
+                is_temporary: false,
+            },
+            Address {
+                interface: "en0".into(),
+                address: "192.168.1.10".into(),
+                family: 4,
+                is_default: false,
+                is_temporary: false,
+            },
+        ];
+
+        let summary = network_configuration_summary(&app);
+        assert!(summary.contains("other addressed interface en0"));
+        assert!(!summary.contains("overlay"));
+        assert!(compact_network_configuration_summary(&app).contains("other en0"));
     }
 
     #[test]
@@ -3756,7 +3860,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_workload_dwell_is_not_presented_as_latest_equals_peak() {
+    fn empty_workload_dwell_is_presented_as_a_coverage_gap() {
         let app = App::new();
         let backend = TestBackend::new(160, 30);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -3765,7 +3869,7 @@ mod tests {
             .unwrap();
         let rendered = buffer_text(terminal.backend());
 
-        assert!(rendered.contains("not sampled; no successful workload window"));
+        assert!(rendered.contains("no valid counter, radio, workload"));
         assert!(!rendered.contains("latest=peak none"));
     }
 

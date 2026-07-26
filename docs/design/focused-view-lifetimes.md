@@ -154,7 +154,9 @@ The TUI, one-shot text, and plain stream are for people, including expert
 operators. Agents and programs consume versioned JSON or Netmon records, not
 screen text. Screenshot artifact names remain a private QA convention.
 Automated capture consumers use the versioned completion manifest rather than
-parsing those names.
+parsing those names. A plain path update enumerates every host-observed address
+with its interface, family, default-path role, and temporary-address qualifier;
+it does not silently reduce focused link evidence to default-marked addresses.
 
 Presentation never widens acquisition. Switching TUI views does not start a new
 collector, JSON does not imply completeness beyond its coverage fields, and a

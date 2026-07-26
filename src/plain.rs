@@ -449,11 +449,14 @@ fn path_lines(elapsed: &str, link: &LinkSnapshot) -> Vec<String> {
     lines.extend(
         link.addresses
             .iter()
-            .filter(|address| address.is_default)
             .map(|address| {
                 format!(
-                    "+{elapsed} address  interface={} family=ipv{} address={} temporary={} [source: host interface state]",
-                    address.interface, address.family, address.address, address.is_temporary
+                    "+{elapsed} address  interface={} family=ipv{} address={} default_path={} temporary={} [source: host interface state]",
+                    address.interface,
+                    address.family,
+                    address.address,
+                    address.is_default,
+                    address.is_temporary
                 )
             }),
     );
@@ -592,8 +595,8 @@ pub(crate) fn format_elapsed(duration: Duration) -> String {
 mod tests {
     use super::*;
     use crate::model::{
-        Health, InterfaceDwell, InterfaceRate, MonitorMode, ProbePolicy, ProbeResult,
-        ProcessTraffic, WifiDwell, WorkloadDwell, WorkloadSnapshot,
+        Address, Health, InterfaceDwell, InterfaceRate, LinkSnapshot, MonitorMode, ProbePolicy,
+        ProbeResult, ProcessTraffic, WifiDwell, WorkloadDwell, WorkloadSnapshot,
     };
 
     #[test]
@@ -654,6 +657,39 @@ mod tests {
         assert!(rendered.contains("rx=32.77 Kbit/s"));
         assert!(rendered.contains("window: 1s"));
         assert!(rendered.contains("source: nettop external-interface deltas"));
+    }
+
+    #[test]
+    fn path_updates_emit_every_observed_interface_address_with_role_qualifiers() {
+        let link = LinkSnapshot {
+            host: "workstation".into(),
+            interface: Some("utun4".into()),
+            addresses: vec![
+                Address {
+                    interface: "utun4".into(),
+                    address: "100.64.0.2".into(),
+                    family: 4,
+                    is_default: true,
+                    is_temporary: false,
+                },
+                Address {
+                    interface: "en0".into(),
+                    address: "192.168.1.10".into(),
+                    family: 4,
+                    is_default: false,
+                    is_temporary: true,
+                },
+            ],
+            ..LinkSnapshot::empty()
+        };
+
+        let rendered = path_lines("00:01", &link).join("\n");
+        assert!(rendered.contains(
+            "interface=utun4 family=ipv4 address=100.64.0.2 default_path=true temporary=false"
+        ));
+        assert!(rendered.contains(
+            "interface=en0 family=ipv4 address=192.168.1.10 default_path=false temporary=true"
+        ));
     }
 
     #[test]
