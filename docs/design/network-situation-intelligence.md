@@ -282,6 +282,15 @@ Traffic fingerprinting is a high-value future evidence family:
 - Repeated relationships and flow episodes can support role candidates and
   anomaly detection.
 
+Keep the operator vocabulary split at the derivation boundary:
+
+- a **feature observation** is a typed source fact such as a TLS ClientHello
+  field, TCP handshake trait, advertisement field, or bounded timing sequence;
+- a **candidate assessment** applies one versioned method to cited feature
+  observations and returns ranked alternatives or an explicit abstention; and
+- a **binding** is a separately authorized private assertion about a physical
+  device or person and is never created by a fingerprint score.
+
 The current macOS `nettop` process row is not traffic fingerprinting. It is a
 numeric byte-rate attribution over one second with no endpoint, protocol,
 payload, or flow-shape features. It can identify a consequential local
@@ -325,8 +334,8 @@ more useful than an ungrounded percentage.
 | Owner | Responsibility |
 | --- | --- |
 | Linktop | Immediate host-path situation, session episodes, fresh local evidence, focused views, bounded tests, and operator projections. |
-| Netmon Rust core | Versioned observations, temporal reducers, replay, baselines, multi-source fusion, advisory fingerprints, and explanations. |
-| Specialist tools and deployments | Packet/RF acquisition, dissection, controller state, active scans, collection policy, retention, access control, and operator-verified identity material. |
+| Netmon Rust core | Versioned observations, source-preserving alignment, deterministic replay, temporal reducers, baselines, advisory candidate assessments, and explanations. |
+| Specialist tools and deployments | Packet/RF acquisition, dissection, controller state, active scans, deployed multi-source and identity fusion, collection policy, retention, access control, and operator-verified identity material. |
 
 Linktop remains independently useful without a Netmon executable, daemon,
 controller, database, or cloud account. Its exact-revision Rust library
