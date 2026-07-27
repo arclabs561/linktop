@@ -15,12 +15,13 @@ capture-native view="overview" columns="140" rows="30" at="5":
     cargo run --quiet -- screenshot {{view}} --native --at {{at}} --columns {{columns}} --rows {{rows}} --output-dir .agents/reports/ui-captures
 
 # Exercise a stable initial Wi-Fi, hotspot attachment, and known Wi-Fi return
-# across wide, minimum, and intermediate terminal geometries.
+# across wide, minimum, and intermediate terminal geometries, then revisit the
+# returned path at wide width so the completed prior window remains inspectable.
 capture-transition:
-    cargo run --quiet -- screenshot overview --scene wifi-hotspot-wifi --at 1,3,5 --columns 160 --rows 30 --resize 3:60x10 --resize 5:100x24 --output-dir .agents/reports/ui-captures
+    cargo run --quiet -- screenshot overview --scene wifi-hotspot-wifi --at 1,3,5,7 --columns 160 --rows 30 --resize 3:60x10 --resize 5:100x24 --resize 7:160x30 --output-dir .agents/reports/ui-captures
 
 capture-transition-native:
-    cargo run --quiet -- screenshot overview --native --scene wifi-hotspot-wifi --at 1,3,5 --columns 160 --rows 30 --resize 3:60x10 --resize 5:100x24 --output-dir .agents/reports/ui-captures
+    cargo run --quiet -- screenshot overview --native --scene wifi-hotspot-wifi --at 1,3,5,7 --columns 160 --rows 30 --resize 3:60x10 --resize 5:100x24 --resize 7:160x30 --output-dir .agents/reports/ui-captures
 
 # Install the release binary in Cargo's PATH directory and retain the old names
 # as compatibility aliases. Refuse to replace user-owned regular files.

@@ -118,17 +118,24 @@ acquisition policy.
 Combining `--plain` with `--dwell` closes the stream with a collector-scoped
 summary of the current path generation and up to eight completed generations
 observed by that process. Evidence a focused command did not collect is
-labelled `not collected`; the summary is not persisted. A bounded JSONL dwell
-ends with one `final_summary`; an operator-selected unbounded JSONL stream has
-no fabricated terminal record, built-in persistence, or network publication.
+labelled `not collected`; the summary is not persisted. On each path
+transition, the plain stream also emits an immediate receipt for the
+just-completed generation: prior path identity, observed span, changed
+dimensions, collector scope, and support state. It is explicitly immutable,
+process-local, not current-path evidence, and not persisted. A bounded JSONL
+dwell ends with one `final_summary`; an operator-selected unbounded JSONL
+stream has no fabricated terminal record, built-in persistence, or network
+publication.
 
 Live usefulness follows each claim's evidence horizon, not process uptime.
 Path context, cumulative counters, and each completed probe are exposed as
 soon as observed. Interface rate requires two compatible counter reads.
 Next-hop distribution uses the latest twenty attempts, remains insufficient
 before five attempts, and requires at least two successful RTT observations
-for adjacent variation. Human and machine views report the same support,
-scope, source age or span when known, and typed limitations.
+for adjacent variation. Human and machine views derive their conclusions from
+the same typed support, scope, source age or span, and limitations. Human
+surfaces rank and summarize that model for the available space; versioned JSON
+retains the complete machine-readable fields.
 
 Finite text and the TUI are expert human interfaces, not machine APIs.
 `--json` emits one versioned JSON document for agents and programs:
@@ -149,6 +156,12 @@ terminal columns.
 Self-contained records identify an initial or periodic checkpoint, a
 path-generation transition, or the bounded final summary and carry sequence,
 acquisition lifetime, generation, assessment, claim progress, and evidence.
+After a path transition, optional `evidence.completed_path_window` joins the
+latest transition to the immutable generation that just ended. It carries the
+prior path identity and span, subject collector scope, typed support states,
+source provenance, aggregates, and limitations. The object is capped
+process-local output context, never current diagnosis evidence or a durable
+episode/replay contract.
 Material state changes emit immediately; full checkpoints recur at a bounded
 cadence while accepted updates continue, and high-frequency non-material
 updates between them are suppressed. `--json` remains finite and unchanged.
@@ -318,8 +331,9 @@ linktop screenshot peers --at 5,15 --columns 100 --rows 24
 linktop screenshot link --at 12 --columns 100 --rows 24
 linktop screenshot overview --scene dense-peers --at 1,3,5 \
   --key 1:3 --resize 3:80x20 --key 3:page-down --key 5:home
-linktop screenshot overview --scene wifi-hotspot-wifi --at 1,3,5 \
-  --columns 160 --rows 30 --resize 3:60x10 --resize 5:100x24
+linktop screenshot overview --scene wifi-hotspot-wifi --at 1,3,5,7 \
+  --columns 160 --rows 30 --resize 3:60x10 --resize 5:100x24 \
+  --resize 7:160x30
 ```
 
 Repeatable `--key AT:KEY` and `--resize AT:COLSxROWS` actions reproduce
@@ -344,7 +358,8 @@ active probes or history.
 `--scene wifi-hotspot-wifi` uses Netbraid's receipt-bound
 `PUBLIC_SYNTHETIC` host-path inputs. It applies an initial Wi-Fi path at 0s, a
 hotspot attachment at 2s, and the known Wi-Fi return at 4s, so captures at
-1s/3s/5s show each stable stage. The source records retain their own evidence
+1s/3s/5s show each stable stage; the 7s wide frame makes the completed hotspot
+window inspectable after the return. The source records retain their own evidence
 times; only their application to the QA view is accelerated. Netbraid validates
 the closed checkpoint receipt, including its fixture oracles, before releasing
 typed inputs; Linktop does not inspect, branch on, or render those authored
@@ -366,8 +381,9 @@ linktop screenshot overview --native --at 2,5,12 --columns 100 --rows 24
 linktop screenshot peers --native --at 5,15 --columns 80 --rows 20
 linktop screenshot overview --native --scene dense-peers --at 1,3 \
   --key 1:3 --resize 3:80x20
-linktop screenshot overview --native --scene wifi-hotspot-wifi --at 1,3,5 \
-  --columns 160 --rows 30 --resize 3:60x10 --resize 5:100x24
+linktop screenshot overview --native --scene wifi-hotspot-wifi --at 1,3,5,7 \
+  --columns 160 --rows 30 --resize 3:60x10 --resize 5:100x24 \
+  --resize 7:160x30
 ```
 
 Native capture requires tmux; it does not require ImageMagick or a foreground

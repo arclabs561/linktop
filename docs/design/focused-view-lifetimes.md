@@ -157,6 +157,18 @@ updates continue. Rate-only, workload-rate, count-only, and source-age-only
 updates between those boundaries do not create a full record. Path-generation
 changes are explicit transitions.
 
+After a path-generation transition, the common projection may include one
+`completed_path_window` joined to that transition. It identifies the prior
+generation and path, its observed span, the next generation and changed
+dimensions, the subject's collector scope, support states and source
+provenance for interface/radio/workload/neighbor evidence, retained
+aggregates, and typed limitations. It is the immutable just-completed window,
+not current-path evidence. Retention is capped and process-local; live v1 does
+not thereby become a durable episode or replay contract. Neighbor source and
+failed-source sets are unions over the completed generation; terminal
+neighbor/workload health, detail, source, and path-filter values are named
+`latest_snapshot_*` rather than being presented as window-wide state.
+
 A bounded dwell emits exactly one terminal summary and closes unresolved
 claims against that acquisition window. An unbounded run is an explicit local
 stdout projection and has no fabricated final, built-in persistence, network
@@ -194,7 +206,10 @@ It reports the current generation plus up to eight completed generations seen
 by the process, preserving interface, radio, workload-window, and peer-cache
 aggregates only when the command's collector plan acquired them. A link or peers
 session says `not collected` for disabled sources rather than presenting absent
-collection as zero activity.
+collection as zero activity. At the transition itself, plain output emits the
+same just-completed window as an append-only human receipt with its transition
+relation, collector scope, support states, and non-current/non-persistent
+limitations.
 
 Plain startup groups the collector plan so direct path and counter facts are
 not buried under schema-shaped progress rows. Material progress transitions
@@ -289,7 +304,12 @@ generation's typed identity and dwell aggregates into a bounded, immutable
 process-local queue. That queue is output history, not current evidence: late
 results cannot update it, it cannot affect the new generation's diagnosis, and
 it is discarded when the process exits. Detailed peer rows do not cross this
-boundary; only their aggregate cache-dwell summary does.
+boundary; only their aggregate cache-dwell summary does. The shared model joins
+the newest completed entry to the path transition that ended it. Wide TUI,
+immediate plain transition, and live JSONL project that typed join at different
+densities. The bounded plain summary continues to render the full capped
+ledger from the same retained generation data; finite one-shot JSON remains
+unchanged.
 
 ### Self-contained visual QA
 
@@ -340,7 +360,11 @@ only reversible host-path evidence and leaves address role, radio, peer-cache
 completeness, place, owner, and roam unobserved. The native child begins the
 timed sequence only after a private readiness barrier, while the deterministic
 lane inserts the same transition instants into its replay plan. Both receipts
-name the timeline and stage of every frame.
+name the timeline and stage of every frame. The maintained transition recipe
+captures 1s/3s/5s at wide/minimum/medium sizes, then restores 160×30 at 7s so
+the returned path and immutable completed hotspot window can be reviewed
+together. The 60×10 frame deliberately keeps answer, path, coverage, and
+action instead of admitting the prior-window panel.
 
 An optional `--native` lane runs the current executable in a fixed-size tmux PTY and
 captures its real alternate-screen output at the same times. It captures one ANSI

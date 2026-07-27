@@ -249,3 +249,13 @@ layouts. In the unsupported-size fallback, where the network label is
 deliberately absent, it checks the expected generation plus the visible fallback
 identity instead. This preserves stage verification at 40×8 without claiming
 that an invisible SSID was observed in the frame.
+
+## Update (2026-07-27): revisit the returned path at wide width
+
+The maintained Wi-Fi/hotspot transition recipe now captures four frames:
+1s at 160×30, 3s at the minimum 60×10, 5s at 100×24, and 7s after restoring
+160×30. The first three frames continue to gate stage identity and responsive
+operator priority. The final frame gates the post-transition wide projection,
+including the immutable completed hotspot window beside the returned current
+path. Deterministic and native recipes use the same schedule and scene
+receipt.

@@ -14,7 +14,7 @@
     "started_at": "2026-07-26T20:00:00Z",
     "elapsed_ms": 1000
   },
-  "generation": 1,
+  "generation": 2,
   "assessment": {
     "situation": {
       "health": "unavailable",
@@ -30,7 +30,7 @@
       "basis": "observed",
       "scope": {
         "kind": "current_path_generation",
-        "generation": 1,
+        "generation": 2,
         "subject": "effective default route and corroborated physical underlay"
       },
       "observations": 1,
@@ -42,7 +42,7 @@
       "basis": "observed",
       "scope": {
         "kind": "current_sample",
-        "generation": 1,
+        "generation": 2,
         "subject": "interface en0 cumulative counters"
       },
       "limitations": [
@@ -57,7 +57,7 @@
       "basis": "derived",
       "scope": {
         "kind": "current_path_generation",
-        "generation": 1,
+        "generation": 2,
         "subject": "compatible counter deltas for interface en0"
       },
       "observations": 0,
@@ -75,7 +75,7 @@
       "basis": "observed",
       "scope": {
         "kind": "current_path_generation",
-        "generation": 1,
+        "generation": 2,
         "subject": "associated interface en0 radio link"
       },
       "observations": 1
@@ -86,7 +86,7 @@
       "basis": "observed",
       "scope": {
         "kind": "current_path_generation",
-        "generation": 1,
+        "generation": 2,
         "subject": "native cache rows filtered to interface en0 and current path prefixes"
       },
       "limitations": [
@@ -104,7 +104,7 @@
       "basis": "observed",
       "scope": {
         "kind": "current_path_generation",
-        "generation": 1,
+        "generation": 2,
         "subject": "sampled host process-accounting windows on external interfaces"
       },
       "observations": 0,
@@ -124,7 +124,7 @@
       "basis": "observed",
       "scope": {
         "kind": "current_sample",
-        "generation": 1,
+        "generation": 2,
         "subject": "configured next hop 192.0.2.1"
       }
     },
@@ -134,7 +134,7 @@
       "basis": "observed",
       "scope": {
         "kind": "current_sample",
-        "generation": 1,
+        "generation": 2,
         "subject": "configured resolver path resolving example.com"
       }
     },
@@ -144,7 +144,7 @@
       "basis": "observed",
       "scope": {
         "kind": "current_sample",
-        "generation": 1,
+        "generation": 2,
         "subject": "HTTPS GET to example.com"
       }
     },
@@ -154,7 +154,7 @@
       "basis": "observed",
       "scope": {
         "kind": "current_sample",
-        "generation": 1,
+        "generation": 2,
         "subject": "bounded public-egress address provider lookup"
       }
     },
@@ -164,7 +164,7 @@
       "basis": "derived",
       "scope": {
         "kind": "assessment_window",
-        "generation": 1,
+        "generation": 2,
         "subject": "next-hop RTT variation",
         "maximum_observations": 20
       }
@@ -292,7 +292,158 @@
         "disappeared": 0
       }
     },
-    "last_path_change": null,
+    "last_path_change": {
+      "observed_at_ms": 0,
+      "dimensions": [
+        "SSID",
+        "Wi-Fi association"
+      ],
+      "previous": "en0 / field-kit via 192.0.2.1",
+      "current": "en0 / lab via 192.0.2.1"
+    },
+    "completed_path_window": {
+      "generation": 1,
+      "path_identity": {
+        "host": "operator-host",
+        "interface": "en0",
+        "link_type": "wifi",
+        "underlay": null,
+        "ssid": "field-kit",
+        "ssid_restricted": false,
+        "connection_id": "field-kit-wifi",
+        "gateway": "192.0.2.1",
+        "resolvers": [
+          "192.0.2.53"
+        ],
+        "address_boundaries": [
+          [
+            "en0",
+            "192.0.2.10"
+          ]
+        ]
+      },
+      "observed_span_ms": 0,
+      "completed_by": {
+        "reason": "path_transition",
+        "observed_at_ms": 0,
+        "next_generation": 2,
+        "changed_dimensions": [
+          "SSID",
+          "Wi-Fi association"
+        ],
+        "previous": "en0 / field-kit via 192.0.2.1",
+        "current": "en0 / lab via 192.0.2.1"
+      },
+      "collector_scope": {
+        "subject": "overview",
+        "interface_counters": true,
+        "radio_link": true,
+        "workload_accounting": true,
+        "neighbor_cache": true
+      },
+      "interface": {
+        "state": "partial",
+        "source": "kernel_interface_counters",
+        "samples": 1,
+        "valid_intervals": 0,
+        "counter_resets": 0,
+        "received_bytes_delta": 0,
+        "transmitted_bytes_delta": 0,
+        "received_packets_delta": 0,
+        "transmitted_packets_delta": 0,
+        "current_rate": null,
+        "peak_received_bits_per_second": null,
+        "peak_transmitted_bits_per_second": null,
+        "error_delta": 0,
+        "drop_delta": 0,
+        "limitations": [
+          {
+            "code": "cumulative_counters_no_attribution"
+          },
+          {
+            "code": "no_compatible_counter_interval"
+          }
+        ]
+      },
+      "radio": {
+        "state": "available",
+        "source": "platform_radio_telemetry",
+        "applicable": true,
+        "observation_completed": true,
+        "samples": 1,
+        "latest_signal_dbm": -52.0,
+        "worst_signal_dbm": -52.0,
+        "latest_signal_percent": 84.0,
+        "worst_signal_percent": 84.0,
+        "latest_channel": 149,
+        "channel_changes": 0
+      },
+      "workload": {
+        "state": "available",
+        "source": "sampled_host_process_accounting",
+        "latest_snapshot_health": "ok",
+        "latest_snapshot_detail": "sampled process window",
+        "latest_snapshot_source": "nettop",
+        "sampled_windows": 1,
+        "observed_span_ms": 1000,
+        "latest_window_top": {
+          "process": "browser",
+          "processes": 2,
+          "received_bytes_per_second": 8192,
+          "transmitted_bytes_per_second": 4096
+        },
+        "peak_window_top": {
+          "process": "browser",
+          "processes": 2,
+          "received_bytes_per_second": 8192,
+          "transmitted_bytes_per_second": 4096
+        },
+        "limitations": [
+          {
+            "code": "sampled_host_accounting_no_endpoint_protocol_peer_person_or_intent"
+          }
+        ]
+      },
+      "neighbors": {
+        "state": "available",
+        "source": "native_neighbor_cache",
+        "latest_snapshot_health": "ok",
+        "latest_snapshot_detail": "1 cached binding",
+        "latest_snapshot_path_filter": "applied",
+        "snapshot_observations": 1,
+        "sources": [
+          "arp -an"
+        ],
+        "failed_sources": [],
+        "dwell": {
+          "current": 1,
+          "observed": 1,
+          "changed": 0,
+          "disappeared": 0
+        },
+        "limitations": [
+          {
+            "code": "cache_not_liveness_identity_activity_or_traffic"
+          }
+        ]
+      },
+      "retained_completed_windows": 1,
+      "limitations": [
+        {
+          "code": "process_local_capped_retention",
+          "maximum_windows": 8
+        },
+        {
+          "code": "immutable_after_path_transition"
+        },
+        {
+          "code": "not_current_path_evidence"
+        },
+        {
+          "code": "not_persisted"
+        }
+      ]
+    },
     "history_context": null
   }
 }

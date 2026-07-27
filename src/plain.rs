@@ -4,8 +4,9 @@ use std::time::Duration;
 use chrono::{Local, SecondsFormat};
 
 use crate::model::{
-    App, DwellCollectorScope, DwellPathIdentity, EvidenceBasis, EvidenceClaim, EvidenceCoverage,
-    EvidenceLimitation, EvidenceProgress, EvidenceProgressState, EvidenceScope, LinkSnapshot,
+    App, CompletedPathWindow, CompletedPathWindowSupportState, DwellCollectorScope,
+    DwellPathIdentity, EvidenceBasis, EvidenceClaim, EvidenceCoverage, EvidenceLimitation,
+    EvidenceProgress, EvidenceProgressState, EvidenceScope, LinkSnapshot,
     MAX_COMPLETED_PATH_DWELLS, MonitorMode, MonitorUpdate, PathDwell, Peer, PeerDwellSummary,
     PeerSnapshot, ProbeKind, Situation,
 };
@@ -51,7 +52,11 @@ pub fn format_update_for_mode(
     let elapsed = format_elapsed(app.uptime());
     let mut lines = match update {
         MonitorUpdate::Link { snapshot: link, .. } if path_changed(&before.link, link) => {
-            path_lines(&elapsed, link)
+            let mut lines = path_lines(&elapsed, link);
+            if let Some(window) = app.latest_completed_path_window(mode) {
+                lines.extend(completed_path_window_lines(&elapsed, &window));
+            }
+            lines
         }
         MonitorUpdate::Wifi {
             ssid,
@@ -685,6 +690,49 @@ fn path_lines(elapsed: &str, link: &LinkSnapshot) -> Vec<String> {
     lines
 }
 
+fn completed_path_window_lines(elapsed: &str, window: &CompletedPathWindow) -> Vec<String> {
+    let changed = if window.completed_by.changed_dimensions.is_empty() {
+        "unspecified".into()
+    } else {
+        window.completed_by.changed_dimensions.join(",")
+    };
+    let support = [
+        ("interface", window.interface.state),
+        ("radio", window.radio.state),
+        ("workload", window.workload.state),
+        ("neighbors", window.neighbors.state),
+    ]
+    .into_iter()
+    .map(|(subject, state)| format!("{subject}={}", completed_support_label(state)))
+    .collect::<Vec<_>>()
+    .join(" ");
+
+    vec![
+        format!(
+            "+{elapsed} window   completed=g{} observed={} path=\"{}\" transition=g{}→g{} changed={changed}",
+            window.generation,
+            compact_duration(Duration::from_millis(window.observed_span_ms)),
+            window.path_identity.operator_label(),
+            window.generation,
+            window.completed_by.next_generation,
+        ),
+        format!(
+            "+{elapsed} support  {support} [collector_scope={}; immutable completed window; process-local capped retention; not current-path evidence; not persisted]",
+            window.collector_scope.subject.dwell_collector_scope().label
+        ),
+    ]
+}
+
+fn completed_support_label(state: CompletedPathWindowSupportState) -> &'static str {
+    match state {
+        CompletedPathWindowSupportState::Available => "available",
+        CompletedPathWindowSupportState::Partial => "partial",
+        CompletedPathWindowSupportState::Unavailable => "unavailable",
+        CompletedPathWindowSupportState::Unsupported => "unsupported",
+        CompletedPathWindowSupportState::NotCollected => "not-collected",
+    }
+}
+
 fn peer_change_lines(
     elapsed: &str,
     before: &PeerSnapshot,
@@ -1066,6 +1114,85 @@ mod tests {
         assert!(rendered.contains(
             "interface=en0 family=ipv4 address=192.168.1.10 default_path=false temporary=true"
         ));
+    }
+
+    #[test]
+    fn path_transition_emits_the_immutable_completed_window_and_support_scope() {
+        let mut app = App::new();
+        let house = LinkSnapshot {
+            host: "workstation".into(),
+            interface: Some("en0".into()),
+            link_type: Some("wifi".into()),
+            ssid: Some("house".into()),
+            gateway: Some("192.168.1.1".into()),
+            resolvers: vec!["192.168.1.1".into()],
+            ..LinkSnapshot::empty()
+        };
+        let initial = MonitorUpdate::Link {
+            generation: 1,
+            snapshot: house,
+        };
+        let before = PlainState::from(&app);
+        app.apply(initial.clone());
+        let initial_output = format_update(&initial, &before, &app).join("\n");
+        assert!(!initial_output.contains("window   completed="));
+
+        app.path_dwell.interface.samples = 2;
+        app.path_dwell.interface.valid_intervals = 1;
+        app.path_dwell.wifi.samples = 1;
+        app.path_dwell.workload.sampled_windows = 1;
+        app.path_dwell.workload.observed = Duration::from_secs(1);
+        app.workload.health = Health::Ok;
+        app.wifi_observation_settled = true;
+        app.apply(MonitorUpdate::Peers {
+            generation: 1,
+            snapshot: PeerSnapshot {
+                health: Health::Ok,
+                detail: "empty complete cache read".into(),
+                path_filter: crate::model::PeerPathFilter::Applied,
+                sources: vec!["arp -an".into()],
+                failed_sources: Vec::new(),
+                oui_source: None,
+                peers: Vec::new(),
+            },
+        });
+        let hotspot = MonitorUpdate::Link {
+            generation: 2,
+            snapshot: LinkSnapshot {
+                host: "workstation".into(),
+                interface: Some("en0".into()),
+                link_type: Some("wifi".into()),
+                ssid: Some("hotspot".into()),
+                gateway: Some("172.20.10.1".into()),
+                resolvers: vec!["172.20.10.1".into()],
+                ..LinkSnapshot::empty()
+            },
+        };
+        let before = PlainState::from(&app);
+        app.apply(hotspot.clone());
+        let transition = format_update(&hotspot, &before, &app).join("\n");
+
+        assert!(transition.contains("window   completed=g1"), "{transition}");
+        assert!(transition.contains("path=\"workstation"), "{transition}");
+        assert!(transition.contains("transition=g1→g2"), "{transition}");
+        assert!(transition.contains("changed="), "{transition}");
+        assert!(transition.contains("interface=available"), "{transition}");
+        assert!(transition.contains("radio=available"), "{transition}");
+        assert!(transition.contains("workload=available"), "{transition}");
+        assert!(transition.contains("neighbors=available"), "{transition}");
+        assert!(
+            transition.contains("collector_scope=overview"),
+            "{transition}"
+        );
+        assert!(
+            transition.contains("immutable completed window"),
+            "{transition}"
+        );
+        assert!(
+            transition.contains("not current-path evidence"),
+            "{transition}"
+        );
+        assert!(transition.contains("not persisted"), "{transition}");
     }
 
     #[test]

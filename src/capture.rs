@@ -2491,11 +2491,11 @@ mod tests {
     #[test]
     fn timed_scene_transitions_are_receipted_and_run_between_frames() {
         let plan =
-            ReplayPlan::new(&[1, 3, 5], &[], &[], Some(CaptureScene::WifiHotspotWifi)).unwrap();
+            ReplayPlan::new(&[1, 3, 5, 7], &[], &[], Some(CaptureScene::WifiHotspotWifi)).unwrap();
 
         assert_eq!(
             plan.timestamps,
-            [1, 2, 3, 4, 5]
+            [1, 2, 3, 4, 5, 7]
                 .into_iter()
                 .map(Duration::from_secs)
                 .collect::<Vec<_>>()
@@ -2770,6 +2770,20 @@ mod tests {
             Some(crate::model::HistoryContextKind::Changed)
         );
         assert_eq!(app.completed_path_dwells.len(), 1);
+        let first_window = app
+            .latest_completed_path_window(MonitorMode::Overview)
+            .expect("transition retains the previous Wi-Fi window");
+        assert_eq!(first_window.generation, 1);
+        assert_eq!(first_window.completed_by.next_generation, 2);
+        assert_eq!(
+            first_window.path_identity.ssid.as_deref(),
+            Some("Northstar Lab")
+        );
+        assert_eq!(first_window.retained_completed_windows, 1);
+        assert!(first_window.limitations.iter().any(|limitation| matches!(
+            limitation,
+            crate::model::CompletedPathWindowLimitation::NotCurrentPathEvidence
+        )));
 
         runtime
             .advance_to(&mut app, Duration::from_secs(5))
@@ -2781,6 +2795,32 @@ mod tests {
             Some(crate::model::HistoryContextKind::Returned)
         );
         assert_eq!(app.completed_path_dwells.len(), 2);
+        let returned_window = app
+            .latest_completed_path_window(MonitorMode::Overview)
+            .expect("return retains the completed hotspot window");
+        assert_eq!(returned_window.generation, 2);
+        assert_eq!(returned_window.completed_by.next_generation, 3);
+        assert_eq!(
+            returned_window.path_identity.ssid.as_deref(),
+            Some("Field Kit")
+        );
+        assert_eq!(returned_window.retained_completed_windows, 2);
+        assert_eq!(
+            returned_window.interface.state,
+            crate::model::CompletedPathWindowSupportState::Unavailable
+        );
+        assert_eq!(
+            returned_window.radio.state,
+            crate::model::CompletedPathWindowSupportState::Unavailable
+        );
+        assert_eq!(
+            returned_window.workload.state,
+            crate::model::CompletedPathWindowSupportState::Unavailable
+        );
+        assert_eq!(
+            returned_window.neighbors.state,
+            crate::model::CompletedPathWindowSupportState::Unavailable
+        );
 
         runtime
             .advance_to(&mut app, Duration::from_secs(30))
@@ -2793,7 +2833,12 @@ mod tests {
     fn wifi_hotspot_return_scene_preserves_operator_priority_at_every_qa_size() {
         let mut app = App::with_probe_policy(ProbePolicy::Passive);
         let mut runtime = SceneRuntime::new(CaptureScene::WifiHotspotWifi, None).unwrap();
-        for (elapsed, network) in [(1, "Northstar Lab"), (3, "Field Kit"), (5, "Northstar Lab")] {
+        for (elapsed, network) in [
+            (1, "Northstar Lab"),
+            (3, "Field Kit"),
+            (5, "Northstar Lab"),
+            (7, "Northstar Lab"),
+        ] {
             runtime
                 .advance_to(&mut app, Duration::from_secs(elapsed))
                 .unwrap();
@@ -2824,7 +2869,7 @@ mod tests {
                     3 => {
                         rendered.contains("new network context") || rendered.contains("new context")
                     }
-                    5 => rendered.contains("returned"),
+                    5 | 7 => rendered.contains("returned"),
                     _ => unreachable!(),
                 };
                 if height == 10 {
@@ -2835,8 +2880,29 @@ mod tests {
                         "{rendered}"
                     );
                     assert!(!context_is_visible, "{rendered}");
+                    assert!(!rendered.contains("prior path"), "{rendered}");
                 } else {
                     assert!(context_is_visible, "{rendered}");
+                }
+                if elapsed == 7 && (width, height) == (160, 30) {
+                    assert!(
+                        rendered.contains("PATH WINDOWS / PROCESS LOCAL"),
+                        "{rendered}"
+                    );
+                    assert!(rendered.contains("prior path"), "{rendered}");
+                    assert!(rendered.contains("g2"), "{rendered}");
+                    assert!(rendered.contains("Field Kit"), "{rendered}");
+                    assert!(rendered.contains("prior support"), "{rendered}");
+                    assert!(
+                        rendered.contains("unavailable: counters, radio, workload, cache"),
+                        "{rendered}"
+                    );
+                    assert!(!rendered.contains("counters +"), "{rendered}");
+                    let history = rendered
+                        .lines()
+                        .find(|line| line.contains("history"))
+                        .expect("wide transition view retains history context");
+                    assert!(!history.contains('…'), "{history}");
                 }
             }
         }

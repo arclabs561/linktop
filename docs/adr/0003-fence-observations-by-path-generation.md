@@ -117,3 +117,18 @@ diagnosis, establish peer liveness or location, or become durable history. It
 is never combined with another generation as though both described one path.
 It exists only to explain transitions observed during this process and is
 emitted by the explicit bounded plain-dwell summary.
+
+## Update (2026-07-27): project the completed window at its transition
+
+The newest completed summary is now joined to the path-change record that
+ended it and projected as one typed `CompletedPathWindow`. It carries the
+prior path identity and observed span, the next generation and changed
+dimensions, the subject's collector scope, per-source support state and
+provenance, retained aggregates, and explicit retention limitations.
+
+This does not weaken the generation fence. The object is immutable after the
+transition, cannot support the new generation's diagnosis, accepts no late
+result, is capped with the existing process-local queue, and is not persisted.
+The wide TUI and plain stream may summarize it, and live JSONL may serialize
+it, but none of those projections combines old and new evidence as one path or
+creates a durable episode contract.
