@@ -377,11 +377,15 @@ calling shell disables color. Linktop waits for the child view to become ready,
 settles after each replayed action, and verifies the tmux pane dimensions before
 writing a frame. The child does not inherit `LINKTOP_HISTORY` or an ambient
 fixture selector; an explicit history path remains the only history authority.
+Scene environment values are ignored by ordinary TUI entry points and are
+accepted only with the native runner's hidden internal-child process mode.
 Interrupting the transaction also terminates its isolated tmux server and child.
 Timed native scenes render their baseline before readiness, then begin from a
-private parent/child start gate. Linktop waits for the expected SSID and path
-generation before each frame, avoiding child-startup timing as a hidden oracle.
-The gate is removed when the transaction exits and is never a manifest artifact.
+private parent/child start gate. At evidence-capable sizes Linktop waits for the
+expected path marker and generation before each frame. The explicit sub-60×10
+fallback cannot show a network label, so it exposes and verifies the generation
+with the resize guidance instead. The gate is removed when the transaction
+exits and is never a manifest artifact.
 
 The command writes to `./linktop-captures/` by default. Repository development
 can use `just capture-ui overview 160 26 2,5,12`, which keeps artifacts under

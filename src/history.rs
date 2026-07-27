@@ -424,8 +424,8 @@ pub(crate) fn summarize(
                 "returned to a known network context · {matching} exact prior · last exact {exact_age} · changed {dimensions} · {attachment} · place unknown"
             ),
             format!(
-                "returned · {matching} prior · {} · changed {dimensions} · place unknown",
-                compact_age(&exact_age)
+                "returned · {matching} prior · {} · {compact_attachment} · place unknown",
+                compact_age(&exact_age),
             ),
         ),
         (ContextRelationV0::ContextChanged, ExactContextMatchV0::NoPriorExactKeyMatch)
@@ -843,6 +843,8 @@ mod tests {
                 .summary
                 .contains("returned to a known network context")
         );
+        assert!(summary.compact_summary.contains("known BSSID"));
+        assert!(!summary.compact_summary.contains("changed "));
         assert!(summary.summary.contains("place unknown"));
         assert_eq!(
             summary.place_authority,

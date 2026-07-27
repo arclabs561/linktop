@@ -239,3 +239,13 @@ replace host collectors with an inert monitor, reject active probes and
 durable history, and do not create a general event language or assertion
 engine. Process-local synthetic comparison exercises rendering and reducers;
 it does not read, append, or retain private operator evidence.
+
+## Update (2026-07-27): verify timed scenes in the unsupported-size fallback
+
+The explicit sub-60×10 fallback now renders the current path generation beside
+its terminal dimensions and resize guidance. Native timed-scene readiness
+checks the typed checkpoint's path marker plus generation in evidence-capable
+layouts. In the unsupported-size fallback, where the network label is
+deliberately absent, it checks the expected generation plus the visible fallback
+identity instead. This preserves stage verification at 40×8 without claiming
+that an invisible SSID was observed in the frame.

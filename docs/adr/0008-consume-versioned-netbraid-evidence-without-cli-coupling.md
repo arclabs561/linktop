@@ -250,3 +250,19 @@ records enter the view, not their source evidence timestamps. Revisit the
 embedded-fixture footprint if Netbraid provides a narrower evidence-only
 built-in API, if fail-closed validation of unrelated fixture oracles becomes an
 availability problem, or if the scenario corpus grows materially.
+
+## Update (2026-07-27): require explicit native-child authority for scenes
+
+An environment value alone no longer selects a synthetic scene. The native
+screenshot parent must also launch the executable in a hidden internal-child
+mode that is valid only for a passive interactive overview, link, or peers
+process. Ordinary TUI entry points ignore inherited scene environment values,
+so a stale shell variable cannot replace live collection with fixture evidence.
+The parent still clears inherited history and scene values before installing
+the requested scene.
+
+This mode is an accidental-activation boundary, not authentication against a
+deliberate same-user process. The private gate remains a synchronization
+primitive for timed scenes, not a credential. A stronger capability-file or
+inherited-descriptor protocol is deferred until native screenshot children cross
+a user, privilege, or process-trust boundary.
