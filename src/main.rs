@@ -174,10 +174,11 @@ enum LiveOutput {
     Once,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InteractionState {
     pub active_mode: MonitorMode,
     pub peer_offset: usize,
+    pub peer_selection: Option<model::PeerKey>,
     pub can_navigate: bool,
 }
 
@@ -186,8 +187,36 @@ impl InteractionState {
         Self {
             active_mode,
             peer_offset: 0,
+            peer_selection: None,
             can_navigate,
         }
+    }
+
+    pub(crate) fn normalize_peer_selection(&mut self, app: &model::App) {
+        let keys = ui::ordered_peer_keys(app);
+        if keys.is_empty() {
+            self.peer_offset = 0;
+            self.peer_selection = None;
+            return;
+        }
+        let selected_index = self
+            .peer_selection
+            .as_ref()
+            .and_then(|selected| keys.iter().position(|key| key == selected))
+            .unwrap_or_else(|| self.peer_offset.min(keys.len() - 1));
+        self.peer_offset = selected_index;
+        self.peer_selection = Some(keys[selected_index].clone());
+    }
+
+    fn select_peer_index(&mut self, app: &model::App, index: usize) {
+        let keys = ui::ordered_peer_keys(app);
+        if keys.is_empty() {
+            self.peer_offset = 0;
+            self.peer_selection = None;
+            return;
+        }
+        self.peer_offset = index.min(keys.len() - 1);
+        self.peer_selection = Some(keys[self.peer_offset].clone());
     }
 }
 
@@ -976,6 +1005,7 @@ fn run_tui(
             if let Some(scene) = screenshot_scene {
                 capture::ensure_scene(&mut app, scene);
             }
+            interaction.normalize_peer_selection(&app);
             terminal.draw(|frame| {
                 ui::render(
                     frame,
@@ -1019,11 +1049,12 @@ pub(crate) fn apply_tui_key(
     key: KeyCode,
     peer_page_capacity: usize,
 ) -> InteractionOutcome {
+    interaction.normalize_peer_selection(app);
     let navigation_capacity = peer_page_capacity.max(1);
-    let maximum_peer_offset = if peer_page_capacity == 0 {
+    let maximum_peer_offset = if peer_page_capacity == 0 || app.peers.peers.is_empty() {
         0
     } else {
-        app.peers.peers.len().saturating_sub(peer_page_capacity)
+        app.peers.peers.len().saturating_sub(1)
     };
     interaction.peer_offset = interaction.peer_offset.min(maximum_peer_offset);
     match key {
@@ -1061,23 +1092,29 @@ pub(crate) fn apply_tui_key(
             interaction.active_mode = next_dashboard_view(interaction.active_mode);
         }
         KeyCode::Down | KeyCode::Char('j') if interaction.active_mode == MonitorMode::Peers => {
-            interaction.peer_offset = (interaction.peer_offset + 1).min(maximum_peer_offset);
+            interaction
+                .select_peer_index(app, (interaction.peer_offset + 1).min(maximum_peer_offset));
         }
         KeyCode::Up | KeyCode::Char('k') if interaction.active_mode == MonitorMode::Peers => {
-            interaction.peer_offset = interaction.peer_offset.saturating_sub(1);
+            interaction.select_peer_index(app, interaction.peer_offset.saturating_sub(1));
         }
         KeyCode::PageDown if interaction.active_mode == MonitorMode::Peers => {
-            interaction.peer_offset =
-                (interaction.peer_offset + navigation_capacity).min(maximum_peer_offset);
+            interaction.select_peer_index(
+                app,
+                (interaction.peer_offset + navigation_capacity).min(maximum_peer_offset),
+            );
         }
         KeyCode::PageUp if interaction.active_mode == MonitorMode::Peers => {
-            interaction.peer_offset = interaction.peer_offset.saturating_sub(navigation_capacity);
+            interaction.select_peer_index(
+                app,
+                interaction.peer_offset.saturating_sub(navigation_capacity),
+            );
         }
         KeyCode::Home | KeyCode::Char('g') if interaction.active_mode == MonitorMode::Peers => {
-            interaction.peer_offset = 0;
+            interaction.select_peer_index(app, 0);
         }
         KeyCode::End | KeyCode::Char('G') if interaction.active_mode == MonitorMode::Peers => {
-            interaction.peer_offset = maximum_peer_offset;
+            interaction.select_peer_index(app, maximum_peer_offset);
         }
         _ => {}
     }
@@ -1427,17 +1464,48 @@ mod cli_tests {
         let mut interaction = InteractionState::new(MonitorMode::Peers, false);
 
         apply_tui_key(&mut app, &controls, &mut interaction, KeyCode::End, 7);
-        assert_eq!(interaction.peer_offset, 20);
+        assert_eq!(interaction.peer_offset, 26);
         apply_tui_key(&mut app, &controls, &mut interaction, KeyCode::Up, 7);
-        assert_eq!(interaction.peer_offset, 19);
+        assert_eq!(interaction.peer_offset, 25);
 
         apply_tui_key(&mut app, &controls, &mut interaction, KeyCode::Up, 10);
-        assert_eq!(interaction.peer_offset, 16);
+        assert_eq!(interaction.peer_offset, 24);
         apply_tui_key(&mut app, &controls, &mut interaction, KeyCode::PageUp, 10);
-        assert_eq!(interaction.peer_offset, 6);
+        assert_eq!(interaction.peer_offset, 14);
 
         apply_tui_key(&mut app, &controls, &mut interaction, KeyCode::End, 0);
         assert_eq!(interaction.peer_offset, 0);
+    }
+
+    #[test]
+    fn peer_selection_survives_attention_reranking_by_stable_key() {
+        let (controls, _) = std::sync::mpsc::channel();
+        let mut app = model::App::with_probe_policy(ProbePolicy::Passive);
+        capture::ensure_scene(&mut app, capture::CaptureScene::DensePeers);
+        let mut interaction = InteractionState::new(MonitorMode::Peers, false);
+
+        for _ in 0..8 {
+            apply_tui_key(&mut app, &controls, &mut interaction, KeyCode::Down, 7);
+        }
+        let selected = interaction.peer_selection.clone().unwrap();
+        assert_eq!(interaction.peer_offset, 8);
+
+        let peer = app
+            .peers
+            .peers
+            .iter_mut()
+            .find(|peer| model::PeerKey::from_peer(peer) == selected)
+            .unwrap();
+        peer.binding_conflict = true;
+        interaction.normalize_peer_selection(&app);
+
+        assert_eq!(interaction.peer_selection.as_ref(), Some(&selected));
+        let expected_index = ui::ordered_peer_keys(&app)
+            .iter()
+            .position(|key| key == &selected)
+            .unwrap();
+        assert_eq!(interaction.peer_offset, expected_index);
+        assert!(interaction.peer_offset < 8);
     }
 
     #[test]

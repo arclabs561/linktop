@@ -657,13 +657,13 @@ pub struct PeerDwellSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct PeerKey {
-    interface: Option<String>,
-    address: String,
+pub(crate) struct PeerKey {
+    pub interface: Option<String>,
+    pub address: String,
 }
 
 impl PeerKey {
-    fn from_peer(peer: &Peer) -> Self {
+    pub(crate) fn from_peer(peer: &Peer) -> Self {
         Self {
             interface: peer.interface.clone(),
             address: peer.address.clone(),

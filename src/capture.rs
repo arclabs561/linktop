@@ -632,6 +632,7 @@ pub fn run(request: CaptureRequest) -> Result<()> {
     let mut interaction = InteractionState {
         active_mode: mode,
         peer_offset: 0,
+        peer_selection: None,
         can_navigate: mode == MonitorMode::Overview,
     };
     let mut current_size = size;
@@ -671,6 +672,7 @@ pub fn run(request: CaptureRequest) -> Result<()> {
             if !plan.frames.contains(&target) {
                 continue;
             }
+            interaction.normalize_peer_selection(&app);
             frame_index += 1;
             let frame = terminal
                 .draw(|frame| {
@@ -844,6 +846,7 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
     let mut projected_interaction = InteractionState {
         active_mode: mode,
         peer_offset: 0,
+        peer_selection: None,
         can_navigate: mode == MonitorMode::Overview,
     };
     let (projected_controls, _projected_controls_rx) = mpsc::channel();
@@ -2097,6 +2100,7 @@ mod tests {
         let mut interaction = InteractionState {
             active_mode: MonitorMode::Overview,
             peer_offset: 0,
+            peer_selection: None,
             can_navigate: true,
         };
         apply_tui_key(
