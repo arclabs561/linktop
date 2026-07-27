@@ -88,7 +88,7 @@ with a guess.
 
 ## Attachment, network context, and place are different axes
 
-“House” and “hotspot” are examples, not product categories. Linktop and Netmon
+“House” and “hotspot” are examples, not product categories. Linktop and Netbraid
 need an open-ended model that can represent a mesh roam inside one building,
 the same hotspot moving between cities, repeated hotel or office networks, a
 VPN change at a fixed desk, and unrelated sites that reuse the same SSID and
@@ -213,7 +213,7 @@ providers.
 also makes an important acquisition limit explicit: faster channel hopping can
 increase discovery coverage while reducing per-channel completeness, and the
 actual tradeoff depends on the protocol, hardware, driver, and collection goal.
-Linktop and Netmon must therefore show observer, interval, channel or protocol
+Linktop and Netbraid must therefore show observer, interval, channel or protocol
 coverage, and gaps rather than presenting every absent device or packet as
 negative evidence.
 
@@ -256,7 +256,7 @@ used as a second verdict window.
   kernel confirmation, and freshness.
 - Say that peer activity is unknown when only cache evidence exists.
 - When explicitly configured, compare the completed passive host-path context
-  with Netmon v0 history and distinguish exact recurrence, compatible incomplete
+  with Netbraid v0 history and distinguish exact recurrence, compatible incomplete
   evidence, and conflicting context without assigning a physical place.
 - Within exact recurrence, distinguish known, newly observed, and unavailable
   BSSID attachment evidence; keep gateway bindings as context anchors and say
@@ -273,7 +273,7 @@ used as a second verdict window.
 - Recommend the smallest test that distinguishes the leading hypotheses, then
   ask before sending it.
 
-### Later: broader Netmon evidence and fusion
+### Later: broader Netbraid evidence and fusion
 
 - Durable per-path baselines and recurring episode shapes.
 - Multi-vantage comparison across host, router/controller, local sensor, and
@@ -323,12 +323,12 @@ signature/model versions, alternatives, conflicts, sensitivity, and an
 open-world unknown result.
 
 Traffic capture remains explicit and source-owned. Linktop does not silently
-gain packet privileges. A future netmon adapter may normalize records from
+gain packet privileges. A future Netbraid adapter may normalize records from
 existing acquisition or dissection tools and give Linktop a policy-neutral
 projection. That projection must retain collection-policy metadata supplied by
 the deployment that acquired it. Purpose, site, retention, export, aliases,
 assignments, consent, and credentials remain outside these diagnostic tools.
-Neither Linktop nor Netmon automatically assigns people to unknown devices or
+Neither Linktop nor Netbraid automatically assigns people to unknown devices or
 creates a global fingerprint index.
 
 ## Evidence language
@@ -352,10 +352,10 @@ more useful than an ungrounded percentage.
 | Owner | Responsibility |
 | --- | --- |
 | Linktop | Immediate host-path situation, session episodes, fresh local evidence, focused views, bounded tests, and operator projections. |
-| Netmon Rust core | Versioned observations, source-preserving alignment, deterministic replay, temporal reducers, baselines, advisory candidate assessments, and explanations. |
+| Netbraid Rust core | Versioned observations, source-preserving alignment, deterministic replay, temporal reducers, baselines, advisory candidate assessments, and explanations. |
 | Specialist tools and deployments | Packet/RF acquisition, dissection, controller state, active scans, deployed multi-source and identity fusion, collection policy, retention, access control, and operator-verified identity material. |
 
-Linktop remains independently useful without a Netmon executable, daemon,
+Linktop remains independently useful without a Netbraid executable, daemon,
 controller, database, or cloud account. Its exact-revision Rust library
 dependencies perform no collection or deployment work.
 
@@ -370,7 +370,7 @@ dependencies perform no collection or deployment work.
   expected information gain.
 - Do not add a learned model without an unknown class, versioned features,
   drift evaluation, and replayable ground truth.
-- Do not make a Netmon process, store, controller, or deployment a Linktop
+- Do not make a Netbraid process, store, controller, or deployment a Linktop
   runtime requirement; imported libraries remain policy-neutral and pinned
   until stable compatibility gates pass.
 - Do not let a language model originate uncited network facts or mutate the

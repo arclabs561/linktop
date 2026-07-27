@@ -8,10 +8,10 @@ supersedes: none
 superseded_by: none
 extends: 0001, 0003, 0005, 0006, 0007
 confidence: medium
-review_trigger: the v0 contract fails real hotspot/site recurrence fixtures, another ecosystem needs the contract, Netmon libraries gain collection or deployment dependencies, or the stable multi-modal schema gate passes
+review_trigger: the v0 contract fails real hotspot/site recurrence fixtures, another ecosystem needs the contract, Netbraid libraries gain collection or deployment dependencies, or the stable multi-modal schema gate passes
 ---
 
-# ADR-0008: consume versioned Netmon evidence without CLI coupling
+# ADR-0008: consume versioned Netbraid evidence without CLI coupling
 
 ## Context
 
@@ -190,3 +190,18 @@ payload.
 This preserves the existing decision that active probes are not smuggled into
 passive durable context and prevents the same stored evidence from changing
 meaning merely because the enclosing overview enabled another collector.
+
+## Update (2026-07-26): follow the Netbraid product rename without changing the wire protocol
+
+The source repository, Rust package family, and current producer identity are
+now Netbraid. Linktop imports `netbraid-evidence` and `netbraid-replay` from the
+public Netbraid repository at one exact commit. It still does not invoke the
+Netbraid executable, depend on a sibling checkout, or require any runtime
+service.
+
+Established serialized identifiers remain `netmon.*`, including
+`netmon.host_path_observation.v0`. Those identifiers are compatibility
+protocols, not product branding, and this dependency rename must not rewrite
+stored history. The exact Git revision remains the source boundary until the
+same 0.2 packages are available from crates.io and Linktop can adopt them in a
+separately verified dependency-only change.

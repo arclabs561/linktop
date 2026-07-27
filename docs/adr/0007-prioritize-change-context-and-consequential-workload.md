@@ -3,7 +3,7 @@ id: 0007
 status: accepted
 governs: src/main.rs, src/model.rs, src/net.rs, src/plain.rs, src/ui.rs, README.md, docs/design/focused-view-lifetimes.md, docs/design/network-situation-intelligence.md
 why: the overview exposed many correct fields but did not consistently surface the network transition, acquisition context, or host activity that would change an operator's next decision.
-rejected: add more permanent panels (increases competition without establishing priority); optimize only for the lowest common platform surface (throws away high-value native evidence); infer peer activity from neighbor-cache state (the source has no flow vantage); enable packet or socket capture in the default overview (silently widens privilege, privacy, and acquisition scope); give Linktop a private history schema or database (duplicates Netmon replay semantics and creates a second retention owner).
+rejected: add more permanent panels (increases competition without establishing priority); optimize only for the lowest common platform surface (throws away high-value native evidence); infer peer activity from neighbor-cache state (the source has no flow vantage); enable packet or socket capture in the default overview (silently widens privilege, privacy, and acquisition scope); give Linktop a private history schema or database (duplicates Netbraid replay semantics and creates a second retention owner).
 supersedes: none
 superseded_by: none
 extends: 0002, 0003, 0005, 0006
@@ -133,7 +133,7 @@ durable storage by default.
 
 Endpoint relationships, protocol fingerprints, device/service candidates,
 cross-session baselines, and multi-vantage fusion remain future versioned
-netmon evidence. Adding them requires source, observer, interval, collection
+Netbraid evidence. Adding them requires source, observer, interval, collection
 policy, contradiction, and unknown-state semantics before they can compete for
 overview space.
 
@@ -148,11 +148,11 @@ overview space.
   what the kernel remembers about address resolution, not who is active or
   exchanging traffic.
 - **Use socket or packet inspection for richer attribution.** Deferred to a
-  separately named acquisition mode or netmon adapter because it changes
+  separately named acquisition mode or Netbraid adapter because it changes
   privacy, privilege, and retention concerns.
 - **Persist known network signatures in Linktop.** Deferred. Session-local
   transitions are sufficient for the standalone instrument; durable baselines
-  and replay belong in netmon after the existing schema and second-consumer
+  and replay belong in Netbraid after the existing schema and second-consumer
   gates.
 
 ## Consequences
@@ -186,7 +186,7 @@ acquisition boundary.
 ADR-0008 fired the durable-comparison review trigger without changing Linktop's
 information hierarchy. A recurrence or context conflict now outranks static
 inventory when no newer in-session transition exists. The data contract and
-comparison semantics remain Netmon-owned; Linktop owns the explicit local path,
+comparison semantics remain Netbraid-owned; Linktop owns the explicit local path,
 live collection, and projection.
 
 ## Update (2026-07-26): protect the minimum operator transaction

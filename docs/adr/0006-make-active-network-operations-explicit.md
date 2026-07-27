@@ -124,7 +124,7 @@ This rule also governs future features:
 - packet or RF capture requires an explicit acquisition mode and privilege
   disclosure even when it is passive on the medium;
 - active discovery belongs in a named, bounded transaction, not `peers`;
-- imported controller, flow, or netmon evidence retains its source-owned
+- imported controller, flow, or Netbraid evidence retains its source-owned
   collection-policy reference; and
 - reverse DNS or service enrichment is opt-in unless the result came from an
   already local cache or advertisement.
@@ -211,7 +211,7 @@ ADR-0005's separation of path health from evidence coverage.
 
 ## Update (2026-07-24): imported policy remains non-acquiring
 
-ADR-0008 fired the Netmon collection-policy review trigger. The imported v0
+ADR-0008 fired the Netbraid collection-policy review trigger. The imported v0
 record can describe passive or active provenance, but the libraries initiate no
 collection. Linktop writes only its passive host-local context to history; live
 active probe results remain separate episode evidence. The existing acquisition

@@ -80,7 +80,7 @@ The underlay is topology evidence, not physical-place or identity evidence.
 SSID, association ID, BSSID visibility, gateway binding, and recurrence retain
 their existing source and interpretation limits.
 
-Netmon's experimental `HostPathObservationV0` has no underlay object. Linktop
+Netbraid's experimental `HostPathObservationV0` has no underlay object. Linktop
 keeps its interface, link type, and next hop mapped to the effective route and
 retains separately representable Wi-Fi association evidence. It does not
 flatten the physical gateway into the effective next-hop field; missing

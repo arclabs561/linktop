@@ -3718,7 +3718,7 @@ mod tests {
             compact_summary: "recurring · 3 prior · place unknown".into(),
             context_anchor: "gateway link binding observed".into(),
             place_authority: "unknown".into(),
-            evidence: "netmon host-path v0".into(),
+            evidence: "Netbraid history · netmon.host_path_observation.v0".into(),
         });
         app.link.resolvers = vec!["192.168.1.1".into()];
         app.link.addresses = (1..=5)
@@ -4424,7 +4424,7 @@ mod tests {
             compact_summary: "recurring · 3 prior · 2m · BSSID hidden · place unknown".into(),
             context_anchor: "gateway link binding observed".into(),
             place_authority: "unknown · assertion source not configured".into(),
-            evidence: "netmon host-path v0 · context anchor: gateway link binding observed · place unknown; assertion source not configured".into(),
+            evidence: "Netbraid history · netmon.host_path_observation.v0 · context anchor: gateway link binding observed · place unknown; assertion source not configured".into(),
         });
         for (width, height) in [(160, 30), (100, 24), (70, 14)] {
             let backend = TestBackend::new(width, height);
