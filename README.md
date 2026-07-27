@@ -16,7 +16,11 @@ localization.
 ## Passive observations
 
 - The selected default route, interface, link type, next-hop gateway, resolver
-  set, local addresses, and SSID when the platform exposes it.
+  set, local addresses, and SSID when the platform exposes it. On macOS, when
+  a tunnel such as `utun` owns the effective default route, Linktop separately
+  reports the corroborated physical underlay (for example, `utun4 [vpn] over
+  en0 [wifi]`) and keeps radio, DHCP, counter, and neighbor-cache evidence
+  attached to that underlay.
 - On macOS, the current Wi-Fi association ID, associated BSSID when Location
   Services policy exposes it, DHCP method/state/server, subnet, lease window,
   security mode, and router-ARP verification from
@@ -26,19 +30,21 @@ localization.
 - Wi-Fi signal/noise, channel, PHY, and link rate when native tools expose
   those fields. Missing platform capabilities show as unavailable; they do not
   abort the rest of the diagnosis.
-- Active-interface byte/packet rates plus error and drop deltas from native
-  kernel counters. Rates are interval deltas; the structured snapshot also
+- Physical-link byte/packet rates plus error and drop deltas from native kernel
+  counters when an underlay is established; otherwise rates follow the
+  effective interface. Rates are interval deltas; the structured snapshot also
   retains cumulative counters.
 - On macOS, the busiest local process groups by numeric receive/transmit bytes
   over a one-second `nettop` external-interface window, sampled no more often
   than every five seconds. This is host-kernel process accounting, not
   endpoint, protocol, peer, person, or intent attribution; a VPN extension may
   own tunneled bytes for another application.
-- Numeric ARP/NDP neighbor-cache entries for the active interface and its current
-  subnets. This reads what the operating system already knows and excludes
-  rows outside the new path's interface or prefixes after a switch; same-prefix
-  rows that the kernel retains remain explicitly cache evidence, not proof of
-  current presence. Linktop does not scan the LAN, resolve names, or claim that
+- Numeric ARP/NDP neighbor-cache entries for the physical underlay and its
+  current subnets when established, otherwise for the effective interface.
+  This reads what the operating system already knows and excludes rows outside
+  the new path's interface or prefixes after a switch; same-prefix rows that
+  the kernel retains remain explicitly cache evidence, not proof of current
+  presence. Linktop does not scan the LAN, resolve names, or claim that
   cached endpoints are alive. If only some native cache sources complete,
   Linktop marks passive coverage `PARTIAL` instead of implying that the view is
   complete. When a
@@ -56,9 +62,10 @@ localization.
   return, state change, kernel-confirmed evidence, then stable cache rows. The
   focused view reports traffic and application activity as unknown because a
   native neighbor cache has no flow vantage.
-- Path transitions. A change in interface, link type, SSID, macOS Wi-Fi
-  association ID, gateway, resolver set, IPv4 address, or IPv6 /64 prefix
-  starts a new observation generation.
+- Path transitions. A change in effective interface or link type, physical
+  underlay interface/link/gateway, SSID, macOS Wi-Fi association ID, effective
+  gateway, resolver set, IPv4 address, or IPv6 /64 prefix starts a new
+  observation generation.
   Linktop clears path-scoped histories and ignores late results from the old
   Wi-Fi, hotspot, Ethernet, or VPN path. A momentary loss of the default route
   during association is shown as `switching networks` for up to three seconds
@@ -173,6 +180,11 @@ the final unterminated JSON fragment is malformed, Linktop can compare against
 the valid prefix but keeps the log read-only and reports the interrupted tail.
 Internal or newline-terminated corruption remains unavailable rather than being
 silently skipped.
+
+The experimental Netmon v0 history record has no separate underlay object.
+Under a VPN, Linktop preserves the effective interface/link fields and
+separately representable Wi-Fi association evidence; it does not relabel the
+physical gateway as the effective next hop.
 
 A recurring network context is not automatically a physical location. The same
 SSID and private gateway address can occur at unrelated sites, one site can

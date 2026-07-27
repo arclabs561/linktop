@@ -119,6 +119,8 @@ pub struct LinkSnapshot {
     pub host: String,
     pub interface: Option<String>,
     pub link_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underlay: Option<PathUnderlay>,
     pub ssid: Option<String>,
     pub ssid_restricted: bool,
     pub wifi: Option<WifiTelemetry>,
@@ -127,6 +129,13 @@ pub struct LinkSnapshot {
     pub resolvers: Vec<String>,
     pub addresses: Vec<Address>,
     pub network_configuration: Option<Box<NetworkConfiguration>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PathUnderlay {
+    pub interface: String,
+    pub link_type: String,
+    pub gateway: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -198,6 +207,7 @@ pub struct DwellPathIdentity {
     pub host: String,
     pub interface: Option<String>,
     pub link_type: Option<String>,
+    pub underlay: Option<PathUnderlay>,
     pub ssid: Option<String>,
     pub ssid_restricted: bool,
     pub connection_id: Option<String>,
@@ -213,6 +223,7 @@ impl DwellPathIdentity {
             host: link.host.clone(),
             interface: fingerprint.interface,
             link_type: fingerprint.link_type,
+            underlay: fingerprint.underlay,
             ssid: fingerprint.ssid,
             ssid_restricted: fingerprint.ssid_restricted,
             connection_id: fingerprint.connection_id,
@@ -235,10 +246,18 @@ impl DwellPathIdentity {
             })
             .unwrap_or_else(|| "network identity unavailable".into());
         let gateway = self.gateway.as_deref().unwrap_or("no gateway");
-        format!(
-            "{} → {interface} [{link_type} / {network}] → {gateway}",
-            self.host
-        )
+        if let Some(underlay) = &self.underlay {
+            let underlay_gateway = underlay.gateway.as_deref().unwrap_or("no gateway");
+            format!(
+                "{} → {interface} [{link_type}] over {} [{} / {network}] → {underlay_gateway}",
+                self.host, underlay.interface, underlay.link_type
+            )
+        } else {
+            format!(
+                "{} → {interface} [{link_type} / {network}] → {gateway}",
+                self.host
+            )
+        }
     }
 }
 
@@ -442,6 +461,7 @@ impl LinkSnapshot {
             host: "discovering".into(),
             interface: None,
             link_type: None,
+            underlay: None,
             ssid: None,
             ssid_restricted: false,
             wifi: None,
@@ -454,9 +474,62 @@ impl LinkSnapshot {
     }
 
     pub(crate) fn requires_radio_evidence(&self) -> bool {
+        self.observation_link_type()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("wifi"))
+    }
+
+    fn requires_underlay_evidence(&self) -> bool {
         self.link_type
             .as_deref()
-            .is_some_and(|kind| kind.eq_ignore_ascii_case("wifi"))
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("vpn"))
+    }
+
+    pub(crate) fn observation_interface(&self) -> Option<&str> {
+        self.underlay
+            .as_ref()
+            .map(|underlay| underlay.interface.as_str())
+            .or(self.interface.as_deref())
+    }
+
+    pub(crate) fn observation_gateway(&self) -> Option<&str> {
+        self.underlay
+            .as_ref()
+            .and_then(|underlay| underlay.gateway.as_deref())
+            .or(self.gateway.as_deref())
+    }
+
+    pub(crate) fn observation_link_type(&self) -> Option<&str> {
+        self.underlay
+            .as_ref()
+            .map(|underlay| underlay.link_type.as_str())
+            .or(self.link_type.as_deref())
+    }
+
+    pub(crate) fn operator_path(&self) -> String {
+        let interface = self.interface.as_deref().unwrap_or("unknown interface");
+        let link_type = self.link_type.as_deref().unwrap_or("unknown link");
+        let network = self
+            .ssid
+            .as_deref()
+            .map(|value| format!(" / {value}"))
+            .or_else(|| {
+                self.ssid_restricted
+                    .then(|| " / SSID hidden by macOS".into())
+            })
+            .unwrap_or_default();
+        if let Some(underlay) = &self.underlay {
+            let gateway = underlay.gateway.as_deref().unwrap_or("unknown gateway");
+            format!(
+                "{} ──▶ {interface} [{link_type}] over {} [{}{}] ──▶ {gateway}",
+                self.host, underlay.interface, underlay.link_type, network
+            )
+        } else {
+            let gateway = self.gateway.as_deref().unwrap_or("unknown gateway");
+            format!(
+                "{} ──▶ {interface} [{link_type}{network}] ──▶ {gateway}",
+                self.host
+            )
+        }
     }
 
     pub(crate) fn path_fingerprint(&self) -> PathFingerprint {
@@ -477,6 +550,7 @@ impl LinkSnapshot {
         PathFingerprint {
             interface: self.interface.clone(),
             link_type: self.link_type.clone(),
+            underlay: self.underlay.clone(),
             ssid: self.ssid.clone(),
             ssid_restricted: self.ssid_restricted,
             connection_id: self
@@ -494,6 +568,7 @@ impl LinkSnapshot {
             .iter()
             .filter(|address| address.is_default)
             .filter_map(|address| match address.address.parse::<IpAddr>().ok()? {
+                IpAddr::V4(_) if self.underlay.is_some() => None,
                 IpAddr::V4(value) => self
                     .network_configuration
                     .as_deref()
@@ -522,8 +597,19 @@ impl LinkSnapshot {
                     .then(|| " / SSID hidden by macOS".into())
             })
             .unwrap_or_default();
-        let gateway = self.gateway.as_deref().unwrap_or("no gateway");
-        format!("{interface}{ssid} via {gateway}")
+        if let Some(underlay) = &self.underlay {
+            let gateway = underlay.gateway.as_deref().unwrap_or("no gateway");
+            format!(
+                "{interface} [{}] over {} [{}{}] via {gateway}",
+                self.link_type.as_deref().unwrap_or("unknown link"),
+                underlay.interface,
+                underlay.link_type,
+                ssid
+            )
+        } else {
+            let gateway = self.gateway.as_deref().unwrap_or("no gateway");
+            format!("{interface}{ssid} via {gateway}")
+        }
     }
 }
 
@@ -531,6 +617,7 @@ impl LinkSnapshot {
 pub(crate) struct PathFingerprint {
     interface: Option<String>,
     link_type: Option<String>,
+    underlay: Option<PathUnderlay>,
     ssid: Option<String>,
     ssid_restricted: bool,
     connection_id: Option<String>,
@@ -547,6 +634,27 @@ impl PathFingerprint {
         }
         if self.link_type != current.link_type {
             changed.push("link type");
+        }
+        if self.underlay.as_ref().map(|value| &value.interface)
+            != current.underlay.as_ref().map(|value| &value.interface)
+        {
+            changed.push("underlay interface");
+        }
+        if self.underlay.as_ref().map(|value| &value.link_type)
+            != current.underlay.as_ref().map(|value| &value.link_type)
+        {
+            changed.push("underlay link type");
+        }
+        if self
+            .underlay
+            .as_ref()
+            .and_then(|value| value.gateway.as_ref())
+            != current
+                .underlay
+                .as_ref()
+                .and_then(|value| value.gateway.as_ref())
+        {
+            changed.push("underlay gateway");
         }
         if self.ssid != current.ssid || self.ssid_restricted != current.ssid_restricted {
             changed.push("SSID");
@@ -1500,6 +1608,7 @@ impl App {
         let link_incomplete = self.link.interface.is_none()
             || self.link.resolvers.is_empty()
             || self.link.addresses.is_empty()
+            || (self.link.requires_underlay_evidence() && self.link.underlay.is_none())
             || self.interface_counters.is_none();
         let radio_missing = self.link.requires_radio_evidence() && self.link.wifi.is_none();
         let active_evidence_unavailable = !self.probe_policy.is_active()
@@ -1988,6 +2097,7 @@ fn link_evidence_incomplete(
     link.interface.is_none()
         || link.resolvers.is_empty()
         || link.addresses.is_empty()
+        || (link.requires_underlay_evidence() && link.underlay.is_none())
         || interface_counters.is_none()
 }
 
@@ -2725,6 +2835,65 @@ mod tests {
     }
 
     #[test]
+    fn vpn_path_transition_keeps_overlay_and_changes_wifi_underlay_generation() {
+        let vpn_link = |ssid: &str, gateway: &str, connection_id: &str| {
+            let mut link = test_link("utun4", ssid, gateway);
+            link.link_type = Some("vpn".into());
+            link.gateway = None;
+            link.underlay = Some(PathUnderlay {
+                interface: "en0".into(),
+                link_type: "wifi".into(),
+                gateway: Some(gateway.into()),
+            });
+            link.network_configuration = Some(Box::new(NetworkConfiguration {
+                connection_id: Some(connection_id.into()),
+                associated_bssid: None,
+                bssid_restricted: true,
+                method: Some("DHCP".into()),
+                state: Some("BOUND".into()),
+                server: Some(gateway.into()),
+                subnet_mask: Some("255.255.255.0".into()),
+                lease_seconds: None,
+                lease_started_at: None,
+                lease_expires_at: None,
+                router_arp_verified: Some(true),
+                security: Some("WPA3_SAE".into()),
+            }));
+            link
+        };
+        let house = vpn_link("house", "192.168.1.1", "109");
+        assert_eq!(house.observation_interface(), Some("en0"));
+        assert_eq!(house.observation_link_type(), Some("wifi"));
+        assert_eq!(house.observation_gateway(), Some("192.168.1.1"));
+        assert!(house.requires_radio_evidence());
+
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: house,
+        });
+        app.apply(MonitorUpdate::Link {
+            generation: 2,
+            snapshot: vpn_link("phone-hotspot", "172.20.10.1", "110"),
+        });
+
+        let change = app.last_path_change.as_ref().unwrap();
+        assert_eq!(app.link.interface.as_deref(), Some("utun4"));
+        assert_eq!(
+            app.link
+                .underlay
+                .as_ref()
+                .map(|underlay| underlay.interface.as_str()),
+            Some("en0")
+        );
+        assert!(change.dimensions.contains(&"SSID"));
+        assert!(change.dimensions.contains(&"Wi-Fi association"));
+        assert!(change.dimensions.contains(&"underlay gateway"));
+        assert!(change.current.contains("utun4 [vpn] over en0 [wifi"));
+        assert!(change.current.contains("phone-hotspot"));
+    }
+
+    #[test]
     fn stale_workload_sample_cannot_cross_a_path_generation() {
         let mut app = App::new();
         app.apply(MonitorUpdate::Link {
@@ -3116,6 +3285,29 @@ mod tests {
     }
 
     #[test]
+    fn vpn_without_a_corroborated_underlay_is_partial_evidence() {
+        let mut link = test_link("utun4", "unknown", "192.0.2.1");
+        link.link_type = Some("vpn".into());
+        link.gateway = None;
+        link.underlay = None;
+        let counters = InterfaceCounters {
+            interface: "utun4".into(),
+            received_bytes: 1,
+            transmitted_bytes: 2,
+            received_packets: 3,
+            transmitted_packets: 4,
+            receive_errors: 0,
+            transmit_errors: 0,
+            drops: 0,
+        };
+
+        assert_eq!(
+            passive_link_summary(&link, Some(&counters)).evidence_coverage,
+            EvidenceCoverage::Partial
+        );
+    }
+
+    #[test]
     fn peer_dwell_records_state_and_binding_changes_at_constant_count() {
         let mut app = App::new();
         app.apply(MonitorUpdate::Link {
@@ -3266,6 +3458,7 @@ mod tests {
             host: "workstation".into(),
             interface: Some(interface.into()),
             link_type: Some("wifi".into()),
+            underlay: None,
             ssid: Some(ssid.into()),
             ssid_restricted: false,
             wifi: None,

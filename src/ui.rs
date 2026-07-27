@@ -448,10 +448,22 @@ pub(crate) fn overview_diagnosis(app: &App) -> OverviewDiagnosis {
                 .interface
                 .as_deref()
                 .unwrap_or("an unknown interface");
-            let gateway = app.link.gateway.as_deref().unwrap_or("an unknown gateway");
-            format!(
-                "observing local path via {interface} and {gateway}; Internet reachability is not tested"
-            )
+            if let Some(underlay) = &app.link.underlay {
+                let next_hop = app.link.gateway.as_deref().unwrap_or("unavailable");
+                format!(
+                    "VPN route {interface} over {} [{}] observed; VPN next hop {next_hop}; Internet untested",
+                    underlay.interface, underlay.link_type
+                )
+            } else {
+                let gateway = app
+                    .link
+                    .gateway
+                    .as_deref()
+                    .unwrap_or("next hop unavailable");
+                format!(
+                    "default route {interface} → {gateway} observed; Internet reachability is not tested"
+                )
+            }
         }
         SituationKind::UnlocalizedFailure => {
             "a downstream path check failed, but earlier dependency evidence is unavailable".into()
@@ -554,12 +566,7 @@ pub(crate) fn overview_diagnosis(app: &App) -> OverviewDiagnosis {
     };
     let radio_evidence = if app.link.wifi.is_some() {
         "radio observed"
-    } else if app
-        .link
-        .link_type
-        .as_deref()
-        .is_some_and(|kind| kind.eq_ignore_ascii_case("wifi"))
-    {
+    } else if app.link.requires_radio_evidence() {
         "radio unavailable"
     } else {
         "radio n/a"
@@ -805,12 +812,18 @@ fn network_configuration_summary(app: &App) -> String {
         .into(),
     );
     let default_interface = app.link.interface.as_deref();
+    let underlay_interface = app
+        .link
+        .underlay
+        .as_ref()
+        .map(|underlay| underlay.interface.as_str());
     let other_addressed_interfaces: BTreeSet<_> = app
         .link
         .addresses
         .iter()
         .filter(|address| !address.is_default)
         .filter(|address| Some(address.interface.as_str()) != default_interface)
+        .filter(|address| Some(address.interface.as_str()) != underlay_interface)
         .map(|address| address.interface.as_str())
         .collect();
     if !other_addressed_interfaces.is_empty() {
@@ -973,31 +986,16 @@ fn render_diagnosis(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_path(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let interface = app.link.interface.as_deref().unwrap_or("discovering");
-    let link = app.link.link_type.as_deref().unwrap_or("link");
-    let ssid = app
-        .link
-        .ssid
-        .as_deref()
-        .map(|value| format!(" / {value}"))
-        .or_else(|| {
-            app.link
-                .ssid_restricted
-                .then(|| " / SSID hidden by macOS".into())
-        })
-        .unwrap_or_default();
-    let ssid = if area.width < 70 { String::new() } else { ssid };
-    let gateway = app.link.gateway.as_deref().unwrap_or("discovering");
-    let path = Line::from(vec![
-        Span::styled(format!(" {} ", app.link.host), Style::default().fg(INK)),
-        Span::styled("──▶", Style::default().fg(GRID)),
-        Span::styled(
-            format!(" {interface} [{link}{ssid}] "),
-            Style::default().fg(ACCENT),
+    let path = Line::from(Span::styled(
+        format!(
+            " {}",
+            fit(
+                &app.link.operator_path(),
+                usize::from(area.width.saturating_sub(2))
+            )
         ),
-        Span::styled("──▶", Style::default().fg(GRID)),
-        Span::styled(format!(" {gateway} "), Style::default().fg(INK)),
-    ]);
+        Style::default().fg(ACCENT),
+    ));
     let network_context = network_configuration_summary(app);
     let radio = app.link.wifi.as_ref().map(|wifi| {
         let signal = wifi
@@ -1061,17 +1059,7 @@ fn render_path(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_latency(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if !app.probe_policy().is_active() {
-        let route = format!(
-            "{} → {}",
-            app.link
-                .interface
-                .as_deref()
-                .unwrap_or("interface unavailable"),
-            app.link
-                .gateway
-                .as_deref()
-                .unwrap_or("next hop unavailable")
-        );
+        let route = app.link.operator_path();
         let radio = app.link.wifi.as_ref().map_or_else(
             || "telemetry unavailable".into(),
             |wifi| {
@@ -1867,17 +1855,6 @@ fn append_compact_address_lines(
 
 fn link_shallow_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let usable = usize::from(width.saturating_sub(2));
-    let ssid = app
-        .link
-        .ssid
-        .as_deref()
-        .map(str::to_owned)
-        .or_else(|| {
-            app.link
-                .ssid_restricted
-                .then(|| "SSID hidden by macOS".into())
-        })
-        .unwrap_or_else(|| "network identity unavailable".into());
     let default_addresses: Vec<_> = app
         .link
         .addresses
@@ -1951,13 +1928,7 @@ fn link_shallow_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         },
     );
     [
-        format!(
-            "path      {} [{} / {}] → {}",
-            app.link.interface.as_deref().unwrap_or("interface?"),
-            app.link.link_type.as_deref().unwrap_or("link?"),
-            ssid,
-            app.link.gateway.as_deref().unwrap_or("gateway?")
-        ),
+        format!("path      {}", app.link.operator_path()),
         format!("config    {}", compact_network_configuration_summary(app)),
         format!("address   {address}"),
         format!("resolver  {resolver}"),
@@ -1980,36 +1951,11 @@ fn address_marker(is_default: bool, is_temporary: bool) -> &'static str {
 }
 
 fn link_identity_lines(app: &App) -> Vec<Line<'_>> {
-    let ssid = app
-        .link
-        .ssid
-        .as_deref()
-        .map(|value| format!(" / {value}"))
-        .or_else(|| {
-            app.link
-                .ssid_restricted
-                .then(|| " / SSID hidden by macOS".into())
-        })
-        .unwrap_or_default();
     vec![
-        Line::from(vec![
-            Span::styled(format!(" {} ", app.link.host), Style::default().fg(INK)),
-            Span::styled("──▶ ", Style::default().fg(GRID)),
-            Span::styled(
-                format!(
-                    "{} [{}{}]",
-                    app.link.interface.as_deref().unwrap_or("discovering"),
-                    app.link.link_type.as_deref().unwrap_or("link"),
-                    ssid
-                ),
-                Style::default().fg(ACCENT),
-            ),
-            Span::styled(" ──▶ ", Style::default().fg(GRID)),
-            Span::styled(
-                app.link.gateway.as_deref().unwrap_or("no gateway"),
-                Style::default().fg(INK),
-            ),
-        ]),
+        Line::from(Span::styled(
+            format!(" {}", app.link.operator_path()),
+            Style::default().fg(ACCENT),
+        )),
         Line::from(vec![
             Span::styled(" resolver  ", Style::default().fg(MUTED)),
             Span::styled(
@@ -2131,17 +2077,6 @@ fn render_peers_focus(
         .split(area);
     render_header(frame, chunks[0], app, MonitorMode::Peers);
 
-    let ssid = app
-        .link
-        .ssid
-        .as_deref()
-        .map(|value| format!(" / {value}"))
-        .or_else(|| {
-            app.link
-                .ssid_restricted
-                .then(|| " / SSID hidden by macOS".into())
-        })
-        .unwrap_or_default();
     let sources = if app.peers.sources.is_empty() {
         "source pending".into()
     } else {
@@ -2153,13 +2088,7 @@ fn render_peers_focus(
         format!("  /  missing {}", app.peers.failed_sources.join(" + "))
     };
     let content_width = usize::from(chunks[1].width.saturating_sub(13));
-    let path = format!(
-        "{} [{}{}] via {}",
-        app.link.interface.as_deref().unwrap_or("discovering"),
-        app.link.link_type.as_deref().unwrap_or("link"),
-        ssid,
-        app.link.gateway.as_deref().unwrap_or("no gateway")
-    );
+    let path = app.link.operator_path();
     let cache = format!(
         "{} / {sources}{failed_sources} / OUI {}",
         peer_session_summary(app),
@@ -2985,19 +2914,26 @@ fn compact_diagnosis_action(app: &App, diagnosis: &OverviewDiagnosis, width: u16
 fn compact_local_path_line<'a>(app: &'a App, width: u16, ssid: &str) -> Line<'a> {
     let interface = app.link.interface.as_deref().unwrap_or("interface?");
     let link_type = app.link.link_type.as_deref().unwrap_or("link?");
-    let gateway = app.link.gateway.as_deref().unwrap_or("gateway?");
+    let gateway = app.link.observation_gateway().unwrap_or("gateway?");
+    let underlay = app.link.underlay.as_ref();
     if width < 88 {
         let network = if ssid.is_empty() {
-            link_type.to_owned()
+            String::new()
         } else if ssid == "SSID hidden by macOS" {
-            format!("{link_type} / SSID hidden")
+            " / SSID hidden".into()
         } else {
-            format!("{link_type} / {ssid}")
+            format!(" / {ssid}")
         };
-        let summary = format!(
-            "g{} {interface} [{network}] → gw {gateway}",
-            app.path_generation
+        let route = underlay.map_or_else(
+            || format!("{interface} [{link_type}{network}]"),
+            |underlay| {
+                format!(
+                    "{interface} [{link_type}] over {} [{}{}]",
+                    underlay.interface, underlay.link_type, network
+                )
+            },
         );
+        let summary = format!("g{} {route} → gw {gateway}", app.path_generation);
         return Line::from(vec![
             Span::styled("path      ", Style::default().fg(MUTED)),
             Span::styled(
@@ -3007,10 +2943,19 @@ fn compact_local_path_line<'a>(app: &'a App, width: u16, ssid: &str) -> Line<'a>
         ]);
     }
     let network = if ssid.is_empty() {
-        link_type.to_owned()
+        String::new()
     } else {
-        format!("{link_type} / {ssid}")
+        format!(" / {ssid}")
     };
+    let route = underlay.map_or_else(
+        || format!("{interface} [{link_type}{network}]"),
+        |underlay| {
+            format!(
+                "{interface} [{link_type}] over {} [{}{}]",
+                underlay.interface, underlay.link_type, network
+            )
+        },
+    );
     Line::from(vec![
         Span::styled(
             format!("local g{:<2} ", app.path_generation),
@@ -3018,10 +2963,7 @@ fn compact_local_path_line<'a>(app: &'a App, width: u16, ssid: &str) -> Line<'a>
         ),
         Span::styled(app.link.host.as_str(), Style::default().fg(INK)),
         Span::styled(" → ", Style::default().fg(GRID)),
-        Span::styled(
-            format!("{interface} [{network}]"),
-            Style::default().fg(ACCENT),
-        ),
+        Span::styled(route, Style::default().fg(ACCENT)),
         Span::styled(" → ", Style::default().fg(GRID)),
         Span::styled(gateway, Style::default().fg(INK)),
     ])
@@ -3395,6 +3337,7 @@ mod tests {
                 host: "workstation".into(),
                 interface: Some("en0".into()),
                 link_type: Some("wifi".into()),
+                underlay: None,
                 ssid: Some("lab-net".into()),
                 ssid_restricted: false,
                 wifi: None,
@@ -3561,6 +3504,61 @@ mod tests {
         assert!(summary.contains("other addressed interface en0"));
         assert!(!summary.contains("overlay"));
         assert!(compact_network_configuration_summary(&app).contains("other en0"));
+    }
+
+    #[test]
+    fn compact_overview_names_typed_vpn_overlay_and_wifi_underlay() {
+        let mut app = App::new();
+        app.path_generation = 3;
+        app.link.host = "workstation".into();
+        app.link.interface = Some("utun4".into());
+        app.link.link_type = Some("vpn".into());
+        app.link.underlay = Some(crate::model::PathUnderlay {
+            interface: "en0".into(),
+            link_type: "wifi".into(),
+            gateway: Some("172.20.10.1".into()),
+        });
+        app.link.ssid = Some("phone-hotspot".into());
+        app.link.addresses = vec![
+            Address {
+                interface: "utun4".into(),
+                address: "100.64.0.2".into(),
+                family: 4,
+                is_default: true,
+                is_temporary: false,
+            },
+            Address {
+                interface: "en0".into(),
+                address: "172.20.10.2".into(),
+                family: 4,
+                is_default: false,
+                is_temporary: false,
+            },
+        ];
+
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+
+        assert!(rendered.contains("utun4 [vpn] over en0"));
+        assert!(!rendered.contains("other en0"));
+        assert!(
+            app.link
+                .operator_path()
+                .contains("en0 [wifi / phone-hotspot]")
+        );
+        assert_eq!(
+            overview_diagnosis(&app).summary,
+            "VPN route utun4 over en0 [wifi] observed; VPN next hop unavailable; Internet untested"
+        );
+        assert!(
+            overview_diagnosis(&app)
+                .coverage
+                .contains("radio unavailable")
+        );
     }
 
     #[test]

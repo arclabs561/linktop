@@ -24,7 +24,7 @@ struct LocalNetwork {
 
 impl PeerScope {
     fn for_link(link: &LinkSnapshot) -> Self {
-        let active_interface = link.interface.clone();
+        let active_interface = link.observation_interface().map(str::to_string);
         let networks = if_addrs::get_if_addrs()
             .unwrap_or_default()
             .into_iter()
@@ -46,7 +46,7 @@ impl PeerScope {
             .collect();
         Self {
             active_interface,
-            gateway: link.gateway.as_deref().and_then(parse_ip_token),
+            gateway: link.observation_gateway().and_then(parse_ip_token),
             networks,
         }
     }

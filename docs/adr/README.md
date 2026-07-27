@@ -15,3 +15,4 @@ network addresses, SSIDs, and other private observations out of these records.
 | [0006](0006-make-active-network-operations-explicit.md) | Make active network operations explicit | Accepted |
 | [0007](0007-prioritize-change-context-and-consequential-workload.md) | Prioritize change, context, and consequential workload | Accepted |
 | [0008](0008-consume-versioned-netmon-evidence-without-cli-coupling.md) | Consume versioned Netmon evidence without CLI coupling | Accepted |
+| [0009](0009-separate-effective-route-from-physical-underlay.md) | Separate effective route from physical underlay | Accepted |

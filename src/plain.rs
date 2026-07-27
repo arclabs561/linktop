@@ -76,7 +76,12 @@ pub fn format_update(update: &MonitorUpdate, before: &PlainState, app: &App) -> 
                 || before.peers.health != peers.health
                 || before.peers.failed_sources != peers.failed_sources =>
         {
-            peer_change_lines(&elapsed, &before.peers, peers, app.link.gateway.as_deref())
+            peer_change_lines(
+                &elapsed,
+                &before.peers,
+                peers,
+                app.link.observation_gateway(),
+            )
         }
         MonitorUpdate::Traffic {
             counters: Some(counters),
@@ -392,23 +397,7 @@ fn path_changed(before: &LinkSnapshot, after: &LinkSnapshot) -> bool {
 }
 
 fn path_lines(elapsed: &str, link: &LinkSnapshot) -> Vec<String> {
-    let ssid = link
-        .ssid
-        .as_deref()
-        .map(|value| format!(" / {value}"))
-        .or_else(|| {
-            link.ssid_restricted
-                .then(|| " / SSID hidden by macOS Location Services policy".into())
-        })
-        .unwrap_or_default();
-    let mut lines = vec![format!(
-        "+{elapsed} path     {} → {} [{}{}] → {}",
-        link.host,
-        link.interface.as_deref().unwrap_or("unknown interface"),
-        link.link_type.as_deref().unwrap_or("unknown link"),
-        ssid,
-        link.gateway.as_deref().unwrap_or("unknown gateway")
-    )];
+    let mut lines = vec![format!("+{elapsed} path     {}", link.operator_path())];
     lines.push(format!(
         "+{elapsed} resolver {} [source: host resolver configuration]",
         if link.resolvers.is_empty() {
@@ -595,8 +584,8 @@ pub(crate) fn format_elapsed(duration: Duration) -> String {
 mod tests {
     use super::*;
     use crate::model::{
-        Address, Health, InterfaceDwell, InterfaceRate, LinkSnapshot, MonitorMode, ProbePolicy,
-        ProbeResult, ProcessTraffic, WifiDwell, WorkloadDwell, WorkloadSnapshot,
+        Address, Health, InterfaceDwell, InterfaceRate, LinkSnapshot, MonitorMode, PathUnderlay,
+        ProbePolicy, ProbeResult, ProcessTraffic, WifiDwell, WorkloadDwell, WorkloadSnapshot,
     };
 
     #[test]
@@ -664,6 +653,13 @@ mod tests {
         let link = LinkSnapshot {
             host: "workstation".into(),
             interface: Some("utun4".into()),
+            link_type: Some("vpn".into()),
+            underlay: Some(PathUnderlay {
+                interface: "en0".into(),
+                link_type: "wifi".into(),
+                gateway: Some("192.168.1.1".into()),
+            }),
+            ssid: Some("house".into()),
             addresses: vec![
                 Address {
                     interface: "utun4".into(),
@@ -684,6 +680,10 @@ mod tests {
         };
 
         let rendered = path_lines("00:01", &link).join("\n");
+        assert!(
+            rendered
+                .contains("workstation ──▶ utun4 [vpn] over en0 [wifi / house] ──▶ 192.168.1.1")
+        );
         assert!(rendered.contains(
             "interface=utun4 family=ipv4 address=100.64.0.2 default_path=true temporary=false"
         ));

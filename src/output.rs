@@ -4,8 +4,8 @@ use serde::Serialize;
 use std::time::Instant;
 
 use crate::model::{
-    Address, Health, InterfaceCounters, LinkSnapshot, MacScope, Peer, PeerPathFilter, PeerSnapshot,
-    ProbePolicy, SnapshotProbe, SnapshotReport, SnapshotSummary,
+    Address, Health, InterfaceCounters, LinkSnapshot, MacScope, PathUnderlay, Peer, PeerPathFilter,
+    PeerSnapshot, ProbePolicy, SnapshotProbe, SnapshotReport, SnapshotSummary,
 };
 
 pub const OBSERVATION_SCHEMA_V1: &str = "linktop.observation.v1";
@@ -160,6 +160,8 @@ pub struct PeerPathContext<'a> {
     pub default_interface: Option<&'a str>,
     pub default_gateway: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub underlay: Option<&'a PathUnderlay>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub link_evidence: Option<PeerLinkEvidence<'a>>,
 }
 
@@ -181,6 +183,7 @@ impl<'a> PeerPathContext<'a> {
             host: &link.host,
             default_interface: link.interface.as_deref(),
             default_gateway: link.gateway.as_deref(),
+            underlay: link.underlay.as_ref(),
             link_evidence: has_peer_link_evidence(link).then(|| PeerLinkEvidence {
                 link_type: link.link_type.as_deref(),
                 network_name: visible_identifier(link.ssid.as_deref(), link.ssid_restricted),
@@ -271,7 +274,7 @@ impl<'a> PeerEvidence<'a> {
             peers: snapshot
                 .peers
                 .iter()
-                .map(|peer| PeerObservation::from_peer(peer, link.gateway.as_deref()))
+                .map(|peer| PeerObservation::from_peer(peer, link.observation_gateway()))
                 .collect(),
         }
     }
@@ -344,6 +347,7 @@ mod tests {
             host: "operator-host".into(),
             interface: Some("en0".into()),
             link_type: Some("wifi".into()),
+            underlay: None,
             ssid: Some("lab".into()),
             ssid_restricted: false,
             wifi: Some(WifiTelemetry {
@@ -546,6 +550,42 @@ mod tests {
             "192.0.2.53"
         );
         assert_eq!(value["evidence"]["peers"][0]["is_default_gateway"], true);
+    }
+
+    #[test]
+    fn json_projects_effective_vpn_route_and_physical_underlay_separately() {
+        let mut link = test_link();
+        link.interface = Some("utun4".into());
+        link.link_type = Some("vpn".into());
+        link.gateway = None;
+        link.addresses[0].interface = "utun4".into();
+        link.addresses[0].address = "100.64.0.2".into();
+        link.underlay = Some(PathUnderlay {
+            interface: "en0".into(),
+            link_type: "wifi".into(),
+            gateway: Some("192.0.2.1".into()),
+        });
+        let peers = test_peers();
+
+        let link_value = serde_json::to_value(LinkEvidence {
+            link: &link,
+            interface_counters: Some(&test_counters()),
+        })
+        .unwrap();
+        assert_eq!(link_value["link"]["interface"], "utun4");
+        assert_eq!(link_value["link"]["link_type"], "vpn");
+        assert_eq!(link_value["link"]["underlay"]["interface"], "en0");
+        assert_eq!(link_value["link"]["underlay"]["link_type"], "wifi");
+        assert_eq!(link_value["interface_counters"]["interface"], "en0");
+
+        let peer_value = serde_json::to_value(PeerEvidence::new(&link, &peers)).unwrap();
+        assert_eq!(peer_value["path_context"]["default_interface"], "utun4");
+        assert_eq!(peer_value["path_context"]["underlay"]["interface"], "en0");
+        assert_eq!(
+            peer_value["path_context"]["link_evidence"]["default_path_prefixes"],
+            serde_json::json!([])
+        );
+        assert_eq!(peer_value["peers"][0]["is_default_gateway"], true);
     }
 
     #[test]
