@@ -2552,7 +2552,9 @@ fn render_footer(
     can_navigate: bool,
 ) {
     let state = if app.paused { "PAUSED" } else { "LIVE" };
-    if area.width < 100 {
+    let compact_footer =
+        area.width < 100 || (mode == MonitorMode::Peers && can_navigate && area.width < 121);
+    if compact_footer {
         if mode == MonitorMode::Peers {
             if can_navigate && area.width < 76 {
                 frame.render_widget(
@@ -3766,6 +3768,25 @@ mod tests {
         assert!(rendered.contains("neighbor STALE"));
         assert!(!rendered.contains("neighborSTALE"));
         assert!(!rendered.contains("GATEWAY RTT"));
+    }
+
+    #[test]
+    fn medium_peer_footer_keeps_navigation_and_live_state_inside_the_viewport() {
+        let mut app = App::new();
+        app.peers = peer_fixture(18);
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Peers, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+        let footer = rendered.lines().last().unwrap();
+
+        assert!(footer.contains("scroll"), "{footer}");
+        assert!(footer.contains("1/2/3"), "{footer}");
+        assert!(footer.contains("views"), "{footer}");
+        assert!(footer.contains("LIVE"), "{footer}");
+        assert!(!footer.contains("PgUp/PgDn"), "{footer}");
     }
 
     #[test]
