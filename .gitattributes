@@ -1,0 +1,2 @@
+# Exact evidence and golden-output fixtures must survive Windows checkout byte-for-byte.
+src/review/fixtures/* text eol=lf
