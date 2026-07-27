@@ -654,6 +654,17 @@ mod tests {
         app
     }
 
+    fn scenario_inputs(scenario_id: &str, checkpoint: &str) -> Vec<HostPathObservationV0> {
+        let bundle = netbraid_replay::builtin_scenario_v0(scenario_id)
+            .expect("load public synthetic scenario");
+        let receipt =
+            netbraid_replay::replay_scenario_v0(&bundle, checkpoint).expect("replay checkpoint");
+        bundle
+            .checkpoint_inputs_v0(&receipt)
+            .expect("resolve receipt-bound checkpoint inputs")
+            .host_path_records
+    }
+
     #[test]
     fn maps_host_address_to_network_prefix() {
         assert_eq!(
@@ -755,6 +766,71 @@ mod tests {
         assert!(summary.summary.contains("new BSSID attachment"));
         assert!(summary.compact_summary.contains("new BSSID"));
         assert!(summary.evidence.contains("place unknown"));
+    }
+
+    #[test]
+    fn netbraid_wifi_hotspot_return_is_reduced_as_observer_scoped_recurrence() {
+        let records = scenario_inputs("wifi-hotspot-wifi", "wifi-returned");
+        let summary = summarize(&records[..2], &records[2]);
+
+        assert_eq!(records.len(), 3);
+        assert_eq!(summary.kind, HistoryContextKind::Returned);
+        assert!(
+            summary
+                .summary
+                .contains("returned to a known network context")
+        );
+        assert!(summary.summary.contains("place unknown"));
+        assert_eq!(
+            summary.place_authority,
+            "unknown · assertion source not configured"
+        );
+        assert!(!summary.summary.contains("owner"));
+    }
+
+    #[test]
+    fn netbraid_overlay_exit_recurs_without_provider_or_intent_attribution() {
+        let records = scenario_inputs("vpn-overlay-transition", "overlay-exited");
+        let summary = summarize(&records[..2], &records[2]);
+
+        assert_eq!(records.len(), 3);
+        assert_eq!(summary.kind, HistoryContextKind::Returned);
+        assert!(
+            summary
+                .summary
+                .contains("returned to a known network context")
+        );
+        assert!(!summary.summary.to_lowercase().contains("provider"));
+        assert!(!summary.summary.to_lowercase().contains("intent"));
+        assert_eq!(
+            summary.place_authority,
+            "unknown · assertion source not configured"
+        );
+    }
+
+    #[test]
+    fn netbraid_cache_gap_remains_a_partial_first_observation_not_presence() {
+        let records = scenario_inputs("cache-source-gap", "cache-stale");
+        let current = records.last().expect("one cache-backed host-path record");
+        let summary = summarize(&[], current);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(current.coverage.state, CoverageStateV0::Partial);
+        assert!(
+            current
+                .coverage
+                .missing_sources
+                .contains(&"controller".into())
+        );
+        assert!(
+            current
+                .coverage
+                .missing_sources
+                .contains(&"packet_capture".into())
+        );
+        assert_eq!(summary.kind, HistoryContextKind::FirstObservation);
+        assert!(!summary.summary.contains("present"));
+        assert!(!summary.summary.contains("departed"));
     }
 
     #[test]

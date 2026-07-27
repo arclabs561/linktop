@@ -203,5 +203,21 @@ Established serialized identifiers remain `netmon.*`, including
 `netmon.host_path_observation.v0`. Those identifiers are compatibility
 protocols, not product branding, and this dependency rename must not rewrite
 stored history. The exact Git revision remains the source boundary until the
-same 0.2 packages are available from crates.io and Linktop can adopt them in a
-separately verified dependency-only change.
+packages are available from crates.io at one compatible release identity and
+Linktop can adopt them in a separately verified dependency-only change.
+
+## Update (2026-07-27): consume typed public scenarios without weakening the source pin
+
+Netbraid's first registry release identity is 0.3.0 because its immutable
+0.2.0 Git tag predates the bytes prepared for registry publication. That
+version correction does not itself satisfy Linktop's dependency gate. Linktop
+retains one exact Netbraid Git revision until the registry packages are visible
+and their VCS identity is verified.
+
+The same revision now supplies closed `PUBLIC_SYNTHETIC` scenario bundles and a
+receipt-bound typed checkpoint-input accessor. Linktop may use those scenarios
+in tests to reduce host-path evidence independently. Authored conclusions and
+viewport prose remain Netbraid fixture oracles, not Linktop inputs. Linktop
+continues to own its peer, counter, probe, workload, generation, and
+presentation scenarios because those facts are not represented by the current
+Netbraid host-path record.
