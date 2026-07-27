@@ -8,6 +8,7 @@ mod output;
 mod peers;
 mod plain;
 mod process;
+mod review;
 mod speed;
 mod ui;
 
@@ -100,6 +101,20 @@ enum Command {
         json: bool,
         #[command(flatten)]
         live: LiveOptions,
+    },
+    /// Review one normalized Netbraid saved-capture JSONL stream without collecting.
+    Review {
+        /// Canonical Netbraid manifest, packet, and quarantine records.
+        input: PathBuf,
+        /// Emit the exact typed Netbraid saved-PCAP triage projection as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Analyze a source-artifact trailing interval; decimal seconds are accepted.
+        #[arg(long, value_name = "SECONDS")]
+        tail_seconds: Option<review::TailSecondsArg>,
+        /// Maximum normalized JSONL input accepted, in MiB.
+        #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u64).range(1..=4096))]
+        max_input_mib: u64,
     },
     /// Run an explicit bounded iperf3 TCP test with gateway latency under load.
     Speed {
@@ -343,6 +358,17 @@ fn main() -> Result<()> {
                     LiveOutput::Once => peers(false),
                 }
             }
+        }
+        Some(Command::Review {
+            input,
+            json,
+            tail_seconds,
+            max_input_mib,
+        }) => {
+            reject_live_options("review", &root_live)?;
+            reject_root_active("review", active)?;
+            reject_history("review", explicit_history.as_ref())?;
+            review::run(&input, max_input_mib, json, tail_seconds)
         }
         Some(Command::Speed {
             host,
@@ -1412,6 +1438,36 @@ mod cli_tests {
     }
 
     #[test]
+    fn review_parses_as_a_finite_read_only_transaction() {
+        let cli = Cli::try_parse_from([
+            "linktop",
+            "review",
+            "evidence.jsonl",
+            "--json",
+            "--tail-seconds",
+            "0.15",
+            "--max-input-mib",
+            "64",
+        ])
+        .unwrap();
+        let Some(Command::Review {
+            input,
+            json,
+            tail_seconds,
+            max_input_mib,
+        }) = cli.command
+        else {
+            panic!("review command was not parsed");
+        };
+        assert_eq!(input, PathBuf::from("evidence.jsonl"));
+        assert!(json);
+        assert_eq!(tail_seconds.unwrap().nanoseconds(), 150_000_000);
+        assert_eq!(max_input_mib, 64);
+        assert!(!cli.active);
+        assert!(cli.history.is_none());
+    }
+
+    #[test]
     fn subcommand_help_only_advertises_options_the_subject_accepts() {
         use clap::CommandFactory;
 
@@ -1447,6 +1503,23 @@ mod cli_tests {
         assert!(peers_help.contains("--jsonl"));
         assert!(peers_help.contains("--dwell"));
         assert!(!peers_help.contains("--history"));
+
+        let mut command = Cli::command();
+        let review = command
+            .find_subcommand_mut("review")
+            .expect("review subcommand");
+        let mut review_help = Vec::new();
+        review.write_long_help(&mut review_help).unwrap();
+        let review_help = String::from_utf8(review_help).unwrap();
+        assert!(review_help.contains("--json"));
+        assert!(review_help.contains("--tail-seconds"));
+        assert!(review_help.contains("--max-input-mib"));
+        assert!(!review_help.contains("--interval"));
+        assert!(!review_help.contains("--plain"));
+        assert!(!review_help.contains("--jsonl"));
+        assert!(!review_help.contains("--dwell"));
+        assert!(!review_help.contains("--history"));
+        assert!(!review_help.contains("--active"));
 
         let mut command = Cli::command();
         let screenshot = command

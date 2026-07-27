@@ -175,8 +175,45 @@ linktop peers --dwell 30
 linktop peers --plain --dwell 30 | tee peers.log
 linktop peers --jsonl --dwell 30
 linktop peers --json
+linktop review capture-records.jsonl
+linktop review capture-records.jsonl --tail-seconds 30
+linktop review capture-records.jsonl --json
 linktop speed 192.168.1.10
 ```
+
+## Saved evidence review
+
+`linktop review INPUT` is a finite, read-only projection over a canonical
+Netbraid normalized saved-capture JSONL stream. The input is the manifest,
+optional occurrence receipt, packet envelopes, and quarantines produced by
+Netbraid's versioned `--jsonl` or deterministic `--records-jsonl` contract. It
+is not a raw PCAP or PCAPNG file.
+
+The default human report preserves artifact and normalized-record digests,
+artifact size, observer and acquisition time (or explicit unknowns), acquisition
+policy, extractor adapter/tool/configuration/registry provenance, occurrence run
+and source-file timing when a receipt is present, complete-capture or
+partial-subset scope, normalization and quarantine counts, WLAN disconnect
+status, cumulative top conversation, directional frame/octet and TCP-flag
+evidence, typed exclusions, observation point and event window, and exact
+candidate TShark display filters. Endpoints and filters remain capture evidence
+and drill-down pivots; they are not device, person, service, application, or
+intent identity.
+
+`--tail-seconds SECONDS` adds a capture-relative trailing packet-time interval
+using exact decimal seconds down to one nanosecond. The report distinguishes
+the requested interval, source-artifact extent from the occurrence receipt,
+normalized extent, selected packet extent, positive observations, and whether
+the evidence qualifies or abstains from negative claims. Its top conversation
+is cumulative only within that requested interval, not a flow, session, or
+episode; its exact candidate TShark pivot includes the packet-time bounds.
+
+`--json` emits Netbraid's exact typed `netmon.saved_pcap_triage.v1` projection
+without a Linktop wrapper. Linktop reads and validates the records through its
+pinned `netbraid-replay` Rust library dependency. Review never invokes the
+Netbraid CLI, TShark, Capinfos, a live collector, or a network request, and it
+does not append to or otherwise modify the input. Input is bounded to 128 MiB
+by default; `--max-input-mib` changes that explicit read limit.
 
 ## Optional prior-context evidence
 
@@ -370,15 +407,17 @@ display does not silently widen a focused command's network activity.
 ## Boundary
 
 Linktop observes the current host's network context and, when explicitly
-enabled, diagnoses its active path. It does not capture network packets, trigger
-wireless scans, perform LAN discovery, manage network controllers, retain
-durable history unless an operator supplies `--history` or
-`LINKTOP_HISTORY`, own credentials, publish telemetry, or perform
-identity/presence fusion. Those are separate lifecycles even when their evidence
-is useful beside a Linktop report. Linktop consumes Netbraid's experimental,
-versioned, policy-neutral Rust evidence/replay crates at an exact Git revision;
-it does not invoke the Netbraid CLI or require a Netbraid service. Direct local
-observation and diagnosis remain independently usable.
+enabled, diagnoses its active path. It can also render an explicitly supplied
+normalized saved-capture record stream without acquiring or retaining it.
+Linktop does not capture network packets, trigger wireless scans, perform LAN
+discovery, manage network controllers, retain durable history unless an
+operator supplies `--history` or `LINKTOP_HISTORY`, own credentials, publish
+telemetry, or perform identity/presence fusion. Those are separate lifecycles
+even when their evidence is useful beside a Linktop report. Linktop consumes
+Netbraid's experimental, versioned, policy-neutral Rust evidence/replay crates
+at an exact Git revision; it does not invoke the Netbraid CLI or require a
+Netbraid service. Direct local observation and diagnosis remain independently
+usable.
 
 The longer product direction, including episode stories, purpose-specific
 readiness, explicit diagnostic experiments, multi-vantage Netbraid evidence, and

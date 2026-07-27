@@ -17,3 +17,4 @@ network addresses, SSIDs, and other private observations out of these records.
 | [0008](0008-consume-versioned-netbraid-evidence-without-cli-coupling.md) | Consume versioned Netbraid evidence without CLI coupling | Accepted |
 | [0009](0009-separate-effective-route-from-physical-underlay.md) | Separate effective route from physical underlay | Accepted |
 | [0010](0010-project-live-evidence-once-across-human-and-machine-outputs.md) | Project live evidence once across human and machine outputs | Accepted |
+| [0011](0011-review-normalized-saved-evidence-read-only.md) | Review normalized saved evidence as a finite read-only projection | Accepted |
