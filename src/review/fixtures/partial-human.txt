@@ -1,0 +1,37 @@
+LINKTOP  SAVED EVIDENCE REVIEW / READ ONLY / COVERAGE PARTIAL PACKET SUBSET
+capture   sha256:066432299ec4a059eb4efbf10c9e90fce4f47d8cc3e0e9f9f05c55210725d2a5
+artifact  sha256:066432299ec4a059eb4efbf10c9e90fce4f47d8cc3e0e9f9f05c55210725d2a5 / 164 bytes
+records   sha256:f349e4fbd140303f226cd721f381b0c914db786b62b57505d19ebe1fa2c461e0
+observer  unknown / acquired unknown
+acquire   policy unknown
+extract   netbraid-adapter-tshark 0.2.0 / tshark TShark (Wireshark) 4.6.7
+config    sha256:f488bbcd8ea84a8cffd97498b000959f5673bb14787b240f4e34bc9bc4563042 / registry netmon.tshark.packet_envelope.v1
+receipt   absent / occurrence times and source file extent unknown
+normalize partial / partial packet subset / 1 emitted / 1 quarantined / 2 inspected / limit 2 / limit reached no
+window     1 observation(s) / 1700000000123456789..1700000000123456789 ns / span 0 ns
+quarantine 1 row(s) / 1 distinct reason(s) / 1 shown
+  reason   1 row(s) / field count 2 does not match registry field count 32
+wlan      insufficient / normalized packet subset / partial normalization without ieee80211 frame evidence
+conversation observed / normalized packet subset / 1 seen / 1 grouped / 0 excluded
+  top      TCP 192.0.2.1:40000 <-> 198.51.100.2:443 / cumulative across claim scope / temporal relevance not assessed
+  point    section 0 / interface 0 / encapsulation 1
+  frames   1 / 54 original frame octets / 54 captured frame octets
+  a -> b   1 frame(s) / 54 original / 54 captured / SYN 1 / SYN-ACK 0 / FIN 0 / RST 0
+  b -> a   0 frame(s) / 0 original / 0 captured / SYN 0 / SYN-ACK 0 / FIN 0 / RST 0
+  time     1700000000123456789..1700000000123456789 ns / span 0 ns
+  pivot    (frame.section_number == 0) && (frame.interface_id == 0) && (frame.encap_type == 1) && (tcp && ((ip.src == 192.0.2.1 && tcp.srcport == 40000 && ip.dst == 198.51.100.2 && tcp.dstport == 443) || (ip.src == 198.51.100.2 && tcp.srcport == 443 && ip.dst == 192.0.2.1 && tcp.dstport == 40000)))
+trailing  requested 1000000000 ns / anchor latest normalized packet event time
+  request  1699999999123456789..1700000000123456789 unix ns / inclusive
+  source   unavailable from occurrence receipt
+  normal   1 observation(s) / 1700000000123456789..1700000000123456789 ns / span 0 ns
+  selected 1 observation(s) / 1700000000123456789..1700000000123456789 ns / span 0 ns
+  negative abstained / normalization is partial; occurrence receipt is absent
+  top      observed / 1 seen / 1 grouped / 0 excluded
+  interval TCP 192.0.2.1:40000 <-> 198.51.100.2:443 / cumulative within requested interval / packet event time
+  point    section 0 / interface 0 / encapsulation 1
+  frames   1 / 54 original frame octets / 54 captured frame octets
+  a -> b   1 frame(s) / 54 original / 54 captured / SYN 1 / SYN-ACK 0 / FIN 0 / RST 0
+  b -> a   0 frame(s) / 0 original / 0 captured / SYN 0 / SYN-ACK 0 / FIN 0 / RST 0
+  time     1700000000123456789..1700000000123456789 ns / span 0 ns
+  pivot    (frame.section_number == 0) && (frame.interface_id == 0) && (frame.encap_type == 1) && (frame.time_epoch >= 1699999999.123456789 && frame.time_epoch <= 1700000000.123456789) && (tcp && ((ip.src == 192.0.2.1 && tcp.srcport == 40000 && ip.dst == 198.51.100.2 && tcp.dstport == 443) || (ip.src == 198.51.100.2 && tcp.srcport == 443 && ip.dst == 192.0.2.1 && tcp.dstport == 40000)))
+classify  not assessed; endpoints and drill-down pivots are not service, application, device, or person identity

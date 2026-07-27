@@ -1,0 +1,42 @@
+LINKTOP  SAVED EVIDENCE REVIEW / READ ONLY / COVERAGE COMPLETE CAPTURE
+capture   sha256:0000000000000000000000000000000000000000000000000000000000000000
+artifact  sha256:0000000000000000000000000000000000000000000000000000000000000000 / 100 bytes
+records   sha256:8169c8f0f3afbd71a951a89cb7138e445a62719573597ad530c2179add21a2a7
+observer  fixture-observer / acquired 1700000000123 unix ms
+acquire   passive host local
+extract   netbraid-adapter-tshark 0.3.0 / tshark TShark 4.6.7
+config    sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa / registry netmon.tshark.packet_envelope.v1
+receipt   run:1111111111111111111111111111111111111111111111111111111111111111 / run 4000..5000 unix ns / elapsed 1000 ns
+file      pcapng / ether / nanoseconds / 3 packet(s) / 100 bytes / packet time 1000..3000 unix ns
+normalize complete / complete capture / 3 emitted / 0 quarantined / 3 inspected / limit 10 / limit reached no
+window     3 observation(s) / 1000..3000 ns / span 2000 ns
+quarantine 0 row(s) / 0 distinct reason(s) / 0 shown
+wlan      observed / complete capture / 1 disconnect kind(s)
+  window   1 observation(s) / 3000..3000 ns / span 0 ns
+  disconnect deauthentication / 1 observation(s) / 3000..3000 ns / span 0 ns
+  pivot    wlan.fc.type == 0 && wlan.fc.subtype == 12
+conversation observed / complete capture / 3 seen / 2 grouped / 1 excluded
+  excluded 1 packet envelope(s) / ambiguous network layer
+  top      TCP 192.0.2.1:40000 <-> 198.51.100.2:443 / cumulative across claim scope / temporal relevance not assessed
+  point    section 0 / interface 0 / encapsulation 1
+  frames   2 / 200 original frame octets / 200 captured frame octets
+  a -> b   1 frame(s) / 100 original / 100 captured / SYN 1 / SYN-ACK 0 / FIN 0 / RST 0
+  b -> a   1 frame(s) / 100 original / 100 captured / SYN 0 / SYN-ACK 1 / FIN 0 / RST 0
+  time     1000..2000 ns / span 1000 ns
+  pivot    (frame.section_number == 0) && (frame.interface_id == 0) && (frame.encap_type == 1) && (tcp && ((ip.src == 192.0.2.1 && tcp.srcport == 40000 && ip.dst == 198.51.100.2 && tcp.dstport == 443) || (ip.src == 198.51.100.2 && tcp.srcport == 443 && ip.dst == 192.0.2.1 && tcp.dstport == 40000)))
+trailing  requested 2000 ns / anchor occurrence receipt source-artifact latest packet time
+  request  1000..3000 unix ns / inclusive
+  source   1000..3000 unix ns / inclusive
+  normal   3 observation(s) / 1000..3000 ns / span 2000 ns
+  selected 3 observation(s) / 1000..3000 ns / span 2000 ns
+  negative qualified / complete normalization and occurrence file packet extent
+  top      observed / 3 seen / 2 grouped / 1 excluded
+  excluded 1 packet envelope(s) / ambiguous network layer
+  interval TCP 192.0.2.1:40000 <-> 198.51.100.2:443 / cumulative within requested interval / packet event time
+  point    section 0 / interface 0 / encapsulation 1
+  frames   2 / 200 original frame octets / 200 captured frame octets
+  a -> b   1 frame(s) / 100 original / 100 captured / SYN 1 / SYN-ACK 0 / FIN 0 / RST 0
+  b -> a   1 frame(s) / 100 original / 100 captured / SYN 0 / SYN-ACK 1 / FIN 0 / RST 0
+  time     1000..2000 ns / span 1000 ns
+  pivot    (frame.section_number == 0) && (frame.interface_id == 0) && (frame.encap_type == 1) && (frame.time_epoch >= 0.000001000 && frame.time_epoch <= 0.000003000) && (tcp && ((ip.src == 192.0.2.1 && tcp.srcport == 40000 && ip.dst == 198.51.100.2 && tcp.dstport == 443) || (ip.src == 198.51.100.2 && tcp.srcport == 443 && ip.dst == 192.0.2.1 && tcp.dstport == 40000)))
+classify  not assessed; endpoints and drill-down pivots are not service, application, device, or person identity

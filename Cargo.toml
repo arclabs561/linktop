@@ -14,8 +14,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.6", features = ["derive"] }
 crossterm = "0.29"
 if-addrs = "0.15"
-netbraid-evidence = { git = "https://github.com/arclabs561/netbraid.git", rev = "7f2add5e086aece8c78d5d3fba074c9cffb454a8" }
-netbraid-replay = { git = "https://github.com/arclabs561/netbraid.git", rev = "7f2add5e086aece8c78d5d3fba074c9cffb454a8" }
+netbraid-evidence = { git = "https://github.com/arclabs561/netbraid.git", rev = "3e63eb27d1903b2440487a0c6de5b400a9cbde54" }
+netbraid-replay = { git = "https://github.com/arclabs561/netbraid.git", rev = "3e63eb27d1903b2440487a0c6de5b400a9cbde54" }
 ratatui = "0.30"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 serde = { version = "1.0", features = ["derive"] }
