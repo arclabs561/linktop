@@ -181,7 +181,7 @@ linktop speed 192.168.1.10
 ## Optional prior-context evidence
 
 Linktop does not persist observations by default. `--history PATH` is an
-explicit private-retention choice for the live overview. It reads a Netmon
+explicit private-retention choice for the live overview. It reads a Netbraid
 `HostPathObservationV0` JSONL log, compares the completed current context with
 prior records from this observer ID, cites anchored recurrence, an unanchored
 exact key match, compatible/incomplete evidence, or conflicting context, and
@@ -205,7 +205,7 @@ the valid prefix but keeps the log read-only and reports the interrupted tail.
 Internal or newline-terminated corruption remains unavailable rather than being
 silently skipped.
 
-The experimental Netmon v0 history record has no separate underlay object.
+The experimental Netbraid v0 history record has no separate underlay object.
 Under a VPN, Linktop preserves the effective interface/link fields and
 separately representable Wi-Fi association evidence; it does not relabel the
 physical gateway as the effective next hop.
@@ -375,13 +375,13 @@ wireless scans, perform LAN discovery, manage network controllers, retain
 durable history unless an operator supplies `--history` or
 `LINKTOP_HISTORY`, own credentials, publish telemetry, or perform
 identity/presence fusion. Those are separate lifecycles even when their evidence
-is useful beside a Linktop report. Linktop consumes Netmon's experimental,
+is useful beside a Linktop report. Linktop consumes Netbraid's experimental,
 versioned, policy-neutral Rust evidence/replay crates at an exact Git revision;
-it does not invoke the Netmon CLI or require a Netmon service. Direct local
+it does not invoke the Netbraid CLI or require a Netbraid service. Direct local
 observation and diagnosis remain independently usable.
 
 The longer product direction, including episode stories, purpose-specific
-readiness, explicit diagnostic experiments, multi-vantage netmon evidence, and
+readiness, explicit diagnostic experiments, multi-vantage Netbraid evidence, and
 advisory traffic fingerprints, is recorded in
 [`docs/design/network-situation-intelligence.md`](docs/design/network-situation-intelligence.md).
 

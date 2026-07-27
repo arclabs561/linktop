@@ -120,8 +120,8 @@ unreadable rows.
 
 The history review trigger fired when ADR-0008 added explicit private
 cross-session context. The standalone decision remains accepted: Linktop imports
-policy-neutral Netmon Rust types at build time, but it does not require the
-Netmon executable, daemon, controller, store, credentials, or deployment at
+policy-neutral Netbraid Rust types at build time, but it does not require the
+Netbraid executable, daemon, controller, store, credentials, or deployment at
 runtime. No history is retained unless the operator supplies a path. Automatic
 or service-owned collection would be a different lifecycle and remains a review
 trigger.

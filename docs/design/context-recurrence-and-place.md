@@ -20,7 +20,7 @@ would also make later controller or operator evidence difficult to reconcile.
 
 ## Chosen approach
 
-Netmon replay owns one deterministic, observer-ID-scoped recurrence reduction
+Netbraid replay owns one deterministic, observer-ID-scoped recurrence reduction
 over `HostPathObservationV0`. For the current observation it reports:
 
 - whether prior exact key matches are absent, unanchored, or anchored by a

@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use netmon_evidence::{
+use netbraid_evidence::{
     CollectionPolicyV0, CoverageStateV0, CoverageV0, HOST_PATH_SCHEMA_V0, HostPathObservationV0,
     HostPathV0, NetworkNameV0, NetworkNameVisibilityV0, ObservationOrderV0, SourceRefV0,
 };
-use netmon_replay::{
+use netbraid_replay::{
     AttachmentCorroborationV0, ContextRecurrenceV0, ContextRelationV0, ExactContextMatchV0,
     JsonlReadWarningV0, append_jsonl, compare_contexts, read_jsonl_recovering_tail,
     summarize_context_recurrence,
@@ -65,7 +65,7 @@ impl HistorySession {
                             "history loaded: {count} record(s); current context assessment pending"
                         ),
                         format!("loaded · {count} prior · assessment pending"),
-                        "netmon host-path v0 · private JSONL · waiting for current context",
+                        "Netbraid history · netmon.host_path_observation.v0 · private JSONL · waiting for current context",
                         true,
                     )
                 };
@@ -449,7 +449,7 @@ fn summarize(
         context_anchor: context_anchor.into(),
         place_authority: place_authority.into(),
         evidence: format!(
-            "netmon host-path v0 · context anchor: {context_anchor} · place {place_authority}"
+            "Netbraid history · netmon.host_path_observation.v0 · context anchor: {context_anchor} · place {place_authority}"
         ),
     }
 }

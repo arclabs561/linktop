@@ -34,9 +34,9 @@ These jobs should not all have the same lifetime. Snapshot and speed are transac
 Link and peers become more useful when they dwell. Machine-readable output must remain
 bounded unless the caller explicitly asks for a stream.
 
-Netmon is a separate product whose policy-neutral Rust evidence/replay crates Linktop
+Netbraid is a separate product whose policy-neutral Rust evidence/replay crates Linktop
 imports at an exact Git revision for optional prior-context comparison. Local
-diagnosis remains available without the Netmon executable, stores, controller, or live
+diagnosis remains available without the Netbraid executable, stores, controller, or live
 fusion deployment.
 
 Linktop is an operator instrument, so the live and ordinary text views show the full
@@ -54,7 +54,7 @@ operator evidence with placeholders.
 - Do not turn speed into a persistent monitor or run it without an explicit target.
 - Do not add controller credentials, a Linktop-owned historical store, private
   identity policy, or the live fusion plane to Linktop.
-- Do not make a Netmon process, store, controller, or deployment a Linktop runtime
+- Do not make a Netbraid process, store, controller, or deployment a Linktop runtime
   requirement.
 - Do not redact the local operator view. Keep automated capture artifacts private by
   default instead of weakening the instrument.
@@ -110,11 +110,11 @@ by the terminal library that happens to render them:
 | `--plain` / `--dwell` | human log and supervised temporal observation | explicit stream, optionally bounded | caller-owned stdout | timestamped append-only prose; not a structured event API |
 | `--json` | agent or program consuming one observation or experiment | one observation or bounded experiment | caller-owned stdout | versioned schema discriminator; one JSON document |
 | `--jsonl` | agent or program consuming current live state | explicit stream, optionally bounded | caller-owned stdout only | versioned self-contained checkpoints/transitions/final; not a delta or replay API |
-| `--history` | durable host-path recurrence evidence | live overview session | private Netmon `HostPathObservationV0` JSONL | versioned evidence/replay contract; one writer owns each log |
+| `--history` | durable host-path recurrence evidence | live overview session | private Netbraid `HostPathObservationV0` JSONL | versioned evidence/replay contract; one writer owns each log |
 | `screenshot` | human or agent layout QA | bounded frame transaction | private QA files chosen by caller | text/SVG or text/ANSI/HTML artifacts plus a versioned private completion manifest; never network evidence |
-| Netmon finite PCAP text | human inspection of a saved capture | one normalization run | caller-owned stdout | bounded expert prose; not for parsing |
-| Netmon `pcap --jsonl` | machine use requiring run provenance | one normalization occurrence | caller-owned stdout | versioned manifest, occurrence receipt, records, and quarantines |
-| Netmon `pcap --records-jsonl` | reproducible machine ingestion and replay | one deterministic normalization | caller-owned stdout | versioned content-bound records; byte identity is gated |
+| Netbraid finite PCAP text | human inspection of a saved capture | one normalization run | caller-owned stdout | bounded expert prose; not for parsing |
+| Netbraid `pcap --jsonl` | machine use requiring run provenance | one normalization occurrence | caller-owned stdout | versioned manifest, occurrence receipt, records, and quarantines |
+| Netbraid `pcap --records-jsonl` | reproducible machine ingestion and replay | one deterministic normalization | caller-owned stdout | versioned content-bound records; byte identity is gated |
 
 Every Linktop human projection and JSON document takes its assessment from the
 same typed model. A renderer may rank, abbreviate, page, or disclose overflow;
@@ -173,7 +173,7 @@ bounded live final gate the current complete shape, including model-backed
 nested evidence and typed limitation codes.
 
 The TUI, one-shot text, and plain stream are for people, including expert
-operators. Agents and programs consume versioned JSON or Netmon records, not
+operators. Agents and programs consume versioned JSON or Netbraid records, not
 screen text. Screenshot artifact names remain a private QA convention.
 Automated capture consumers use the versioned completion manifest rather than
 parsing those names. A plain path update enumerates every host-observed address
@@ -183,11 +183,11 @@ it does not silently reduce focused link evidence to default-marked addresses.
 Presentation never widens acquisition. Switching TUI views does not start a new
 collector, JSON does not imply completeness beyond its coverage fields, and a
 screenshot transaction cannot read or append durable history. The legacy Go
-Netmon `events.jsonl` remains fenced from new integrations while the Rust CLI
+Netbraid's legacy Go `events.jsonl` remains fenced from new integrations while the Rust CLI
 name collision is retired.
 
-Netmon's saved-capture output and replay contracts are specified in
-[`saved-pcap-normalization.md`](https://github.com/arclabs561/netmon/blob/main/docs/saved-pcap-normalization.md).
+Netbraid's saved-capture output and replay contracts are specified in
+[`saved-pcap-normalization.md`](https://github.com/arclabs561/netbraid/blob/main/docs/saved-pcap-normalization.md).
 
 An explicitly bounded plain stream closes with a human-readable dwell summary.
 It reports the current generation plus up to eight completed generations seen
@@ -356,7 +356,7 @@ matches the visible header to the recorded view and policy. Failure or
 interruption leaves no completion manifest. Consumers rehash artifacts to detect
 changes after the pre-publication verification point. The manifest contains no
 absolute paths or captured network facts and remains a private QA receipt, not
-Netmon evidence, telemetry, or permission to retain observed data.
+Netbraid evidence, telemetry, or permission to retain observed data.
 
 The output filesystem must support same-directory hard links. Both lanes probe
 that capability inside the private output directory before starting the dwell;
@@ -378,7 +378,7 @@ The focused link and peers views keep process-local history only. Their live
 first/last observations reset on every path generation. An explicit bounded
 plain dwell may report a completed generation from its in-process queue, but
 neither form is persisted across runs. The overview can explicitly read and
-append a private Netmon v0 host-path JSONL log; it does not make focused cache
+append a private Netbraid v0 host-path JSONL log; it does not make focused cache
 rows into a durable peer inventory.
 
 ## Implementation plan
@@ -404,7 +404,7 @@ rows into a durable peer inventory.
 - If passive peer polling exceeds its interval or overlaps, stop and reduce cadence;
   never stack cache-reader processes.
 - If users need durable peer history or cross-source explanations, extend the
-  versioned Netmon contract under a separate decision rather than adding a Linktop
+  versioned Netbraid contract under a separate decision rather than adding a Linktop
   database.
 - If a live consumer needs deltas, loss recovery, replay, or independently
   reconstructible per-peer transitions, add that contract explicitly; do not
@@ -425,7 +425,7 @@ rows into a durable peer inventory.
 
 - Whether the focused link view should later include optional gateway RTT is deferred;
   the first version remains local/passive so its activity boundary is unambiguous.
-- Netmon's experimental crate names and v0 host-path records may still change until
+- Netbraid's experimental crate names and v0 host-path records may still change until
   the stable multi-modal schema gate passes.
 
 ---
