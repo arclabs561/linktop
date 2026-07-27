@@ -156,3 +156,25 @@ This fires ADR-0002's structured-live-consumer review trigger, retains
 ADR-0003's generation fence, refines ADR-0005's global warm-up language into
 claim-specific support, and applies ADR-0007's minimum operator transaction to
 progressive evidence.
+
+## Update (2026-07-27): add the just-completed path window
+
+The common projection now carries an additive optional
+`evidence.completed_path_window` after a path transition. It joins the newest
+immutable completed generation to `last_path_change` and includes prior path
+identity and span, transition relation, subject collector scope, typed
+interface/radio/workload/neighbor support, source provenance, aggregates, and
+limitations. Unsupported radio and unavailable evidence remain distinct;
+partial native-cache acquisition names its failed sources. Neighbor
+`sources` and `failed_sources` cover the full completed generation; fields
+that describe only the terminal collector result are explicitly named
+`latest_snapshot_*` so a consumer cannot confuse them with window-wide
+provenance.
+
+Live JSONL serializes the object from the same projection used by the wide TUI
+and immediate plain transition receipt. Bounded plain output may still show
+the entire capped generation ledger. Compact layouts continue to reserve
+answer, path, coverage, and action before prior-window detail. Finite
+`linktop.observation.v1` is unchanged. This additive live-v1 evidence is not a
+delta, acknowledgement, replay, persisted episode, or scalar confidence
+contract.

@@ -150,7 +150,7 @@ pub struct InterfaceCounters {
     pub drops: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct InterfaceRate {
     pub received_bits_per_second: f64,
     pub transmitted_bits_per_second: f64,
@@ -202,7 +202,7 @@ pub struct PathDwell {
     pub workload: WorkloadDwell,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DwellPathIdentity {
     pub host: String,
     pub interface: Option<String>,
@@ -266,8 +266,21 @@ pub struct CompletedPathDwell {
     pub generation: u64,
     pub identity: DwellPathIdentity,
     pub observed: Duration,
+    pub completed_by: PathChange,
+    pub next_generation: u64,
     pub dwell: PathDwell,
     pub peers: PeerDwellSummary,
+    pub radio_applicable: bool,
+    pub wifi_observation_settled: bool,
+    pub workload_latest_health: Health,
+    pub workload_latest_detail: String,
+    pub workload_latest_source: Option<String>,
+    pub peer_snapshot_observations: u64,
+    pub peer_latest_health: Health,
+    pub peer_latest_detail: String,
+    pub peer_latest_path_filter: PeerPathFilter,
+    pub peer_sources: Vec<String>,
+    pub peer_failed_sources: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1224,6 +1237,158 @@ pub struct LivePathChangeEvidence {
     pub current: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletedPathWindowSupportState {
+    Available,
+    Partial,
+    Unavailable,
+    Unsupported,
+    NotCollected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletedPathWindowSource {
+    KernelInterfaceCounters,
+    PlatformRadioTelemetry,
+    SampledHostProcessAccounting,
+    NativeNeighborCache,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum CompletedPathWindowSupportLimitation {
+    CollectorOutsideSubjectScope,
+    NoObservationCompletedBeforeTransition,
+    CumulativeCountersNoAttribution,
+    NoCompatibleCounterInterval,
+    PlatformRadioTelemetryUnavailable,
+    SampledHostAccountingNoEndpointProtocolPeerPersonOrIntent,
+    CacheNotLivenessIdentityActivityOrTraffic,
+    NativeSourcesFailed { sources: Vec<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum CompletedPathWindowLimitation {
+    ProcessLocalCappedRetention { maximum_windows: u64 },
+    ImmutableAfterPathTransition,
+    NotCurrentPathEvidence,
+    NotPersisted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CompletedPathWindowCollectorScope {
+    pub subject: MonitorMode,
+    pub interface_counters: bool,
+    pub radio_link: bool,
+    pub workload_accounting: bool,
+    pub neighbor_cache: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CompletedPathWindowTransition {
+    pub reason: &'static str,
+    pub observed_at_ms: u64,
+    pub next_generation: u64,
+    pub changed_dimensions: Vec<&'static str>,
+    pub previous: String,
+    pub current: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CompletedInterfaceWindow {
+    pub state: CompletedPathWindowSupportState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<CompletedPathWindowSource>,
+    pub samples: u64,
+    pub valid_intervals: u64,
+    pub counter_resets: u64,
+    pub received_bytes_delta: u64,
+    pub transmitted_bytes_delta: u64,
+    pub received_packets_delta: u64,
+    pub transmitted_packets_delta: u64,
+    pub current_rate: Option<InterfaceRate>,
+    pub peak_received_bits_per_second: Option<f64>,
+    pub peak_transmitted_bits_per_second: Option<f64>,
+    pub error_delta: u64,
+    pub drop_delta: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub limitations: Vec<CompletedPathWindowSupportLimitation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CompletedRadioWindow {
+    pub state: CompletedPathWindowSupportState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<CompletedPathWindowSource>,
+    pub applicable: bool,
+    pub observation_completed: bool,
+    pub samples: u64,
+    pub latest_signal_dbm: Option<f64>,
+    pub worst_signal_dbm: Option<f64>,
+    pub latest_signal_percent: Option<f64>,
+    pub worst_signal_percent: Option<f64>,
+    pub latest_channel: Option<u32>,
+    pub channel_changes: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub limitations: Vec<CompletedPathWindowSupportLimitation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CompletedWorkloadWindow {
+    pub state: CompletedPathWindowSupportState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<CompletedPathWindowSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_snapshot_health: Option<Health>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_snapshot_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_snapshot_source: Option<String>,
+    pub sampled_windows: u64,
+    pub observed_span_ms: u64,
+    pub latest_window_top: Option<ProcessTraffic>,
+    pub peak_window_top: Option<ProcessTraffic>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub limitations: Vec<CompletedPathWindowSupportLimitation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CompletedNeighborWindow {
+    pub state: CompletedPathWindowSupportState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<CompletedPathWindowSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_snapshot_health: Option<Health>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_snapshot_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_snapshot_path_filter: Option<PeerPathFilter>,
+    pub snapshot_observations: u64,
+    pub sources: Vec<String>,
+    pub failed_sources: Vec<String>,
+    pub dwell: PeerDwellSummary,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub limitations: Vec<CompletedPathWindowSupportLimitation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CompletedPathWindow {
+    pub generation: u64,
+    pub path_identity: DwellPathIdentity,
+    pub observed_span_ms: u64,
+    pub completed_by: CompletedPathWindowTransition,
+    pub collector_scope: CompletedPathWindowCollectorScope,
+    pub interface: CompletedInterfaceWindow,
+    pub radio: CompletedRadioWindow,
+    pub workload: CompletedWorkloadWindow,
+    pub neighbors: CompletedNeighborWindow,
+    pub retained_completed_windows: u64,
+    pub limitations: Vec<CompletedPathWindowLimitation>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LiveEvidence {
     pub path: LinkSnapshot,
@@ -1238,6 +1403,8 @@ pub struct LiveEvidence {
     pub workload: Option<LiveWorkloadEvidence>,
     pub dwell: LivePathDwellEvidence,
     pub last_path_change: Option<LivePathChangeEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_path_window: Option<CompletedPathWindow>,
     pub history_context: Option<HistoryContext>,
 }
 
@@ -1307,6 +1474,8 @@ pub struct App {
     peer_snapshot_observations: u64,
     peer_snapshot_first_observed_at: Option<Duration>,
     peer_snapshot_last_observed_at: Option<Duration>,
+    peer_window_sources: BTreeSet<String>,
+    peer_window_failed_sources: BTreeSet<String>,
 }
 
 impl App {
@@ -1362,6 +1531,8 @@ impl App {
             peer_snapshot_observations: 0,
             peer_snapshot_first_observed_at: None,
             peer_snapshot_last_observed_at: None,
+            peer_window_sources: BTreeSet::new(),
+            peer_window_failed_sources: BTreeSet::new(),
         };
         app.push_event(EventKind::Session, Health::Running, "instrument started");
         app
@@ -1398,7 +1569,14 @@ impl App {
                 let previous_fingerprint = self.link.path_fingerprint();
                 let current_fingerprint = link.path_fingerprint();
                 let previous = self.link.path_label();
+                let current = link.path_label();
                 let observed_at = self.uptime();
+                let path_change = (!initial).then(|| PathChange {
+                    elapsed: observed_at,
+                    dimensions: previous_fingerprint.changed_dimensions(&current_fingerprint),
+                    previous: previous.clone(),
+                    current: current.clone(),
+                });
                 if !initial {
                     let peers = self.peer_dwell_summary();
                     let dwell = std::mem::take(&mut self.path_dwell);
@@ -1409,8 +1587,28 @@ impl App {
                         generation: self.path_generation,
                         identity: DwellPathIdentity::from_link(&self.link),
                         observed: observed_at.saturating_sub(self.path_observed_since),
+                        completed_by: path_change
+                            .as_ref()
+                            .expect("non-initial path has a transition")
+                            .clone(),
+                        next_generation: generation,
                         dwell,
                         peers,
+                        radio_applicable: self.link.observation_link_type() == Some("wifi"),
+                        wifi_observation_settled: self.wifi_observation_settled,
+                        workload_latest_health: self.workload.health,
+                        workload_latest_detail: self.workload.detail.clone(),
+                        workload_latest_source: self.workload.source.clone(),
+                        peer_snapshot_observations: self.peer_snapshot_observations,
+                        peer_latest_health: self.peers.health,
+                        peer_latest_detail: self.peers.detail.clone(),
+                        peer_latest_path_filter: self.peers.path_filter,
+                        peer_sources: self.peer_window_sources.iter().cloned().collect(),
+                        peer_failed_sources: self
+                            .peer_window_failed_sources
+                            .iter()
+                            .cloned()
+                            .collect(),
                     });
                 }
                 self.path_generation = generation;
@@ -1438,6 +1636,8 @@ impl App {
                 self.peer_snapshot_observations = 0;
                 self.peer_snapshot_first_observed_at = None;
                 self.peer_snapshot_last_observed_at = None;
+                self.peer_window_sources.clear();
+                self.peer_window_failed_sources.clear();
                 for probe in &mut self.probes {
                     *probe = if self.probe_policy.is_active() {
                         ProbeView::queued(probe.kind)
@@ -1445,24 +1645,18 @@ impl App {
                         ProbeView::disabled(probe.kind)
                     };
                 }
-                let current = self.link.path_label();
                 self.path_observed_since = observed_at;
-                if !initial {
-                    self.last_path_change = Some(PathChange {
-                        elapsed: observed_at,
-                        dimensions: previous_fingerprint.changed_dimensions(&current_fingerprint),
-                        previous: previous.clone(),
-                        current: current.clone(),
-                    });
-                }
+                self.last_path_change = path_change.clone();
                 self.push_event(
                     EventKind::Path,
                     Health::Running,
                     if initial {
                         format!("path: {current}")
                     } else {
-                        let dimensions = previous_fingerprint
-                            .changed_dimensions(&current_fingerprint)
+                        let dimensions = path_change
+                            .as_ref()
+                            .expect("non-initial path has a transition")
+                            .dimensions
                             .join(", ");
                         format!("path changed ({dimensions}): {previous} → {current}")
                     },
@@ -1499,11 +1693,6 @@ impl App {
                         self.link.ssid = Some(ssid);
                         self.link.ssid_restricted = false;
                         let current = self.link.path_label();
-                        if let Some(change) = self.last_path_change.as_mut()
-                            && change.elapsed == self.path_observed_since
-                        {
-                            change.current = current.clone();
-                        }
                         self.push_event(
                             EventKind::Path,
                             Health::Ok,
@@ -1525,6 +1714,10 @@ impl App {
                 self.peer_snapshot_first_observed_at
                     .get_or_insert(observed_at);
                 self.peer_snapshot_last_observed_at = Some(observed_at);
+                self.peer_window_sources
+                    .extend(snapshot.sources.iter().cloned());
+                self.peer_window_failed_sources
+                    .extend(snapshot.failed_sources.iter().cloned());
                 self.apply_peer_snapshot(snapshot);
             }
             MonitorUpdate::Traffic {
@@ -1924,6 +2117,311 @@ impl App {
         }
     }
 
+    pub(crate) fn latest_completed_path_window(
+        &self,
+        mode: MonitorMode,
+    ) -> Option<CompletedPathWindow> {
+        let completed = self.completed_path_dwells.back()?;
+        let scope = mode.dwell_collector_scope();
+
+        let source = |collected: bool, value| collected.then_some(value);
+
+        let interface = &completed.dwell.interface;
+        let mut interface_limitations = Vec::new();
+        if !scope.interface {
+            interface_limitations
+                .push(CompletedPathWindowSupportLimitation::CollectorOutsideSubjectScope);
+        } else {
+            interface_limitations
+                .push(CompletedPathWindowSupportLimitation::CumulativeCountersNoAttribution);
+            if interface.samples == 0 {
+                interface_limitations.push(
+                    CompletedPathWindowSupportLimitation::NoObservationCompletedBeforeTransition,
+                );
+            }
+            if interface.valid_intervals == 0 {
+                interface_limitations
+                    .push(CompletedPathWindowSupportLimitation::NoCompatibleCounterInterval);
+            }
+        }
+
+        let wifi = &completed.dwell.wifi;
+        let mut radio_limitations = Vec::new();
+        if !scope.wifi {
+            radio_limitations
+                .push(CompletedPathWindowSupportLimitation::CollectorOutsideSubjectScope);
+        } else if completed.radio_applicable && wifi.samples == 0 {
+            radio_limitations.push(if completed.wifi_observation_settled {
+                CompletedPathWindowSupportLimitation::PlatformRadioTelemetryUnavailable
+            } else {
+                CompletedPathWindowSupportLimitation::NoObservationCompletedBeforeTransition
+            });
+        }
+
+        let workload = &completed.dwell.workload;
+        let mut workload_limitations = Vec::new();
+        if !scope.workload {
+            workload_limitations
+                .push(CompletedPathWindowSupportLimitation::CollectorOutsideSubjectScope);
+        } else {
+            workload_limitations.push(
+                CompletedPathWindowSupportLimitation::SampledHostAccountingNoEndpointProtocolPeerPersonOrIntent,
+            );
+            if workload.sampled_windows == 0 {
+                workload_limitations.push(
+                    CompletedPathWindowSupportLimitation::NoObservationCompletedBeforeTransition,
+                );
+            }
+        }
+
+        let mut neighbor_limitations = Vec::new();
+        if !scope.peers {
+            neighbor_limitations
+                .push(CompletedPathWindowSupportLimitation::CollectorOutsideSubjectScope);
+        } else {
+            neighbor_limitations.push(
+                CompletedPathWindowSupportLimitation::CacheNotLivenessIdentityActivityOrTraffic,
+            );
+            if completed.peer_snapshot_observations == 0 {
+                neighbor_limitations.push(
+                    CompletedPathWindowSupportLimitation::NoObservationCompletedBeforeTransition,
+                );
+            }
+            if !completed.peer_failed_sources.is_empty() {
+                neighbor_limitations.push(
+                    CompletedPathWindowSupportLimitation::NativeSourcesFailed {
+                        sources: completed.peer_failed_sources.clone(),
+                    },
+                );
+            }
+        }
+
+        let workload_state = if !scope.workload {
+            CompletedPathWindowSupportState::NotCollected
+        } else if workload.sampled_windows == 0 {
+            CompletedPathWindowSupportState::Unavailable
+        } else if completed.workload_latest_health == Health::Ok {
+            CompletedPathWindowSupportState::Available
+        } else {
+            CompletedPathWindowSupportState::Partial
+        };
+        let neighbor_state = if !scope.peers {
+            CompletedPathWindowSupportState::NotCollected
+        } else if completed.peer_snapshot_observations == 0 || completed.peer_sources.is_empty() {
+            CompletedPathWindowSupportState::Unavailable
+        } else if !completed.peer_failed_sources.is_empty() {
+            CompletedPathWindowSupportState::Partial
+        } else {
+            match completed.peer_latest_health {
+                Health::Ok => CompletedPathWindowSupportState::Available,
+                Health::Unavailable
+                | Health::Failed
+                | Health::Queued
+                | Health::Degraded
+                | Health::Running => CompletedPathWindowSupportState::Partial,
+            }
+        };
+
+        Some(CompletedPathWindow {
+            generation: completed.generation,
+            path_identity: completed.identity.clone(),
+            observed_span_ms: duration_ms(completed.observed),
+            completed_by: CompletedPathWindowTransition {
+                reason: "path_transition",
+                observed_at_ms: duration_ms(completed.completed_by.elapsed),
+                next_generation: completed.next_generation,
+                changed_dimensions: completed.completed_by.dimensions.clone(),
+                previous: completed.completed_by.previous.clone(),
+                current: completed.completed_by.current.clone(),
+            },
+            collector_scope: CompletedPathWindowCollectorScope {
+                subject: mode,
+                interface_counters: scope.interface,
+                radio_link: scope.wifi,
+                workload_accounting: scope.workload,
+                neighbor_cache: scope.peers,
+            },
+            interface: CompletedInterfaceWindow {
+                state: if !scope.interface {
+                    CompletedPathWindowSupportState::NotCollected
+                } else if interface.samples == 0 {
+                    CompletedPathWindowSupportState::Unavailable
+                } else if interface.valid_intervals == 0 {
+                    CompletedPathWindowSupportState::Partial
+                } else {
+                    CompletedPathWindowSupportState::Available
+                },
+                source: source(
+                    scope.interface,
+                    CompletedPathWindowSource::KernelInterfaceCounters,
+                ),
+                samples: if scope.interface {
+                    interface.samples
+                } else {
+                    0
+                },
+                valid_intervals: if scope.interface {
+                    interface.valid_intervals
+                } else {
+                    0
+                },
+                counter_resets: if scope.interface {
+                    interface.counter_resets
+                } else {
+                    0
+                },
+                received_bytes_delta: if scope.interface {
+                    interface.received_bytes_delta
+                } else {
+                    0
+                },
+                transmitted_bytes_delta: if scope.interface {
+                    interface.transmitted_bytes_delta
+                } else {
+                    0
+                },
+                received_packets_delta: if scope.interface {
+                    interface.received_packets_delta
+                } else {
+                    0
+                },
+                transmitted_packets_delta: if scope.interface {
+                    interface.transmitted_packets_delta
+                } else {
+                    0
+                },
+                current_rate: scope
+                    .interface
+                    .then(|| interface.current_rate.clone())
+                    .flatten(),
+                peak_received_bits_per_second: scope
+                    .interface
+                    .then_some(interface.peak_received_bits_per_second)
+                    .flatten(),
+                peak_transmitted_bits_per_second: scope
+                    .interface
+                    .then_some(interface.peak_transmitted_bits_per_second)
+                    .flatten(),
+                error_delta: if scope.interface {
+                    interface.error_delta
+                } else {
+                    0
+                },
+                drop_delta: if scope.interface {
+                    interface.drop_delta
+                } else {
+                    0
+                },
+                limitations: interface_limitations,
+            },
+            radio: CompletedRadioWindow {
+                state: if !scope.wifi {
+                    CompletedPathWindowSupportState::NotCollected
+                } else if !completed.radio_applicable {
+                    CompletedPathWindowSupportState::Unsupported
+                } else if wifi.samples > 0 {
+                    CompletedPathWindowSupportState::Available
+                } else {
+                    CompletedPathWindowSupportState::Unavailable
+                },
+                source: source(
+                    scope.wifi && completed.radio_applicable,
+                    CompletedPathWindowSource::PlatformRadioTelemetry,
+                ),
+                applicable: completed.radio_applicable,
+                observation_completed: scope.wifi
+                    && completed.radio_applicable
+                    && completed.wifi_observation_settled,
+                samples: if scope.wifi { wifi.samples } else { 0 },
+                latest_signal_dbm: scope.wifi.then_some(wifi.latest_signal_dbm).flatten(),
+                worst_signal_dbm: scope.wifi.then_some(wifi.worst_signal_dbm).flatten(),
+                latest_signal_percent: scope.wifi.then_some(wifi.latest_signal_percent).flatten(),
+                worst_signal_percent: scope.wifi.then_some(wifi.worst_signal_percent).flatten(),
+                latest_channel: scope.wifi.then_some(wifi.latest_channel).flatten(),
+                channel_changes: if scope.wifi { wifi.channel_changes } else { 0 },
+                limitations: radio_limitations,
+            },
+            workload: CompletedWorkloadWindow {
+                state: workload_state,
+                source: source(
+                    scope.workload,
+                    CompletedPathWindowSource::SampledHostProcessAccounting,
+                ),
+                latest_snapshot_health: scope.workload.then_some(completed.workload_latest_health),
+                latest_snapshot_detail: scope
+                    .workload
+                    .then(|| completed.workload_latest_detail.clone()),
+                latest_snapshot_source: scope
+                    .workload
+                    .then(|| completed.workload_latest_source.clone())
+                    .flatten(),
+                sampled_windows: if scope.workload {
+                    workload.sampled_windows
+                } else {
+                    0
+                },
+                observed_span_ms: if scope.workload {
+                    duration_ms(workload.observed)
+                } else {
+                    0
+                },
+                latest_window_top: scope
+                    .workload
+                    .then(|| workload.latest_window_top.clone())
+                    .flatten(),
+                peak_window_top: scope
+                    .workload
+                    .then(|| workload.peak_window_top.clone())
+                    .flatten(),
+                limitations: workload_limitations,
+            },
+            neighbors: CompletedNeighborWindow {
+                state: neighbor_state,
+                source: source(scope.peers, CompletedPathWindowSource::NativeNeighborCache),
+                latest_snapshot_health: scope.peers.then_some(completed.peer_latest_health),
+                latest_snapshot_detail: scope.peers.then(|| completed.peer_latest_detail.clone()),
+                latest_snapshot_path_filter: scope
+                    .peers
+                    .then_some(completed.peer_latest_path_filter),
+                snapshot_observations: if scope.peers {
+                    completed.peer_snapshot_observations
+                } else {
+                    0
+                },
+                sources: if scope.peers {
+                    completed.peer_sources.clone()
+                } else {
+                    Vec::new()
+                },
+                failed_sources: if scope.peers {
+                    completed.peer_failed_sources.clone()
+                } else {
+                    Vec::new()
+                },
+                dwell: if scope.peers {
+                    completed.peers
+                } else {
+                    PeerDwellSummary {
+                        current: 0,
+                        observed: 0,
+                        changed: 0,
+                        disappeared: 0,
+                    }
+                },
+                limitations: neighbor_limitations,
+            },
+            retained_completed_windows: self.completed_path_dwells.len() as u64,
+            limitations: vec![
+                CompletedPathWindowLimitation::ProcessLocalCappedRetention {
+                    maximum_windows: MAX_COMPLETED_PATH_DWELLS as u64,
+                },
+                CompletedPathWindowLimitation::ImmutableAfterPathTransition,
+                CompletedPathWindowLimitation::NotCurrentPathEvidence,
+                CompletedPathWindowLimitation::NotPersisted,
+            ],
+        })
+    }
+
     pub fn projection(&self, mode: MonitorMode) -> AppProjection {
         let situation = self.situation();
         let progress = self.evidence_progress(mode);
@@ -2007,6 +2505,7 @@ impl App {
                         current: change.current.clone(),
                     }
                 }),
+                completed_path_window: self.latest_completed_path_window(mode),
                 history_context: self.history_context.clone(),
             },
         }
@@ -3579,6 +4078,308 @@ mod tests {
         assert_eq!(app.path_generation, 2);
         assert_eq!(app.link.ssid.as_deref(), Some("hotspot"));
         assert_eq!(app.path_dwell.interface.samples, 0);
+
+        let window = app
+            .latest_completed_path_window(MonitorMode::Overview)
+            .expect("latest transition has one completed path window");
+        assert_eq!(window.generation, 1);
+        assert_eq!(window.path_identity.ssid.as_deref(), Some("house"));
+        assert_eq!(window.completed_by.reason, "path_transition");
+        assert_eq!(window.completed_by.next_generation, 2);
+        assert_eq!(window.collector_scope.subject, MonitorMode::Overview);
+        assert_eq!(
+            window.interface.state,
+            CompletedPathWindowSupportState::Partial
+        );
+        assert_eq!(
+            window.interface.source,
+            Some(CompletedPathWindowSource::KernelInterfaceCounters)
+        );
+        assert_eq!(
+            window.radio.state,
+            CompletedPathWindowSupportState::Available
+        );
+        assert_eq!(
+            window.workload.state,
+            CompletedPathWindowSupportState::Available
+        );
+        assert_eq!(window.workload.latest_snapshot_health, Some(Health::Ok));
+        assert_eq!(
+            window.neighbors.state,
+            CompletedPathWindowSupportState::Available
+        );
+        assert_eq!(window.neighbors.snapshot_observations, 1);
+        assert_eq!(window.retained_completed_windows, 1);
+        assert_eq!(
+            window.limitations,
+            vec![
+                CompletedPathWindowLimitation::ProcessLocalCappedRetention {
+                    maximum_windows: MAX_COMPLETED_PATH_DWELLS as u64,
+                },
+                CompletedPathWindowLimitation::ImmutableAfterPathTransition,
+                CompletedPathWindowLimitation::NotCurrentPathEvidence,
+                CompletedPathWindowLimitation::NotPersisted,
+            ]
+        );
+    }
+
+    #[test]
+    fn completed_window_distinguishes_unsupported_partial_and_out_of_scope_support() {
+        let mut app = App::new();
+        let mut ethernet = test_link("en7", "ignored", "198.51.100.1");
+        ethernet.link_type = Some("ethernet".into());
+        ethernet.ssid = None;
+        ethernet.network_configuration = None;
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: ethernet,
+        });
+        app.apply(MonitorUpdate::Traffic {
+            generation: 1,
+            counters: Some(test_counters("en7", 1_000, 2_000, 10, 20, 0, 0, 0)),
+        });
+        app.apply(MonitorUpdate::Workload {
+            generation: 1,
+            snapshot: WorkloadSnapshot {
+                health: Health::Ok,
+                detail: "sampled process window".into(),
+                source: Some("nettop".into()),
+                interval: Duration::from_secs(1),
+                processes: vec![ProcessTraffic {
+                    process: "browser".into(),
+                    processes: 1,
+                    received_bytes_per_second: 1_000,
+                    transmitted_bytes_per_second: 500,
+                }],
+            },
+        });
+        app.apply(MonitorUpdate::Peers {
+            generation: 1,
+            snapshot: PeerSnapshot {
+                health: Health::Degraded,
+                detail: "ARP available; NDP failed".into(),
+                path_filter: PeerPathFilter::Applied,
+                sources: vec!["arp -an".into()],
+                failed_sources: vec!["ndp -an".into()],
+                oui_source: None,
+                peers: vec![Peer {
+                    address: "198.51.100.1".into(),
+                    mac: Some("02:00:00:00:00:01".into()),
+                    interface: Some("en7".into()),
+                    state: Some("reachable".into()),
+                    binding_conflict: false,
+                    mac_scope: Some(MacScope::Local),
+                    registrant: None,
+                }],
+            },
+        });
+        app.apply(MonitorUpdate::Link {
+            generation: 2,
+            snapshot: test_link("en0", "house", "192.168.1.1"),
+        });
+
+        let overview = app
+            .latest_completed_path_window(MonitorMode::Overview)
+            .unwrap();
+        assert_eq!(
+            overview.radio.state,
+            CompletedPathWindowSupportState::Unsupported
+        );
+        assert!(!overview.radio.applicable);
+        assert!(overview.radio.source.is_none());
+        assert!(
+            !overview
+                .radio
+                .limitations
+                .contains(&CompletedPathWindowSupportLimitation::PlatformRadioTelemetryUnavailable)
+        );
+        assert_eq!(
+            overview.neighbors.state,
+            CompletedPathWindowSupportState::Partial
+        );
+        assert_eq!(
+            overview.neighbors.latest_snapshot_health,
+            Some(Health::Degraded)
+        );
+        assert!(overview.neighbors.limitations.contains(
+            &CompletedPathWindowSupportLimitation::NativeSourcesFailed {
+                sources: vec!["ndp -an".into()],
+            }
+        ));
+
+        let focused = app.latest_completed_path_window(MonitorMode::Link).unwrap();
+        assert_eq!(
+            focused.workload.state,
+            CompletedPathWindowSupportState::NotCollected
+        );
+        assert!(focused.workload.latest_snapshot_health.is_none());
+        assert_eq!(focused.workload.sampled_windows, 0);
+        assert!(focused.workload.latest_window_top.is_none());
+        assert_eq!(
+            focused.neighbors.state,
+            CompletedPathWindowSupportState::NotCollected
+        );
+        assert!(focused.neighbors.latest_snapshot_health.is_none());
+        assert_eq!(focused.neighbors.snapshot_observations, 0);
+        assert!(focused.neighbors.sources.is_empty());
+        assert_eq!(focused.neighbors.dwell.observed, 0);
+
+        let peers = app
+            .latest_completed_path_window(MonitorMode::Peers)
+            .unwrap();
+        assert_eq!(
+            peers.interface.state,
+            CompletedPathWindowSupportState::NotCollected
+        );
+        assert_eq!(peers.interface.samples, 0);
+        assert!(peers.interface.current_rate.is_none());
+        assert_eq!(
+            peers.workload.state,
+            CompletedPathWindowSupportState::NotCollected
+        );
+        assert_eq!(peers.workload.sampled_windows, 0);
+        assert_eq!(
+            peers.neighbors.state,
+            CompletedPathWindowSupportState::Partial
+        );
+        assert_eq!(peers.neighbors.snapshot_observations, 1);
+    }
+
+    #[test]
+    fn completed_window_is_immutable_when_current_wifi_identity_resolves_later() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: test_link("en0", "house", "192.168.1.1"),
+        });
+        app.apply(MonitorUpdate::Link {
+            generation: 2,
+            snapshot: test_link("en0", "hotspot", "172.20.10.1"),
+        });
+        let completed = app
+            .latest_completed_path_window(MonitorMode::Overview)
+            .expect("path transition has a completed window");
+
+        app.apply(MonitorUpdate::Wifi {
+            generation: 2,
+            ssid: Some("resolved hotspot".into()),
+            telemetry: None,
+        });
+
+        assert_eq!(app.link.ssid.as_deref(), Some("resolved hotspot"));
+        let latest_change = app
+            .last_path_change
+            .as_ref()
+            .expect("latest transition remains available");
+        assert_eq!(latest_change.current, completed.completed_by.current);
+        assert_eq!(
+            app.latest_completed_path_window(MonitorMode::Overview),
+            Some(completed)
+        );
+    }
+
+    #[test]
+    fn completed_window_marks_an_all_source_neighbor_failure_unavailable() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: test_link("en0", "house", "192.168.1.1"),
+        });
+        app.apply(MonitorUpdate::Peers {
+            generation: 1,
+            snapshot: PeerSnapshot {
+                health: Health::Unavailable,
+                detail: "no neighbor-cache source completed".into(),
+                path_filter: PeerPathFilter::Applied,
+                sources: Vec::new(),
+                failed_sources: vec!["arp -an".into(), "ndp -an".into()],
+                oui_source: None,
+                peers: Vec::new(),
+            },
+        });
+        app.apply(MonitorUpdate::Link {
+            generation: 2,
+            snapshot: test_link("en0", "hotspot", "172.20.10.1"),
+        });
+
+        let completed = app
+            .latest_completed_path_window(MonitorMode::Overview)
+            .expect("path transition has a completed window");
+        assert_eq!(
+            completed.neighbors.state,
+            CompletedPathWindowSupportState::Unavailable
+        );
+        assert_eq!(
+            completed.neighbors.latest_snapshot_health,
+            Some(Health::Unavailable)
+        );
+        assert_eq!(completed.neighbors.snapshot_observations, 1);
+        assert!(completed.neighbors.sources.is_empty());
+        assert!(completed.neighbors.limitations.contains(
+            &CompletedPathWindowSupportLimitation::NativeSourcesFailed {
+                sources: vec!["arp -an".into(), "ndp -an".into()],
+            }
+        ));
+    }
+
+    #[test]
+    fn completed_window_unions_neighbor_provenance_across_partial_snapshots() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: test_link("en0", "house", "192.168.1.1"),
+        });
+        for (source, failed_source, address) in [
+            ("arp -an", "ndp -an", "192.168.1.2"),
+            ("ndp -an", "arp -an", "2001:db8::2"),
+        ] {
+            app.apply(MonitorUpdate::Peers {
+                generation: 1,
+                snapshot: PeerSnapshot {
+                    health: Health::Degraded,
+                    detail: format!("{source} completed; {failed_source} failed"),
+                    path_filter: PeerPathFilter::Applied,
+                    sources: vec![source.into()],
+                    failed_sources: vec![failed_source.into()],
+                    oui_source: None,
+                    peers: vec![Peer {
+                        address: address.into(),
+                        mac: None,
+                        interface: Some("en0".into()),
+                        state: Some("cached".into()),
+                        binding_conflict: false,
+                        mac_scope: None,
+                        registrant: None,
+                    }],
+                },
+            });
+        }
+        app.apply(MonitorUpdate::Link {
+            generation: 2,
+            snapshot: test_link("en0", "hotspot", "172.20.10.1"),
+        });
+
+        let completed = app
+            .latest_completed_path_window(MonitorMode::Overview)
+            .expect("path transition has a completed window");
+        assert_eq!(
+            completed.neighbors.state,
+            CompletedPathWindowSupportState::Partial
+        );
+        assert_eq!(
+            completed.neighbors.sources,
+            vec!["arp -an".to_string(), "ndp -an".to_string()]
+        );
+        assert_eq!(
+            completed.neighbors.failed_sources,
+            vec!["arp -an".to_string(), "ndp -an".to_string()]
+        );
+        assert_eq!(completed.neighbors.snapshot_observations, 2);
+        assert_eq!(completed.neighbors.dwell.observed, 2);
+        assert_eq!(
+            completed.neighbors.latest_snapshot_detail.as_deref(),
+            Some("ndp -an completed; arp -an failed")
+        );
     }
 
     #[test]

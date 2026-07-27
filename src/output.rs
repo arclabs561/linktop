@@ -6,11 +6,12 @@ use std::time::{Duration, Instant};
 
 use crate::metrics::LatencyMetrics;
 use crate::model::{
-    Address, App, AppProjection, EvidenceClaim, EvidenceCoverage, EvidenceLimitation,
-    EvidenceProgress, EvidenceProgressState, Health, HistoryContext, InterfaceCounters,
-    LinkSnapshot, LiveAssessment, LiveEvidence, LiveGatewayAssessmentEvidence, MacScope,
-    MonitorMode, MonitorUpdate, PathStatus, PathUnderlay, Peer, PeerPathFilter, PeerSnapshot,
-    ProbeKind, ProbePolicy, Situation, SnapshotProbe, SnapshotReport, SnapshotSummary,
+    Address, App, AppProjection, CompletedPathWindow, EvidenceClaim, EvidenceCoverage,
+    EvidenceLimitation, EvidenceProgress, EvidenceProgressState, Health, HistoryContext,
+    InterfaceCounters, LinkSnapshot, LiveAssessment, LiveEvidence, LiveGatewayAssessmentEvidence,
+    MacScope, MonitorMode, MonitorUpdate, PathStatus, PathUnderlay, Peer, PeerPathFilter,
+    PeerSnapshot, ProbeKind, ProbePolicy, Situation, SnapshotProbe, SnapshotReport,
+    SnapshotSummary,
 };
 
 pub const OBSERVATION_SCHEMA_V1: &str = "linktop.observation.v1";
@@ -159,6 +160,7 @@ struct LiveMaterialState {
     probes: Vec<LiveProbeMaterialState>,
     gateway_assessment: Option<LiveGatewayAssessmentEvidence>,
     neighbors: Option<PeerSnapshot>,
+    completed_path_window: Option<CompletedPathWindow>,
     history_context: Option<HistoryContext>,
 }
 
@@ -198,6 +200,7 @@ impl LiveMaterialState {
                 .collect(),
             gateway_assessment: projection.evidence.gateway_assessment.clone(),
             neighbors: projection.evidence.neighbors.clone(),
+            completed_path_window: projection.evidence.completed_path_window.clone(),
             history_context: projection.evidence.history_context.clone(),
         }
     }
@@ -607,7 +610,7 @@ mod tests {
     use crate::metrics::LatencyMetrics;
     use crate::model::{
         Address, EvidenceCoverage, NetworkConfiguration, PathStatus, ProbeKind, ProbeResult,
-        SnapshotProbe, SnapshotReport, WifiTelemetry,
+        ProcessTraffic, SnapshotProbe, SnapshotReport, WifiTelemetry, WorkloadSnapshot,
     };
     use crate::speed::{LoadedLatency, SpeedReport, TransferSummary};
 
@@ -1090,6 +1093,64 @@ mod tests {
     }
 
     #[test]
+    fn transition_record_joins_the_completed_window_to_the_path_change() {
+        let mut app = crate::model::App::new();
+        let mut previous = test_link();
+        previous.ssid = Some("field-kit".into());
+        assert!(app.apply(crate::model::MonitorUpdate::Link {
+            generation: 1,
+            snapshot: previous,
+        }));
+        let subject = crate::model::MonitorMode::Overview;
+        let mut stream = LiveObservationStream::start(ProbePolicy::Passive, None);
+        assert!(
+            stream
+                .observe_at(
+                    LiveTrigger::Link,
+                    subject,
+                    app.projection(subject),
+                    "2026-07-26T20:00:00.000Z".into(),
+                    Duration::ZERO,
+                )
+                .is_some()
+        );
+
+        assert!(app.apply(crate::model::MonitorUpdate::Link {
+            generation: 2,
+            snapshot: test_link(),
+        }));
+        let transition = stream
+            .observe_at(
+                LiveTrigger::Link,
+                subject,
+                app.projection(subject),
+                "2026-07-26T20:00:01.000Z".into(),
+                Duration::from_secs(1),
+            )
+            .expect("path generation change emits");
+        assert_eq!(transition.line, LiveLineKind::Transition);
+        let completed = transition
+            .evidence
+            .completed_path_window
+            .as_ref()
+            .expect("transition carries its completed window");
+        let change = transition
+            .evidence
+            .last_path_change
+            .as_ref()
+            .expect("transition carries path-change evidence");
+        assert_eq!(completed.generation, 1);
+        assert_eq!(
+            completed.completed_by.next_generation,
+            transition.generation
+        );
+        assert_eq!(completed.completed_by.observed_at_ms, change.observed_at_ms);
+        assert_eq!(completed.completed_by.changed_dimensions, change.dimensions);
+        assert_eq!(completed.completed_by.previous, change.previous);
+        assert_eq!(completed.completed_by.current, change.current);
+    }
+
+    #[test]
     fn same_health_probe_measurement_change_emits_immediately() {
         let mut app = crate::model::App::with_probe_policy(ProbePolicy::Active);
         let mut stream = LiveObservationStream::start(ProbePolicy::Active, None);
@@ -1135,9 +1196,49 @@ mod tests {
     #[test]
     fn live_v1_bounded_final_matches_an_exact_readable_golden() {
         let mut app = crate::model::App::new();
+        let current = test_link();
+        let mut previous = current.clone();
+        previous.ssid = Some("field-kit".into());
+        previous
+            .network_configuration
+            .as_mut()
+            .unwrap()
+            .connection_id = Some("field-kit-wifi".into());
         assert!(app.apply(crate::model::MonitorUpdate::Link {
             generation: 1,
-            snapshot: test_link(),
+            snapshot: previous.clone(),
+        }));
+        assert!(app.apply(crate::model::MonitorUpdate::Traffic {
+            generation: 1,
+            counters: Some(test_counters()),
+        }));
+        assert!(app.apply(crate::model::MonitorUpdate::Wifi {
+            generation: 1,
+            ssid: None,
+            telemetry: previous.wifi.clone(),
+        }));
+        assert!(app.apply(crate::model::MonitorUpdate::Workload {
+            generation: 1,
+            snapshot: WorkloadSnapshot {
+                health: Health::Ok,
+                detail: "sampled process window".into(),
+                source: Some("nettop".into()),
+                interval: Duration::from_secs(1),
+                processes: vec![ProcessTraffic {
+                    process: "browser".into(),
+                    processes: 2,
+                    received_bytes_per_second: 8_192,
+                    transmitted_bytes_per_second: 4_096,
+                }],
+            },
+        }));
+        assert!(app.apply(crate::model::MonitorUpdate::Peers {
+            generation: 1,
+            snapshot: test_peers(),
+        }));
+        assert!(app.apply(crate::model::MonitorUpdate::Link {
+            generation: 2,
+            snapshot: current,
         }));
         let mut projection = app.final_projection(crate::model::MonitorMode::Overview);
         for progress in &mut projection.progress {
@@ -1149,6 +1250,19 @@ mod tests {
             }
         }
         projection.evidence.dwell.observed_span_ms = 0;
+        projection
+            .evidence
+            .last_path_change
+            .as_mut()
+            .expect("transition has path-change evidence")
+            .observed_at_ms = 0;
+        let completed = projection
+            .evidence
+            .completed_path_window
+            .as_mut()
+            .expect("transition retains the completed generation");
+        completed.observed_span_ms = 0;
+        completed.completed_by.observed_at_ms = 0;
 
         let mut stream =
             LiveObservationStream::start(ProbePolicy::Passive, Some(Duration::from_secs(1)));

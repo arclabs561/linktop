@@ -7,8 +7,8 @@ use ratatui::prelude::{Color, Frame, Line, Modifier, Span, Style};
 use ratatui::widgets::{Block, Borders, Paragraph, Sparkline, Wrap};
 
 use crate::model::{
-    App, EventKind, EvidenceClaim, EvidenceProgressState, Health, MonitorMode, Peer, PeerKey,
-    ProbeKind, SituationKind,
+    App, CompletedPathWindow, CompletedPathWindowSupportState, EventKind, EvidenceClaim,
+    EvidenceProgressState, Health, MonitorMode, Peer, PeerKey, ProbeKind, SituationKind,
 };
 
 const INK: Color = Color::Rgb(192, 202, 214);
@@ -139,8 +139,9 @@ fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, can_navigate: b
             render_footer(frame, vertical[4], app, MonitorMode::Overview, can_navigate);
             return;
         }
+        let has_completed_window = !app.completed_path_dwells.is_empty();
         let dwell_height = if !has_path_dwell_evidence(app) {
-            3
+            if has_completed_window { 5 } else { 3 }
         } else if main[1].height >= 14 {
             11
         } else {
@@ -167,7 +168,12 @@ fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App, can_navigate: b
     render_latency(frame, left[0], app);
     render_events(frame, left[1], app);
     render_probes(frame, right[0], app);
-    if area.height >= 28 {
+    let dwell_minimum_height = if app.completed_path_dwells.is_empty() {
+        28
+    } else {
+        30
+    };
+    if area.height >= dwell_minimum_height {
         render_active_path_dwell(frame, right[1], app);
     } else {
         render_scope(frame, right[1], app);
@@ -695,13 +701,10 @@ fn salient_context(app: &App) -> (String, String, bool) {
                     | crate::model::HistoryContextKind::Returned
             )
         }) {
+            let summary = history.compact_summary.as_str();
             return (
-                format!("history  +{} {}", format_duration(elapsed), history.summary),
-                format!(
-                    "history  +{} {}",
-                    format_duration(elapsed),
-                    history.compact_summary
-                ),
+                format!("history  +{} {summary}", format_duration(elapsed)),
+                format!("history  +{} {summary}", format_duration(elapsed)),
                 true,
             );
         }
@@ -1312,13 +1315,14 @@ fn render_path_dwell(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let peers = app.peer_dwell_summary();
     let value_width = usize::from(area.width.saturating_sub(14));
     if !has_path_dwell_evidence(app) {
+        let mut lines = completed_path_window_lines(app, value_width);
+        lines.push(dwell_line(
+            "progress",
+            dwell_progress_summary(app),
+            value_width,
+        ));
         frame.render_widget(
-            Paragraph::new(vec![dwell_line(
-                "progress",
-                dwell_progress_summary(app),
-                value_width,
-            )])
-            .block(instrument_block(" SINCE PATH CHANGE ")),
+            Paragraph::new(lines).block(instrument_block(" PATH WINDOWS / PROCESS LOCAL ")),
             area,
         );
         return;
@@ -1359,41 +1363,70 @@ fn render_path_dwell(frame: &mut Frame<'_>, area: Rect, app: &App) {
         _ => "signal unavailable".into(),
     };
     let process_windows = dwell_process_windows(workload);
-    let lines = vec![
-        dwell_line(
-            "window",
-            format!(
-                "generation {} / {} / bounded in-memory evidence",
-                app.path_generation,
-                format_duration(app.uptime().saturating_sub(app.path_observed_since))
-            ),
-            value_width,
+    let completed_lines = completed_path_window_lines(app, value_width);
+    let mut lines = vec![dwell_line(
+        "current",
+        format!(
+            "generation {} / {} / bounded in-memory evidence",
+            app.path_generation,
+            format_duration(app.uptime().saturating_sub(app.path_observed_since))
         ),
-        dwell_line(
-            "interface",
-            format!(
-                "n={} valid={} reset={} errors=+{} drops=+{}",
-                interface.samples,
-                interface.valid_intervals,
-                interface.counter_resets,
-                interface.error_delta,
-                interface.drop_delta
+        value_width,
+    )];
+    if completed_lines.is_empty() {
+        lines.extend([
+            dwell_line(
+                "interface",
+                format!(
+                    "n={} valid={} reset={} errors=+{} drops=+{}",
+                    interface.samples,
+                    interface.valid_intervals,
+                    interface.counter_resets,
+                    interface.error_delta,
+                    interface.drop_delta,
+                ),
+                value_width,
             ),
-            value_width,
-        ),
-        dwell_line(
-            "deltas",
-            format!(
-                "bytes rx={} tx={} / packets rx={} tx={}",
-                human_bytes(interface.received_bytes_delta),
-                human_bytes(interface.transmitted_bytes_delta),
-                interface.received_packets_delta,
-                interface.transmitted_packets_delta
+            dwell_line(
+                "deltas",
+                format!(
+                    "bytes rx={} tx={} / packets rx={} tx={}",
+                    human_bytes(interface.received_bytes_delta),
+                    human_bytes(interface.transmitted_bytes_delta),
+                    interface.received_packets_delta,
+                    interface.transmitted_packets_delta
+                ),
+                value_width,
             ),
-            value_width,
-        ),
-        dwell_line("latest rate", current_rate, value_width),
-        dwell_line("peak rate", peak_rate, value_width),
+            dwell_line("latest rate", current_rate, value_width),
+            dwell_line("peak rate", peak_rate, value_width),
+        ]);
+    } else {
+        lines.extend([
+            dwell_line(
+                "interface",
+                format!(
+                    "n={} valid={} reset={} errors=+{} drops=+{}",
+                    interface.samples,
+                    interface.valid_intervals,
+                    interface.counter_resets,
+                    interface.error_delta,
+                    interface.drop_delta,
+                ),
+                value_width,
+            ),
+            dwell_line(
+                "deltas",
+                format!(
+                    "bytes rx={} tx={} / peak {peak_rate}",
+                    human_bytes(interface.received_bytes_delta),
+                    human_bytes(interface.transmitted_bytes_delta),
+                ),
+                value_width,
+            ),
+        ]);
+    }
+    lines.extend([
         dwell_line(
             "radio",
             format!(
@@ -1425,11 +1458,142 @@ fn render_path_dwell(frame: &mut Frame<'_>, area: Rect, app: &App) {
             value_width,
         ),
         dwell_line("processes", process_windows, value_width),
-    ];
+    ]);
+    lines.extend(completed_lines);
     frame.render_widget(
-        Paragraph::new(lines).block(instrument_block(" SINCE PATH CHANGE ")),
+        Paragraph::new(lines).block(instrument_block(" PATH WINDOWS / PROCESS LOCAL ")),
         area,
     );
+}
+
+fn completed_path_window_lines(app: &App, value_width: usize) -> Vec<Line<'static>> {
+    let Some(window) = app.latest_completed_path_window(MonitorMode::Overview) else {
+        return Vec::new();
+    };
+    vec![
+        dwell_line(
+            "prior path",
+            completed_path_identity_summary(&window),
+            value_width,
+        ),
+        dwell_line(
+            "prior support",
+            completed_path_support_summary(&window),
+            value_width,
+        ),
+    ]
+}
+
+fn completed_path_identity_summary(window: &CompletedPathWindow) -> String {
+    let identity = &window.path_identity;
+    let attachment = identity
+        .ssid
+        .as_deref()
+        .or_else(|| {
+            identity
+                .ssid_restricted
+                .then_some("SSID hidden by platform")
+        })
+        .or(identity.link_type.as_deref())
+        .unwrap_or("identity unavailable");
+    let route = if let Some(underlay) = &identity.underlay {
+        format!(
+            "{} over {}",
+            identity.interface.as_deref().unwrap_or("?"),
+            underlay.interface
+        )
+    } else {
+        format!(
+            "{} → {}",
+            identity.interface.as_deref().unwrap_or("?"),
+            identity.gateway.as_deref().unwrap_or("?")
+        )
+    };
+    format!(
+        "g{} {} · {attachment} · {route}",
+        window.generation,
+        format_duration(Duration::from_millis(window.observed_span_ms)),
+    )
+}
+
+fn completed_path_support_summary(window: &CompletedPathWindow) -> String {
+    if window.interface.error_delta > 0 || window.interface.drop_delta > 0 {
+        return format!(
+            "counters +{} errors / +{} drops · n={} valid={}",
+            window.interface.error_delta,
+            window.interface.drop_delta,
+            window.interface.samples,
+            window.interface.valid_intervals
+        );
+    }
+    if let Some(process) = window.workload.peak_window_top.as_ref() {
+        return format!(
+            "peak workload {}{} rx={} tx={}",
+            process.process,
+            if process.processes > 1 {
+                format!("×{}", process.processes)
+            } else {
+                String::new()
+            },
+            crate::speed::human_rate(Some(process.received_bytes_per_second as f64 * 8.0)),
+            crate::speed::human_rate(Some(process.transmitted_bytes_per_second as f64 * 8.0))
+        );
+    }
+    if let Some(worst) = window.radio.worst_signal_dbm {
+        return format!(
+            "radio worst {worst:.0} dBm · n={} · channel changes={}",
+            window.radio.samples, window.radio.channel_changes
+        );
+    }
+    if window.neighbors.dwell.changed > 0 || window.neighbors.dwell.disappeared > 0 {
+        return format!(
+            "cache observed={} changed={} absent={} · not liveness",
+            window.neighbors.dwell.observed,
+            window.neighbors.dwell.changed,
+            window.neighbors.dwell.disappeared
+        );
+    }
+
+    let states = [
+        (window.interface.state, "counters"),
+        (window.radio.state, "radio"),
+        (window.workload.state, "workload"),
+        (window.neighbors.state, "cache"),
+    ];
+    [
+        CompletedPathWindowSupportState::Available,
+        CompletedPathWindowSupportState::Partial,
+        CompletedPathWindowSupportState::Unavailable,
+        CompletedPathWindowSupportState::Unsupported,
+        CompletedPathWindowSupportState::NotCollected,
+    ]
+    .into_iter()
+    .filter_map(|state| {
+        let labels = states
+            .iter()
+            .filter(|(candidate, _)| *candidate == state)
+            .map(|(_, label)| *label)
+            .collect::<Vec<_>>();
+        (!labels.is_empty()).then(|| {
+            format!(
+                "{}: {}",
+                completed_path_support_state_label(state),
+                labels.join(", ")
+            )
+        })
+    })
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
+fn completed_path_support_state_label(state: CompletedPathWindowSupportState) -> &'static str {
+    match state {
+        CompletedPathWindowSupportState::Available => "available",
+        CompletedPathWindowSupportState::Partial => "partial",
+        CompletedPathWindowSupportState::Unavailable => "unavailable",
+        CompletedPathWindowSupportState::Unsupported => "unsupported",
+        CompletedPathWindowSupportState::NotCollected => "not collected",
+    }
 }
 
 fn has_path_dwell_evidence(app: &App) -> bool {
@@ -1515,7 +1679,7 @@ fn render_active_path_dwell(frame: &mut Frame<'_>, area: Rect, app: &App) {
             wifi.channel_changes
         ),
     };
-    let lines = vec![
+    let mut lines = vec![
         dwell_line(
             "interface",
             format!(
@@ -1556,9 +1720,10 @@ fn render_active_path_dwell(frame: &mut Frame<'_>, area: Rect, app: &App) {
             value_width,
         ),
     ];
+    lines.extend(completed_path_window_lines(app, value_width));
     frame.render_widget(
         Paragraph::new(lines).block(instrument_block(&format!(
-            " PATH DWELL / PASSIVE SOURCES / GENERATION {} ",
+            " PATH WINDOWS / PASSIVE SOURCES / GENERATION {} ",
             app.path_generation
         ))),
         area,
@@ -3596,7 +3761,7 @@ mod tests {
         assert!(rendered.contains("EVIDENCE LEDGER"));
         assert!(rendered.contains("neighbor cache pending"));
         assert!(rendered.contains("SESSION EVENTS"));
-        assert!(!rendered.contains("SINCE PATH CHANGE"));
+        assert!(!rendered.contains("PATH WINDOWS"));
         assert!(!rendered.contains("ACTIVE PROBES / OFF"));
         assert!(!rendered.contains("EVIDENCE / ACTIVITY BOUNDARY"));
         assert!(!rendered.contains("LOCAL ADDRESSES"));
@@ -3612,7 +3777,7 @@ mod tests {
             .unwrap();
         let rendered = buffer_text(terminal.backend());
 
-        assert!(rendered.contains("SINCE PATH CHANGE"));
+        assert!(rendered.contains("PATH WINDOWS / PROCESS LOCAL"));
         assert!(rendered.contains("collecting: totals, rate, radio, workload, cache"));
         assert!(!rendered.contains("latest rate"));
         assert!(rendered.contains("SESSION EVENTS"));
@@ -4292,10 +4457,10 @@ mod tests {
             .unwrap();
         let rendered = buffer_text(terminal.backend());
 
-        assert!(rendered.contains("SINCE PATH CHANGE"));
+        assert!(rendered.contains("PATH WINDOWS / PROCESS LOCAL"));
         assert!(rendered.contains("generation 1"));
         assert!(rendered.contains("n=2 valid=1 reset=0"));
-        assert!(rendered.contains("bytes rx=1.0 KB tx=2.0 KB"));
+        assert!(rendered.contains("bytes rx=1.0 KB tx=2.0 KB"), "{rendered}");
         assert!(rendered.contains("latest rate"));
         assert!(rendered.contains("peak rate"));
         assert!(rendered.contains("RSSI latest -72, worst -72 dBm"));
@@ -4305,6 +4470,49 @@ mod tests {
         assert!(rendered.contains("latest codex"));
         assert!(rendered.contains("peak browser"));
         assert!(rendered.contains("≠ liveness"));
+    }
+
+    #[test]
+    fn wide_overview_joins_the_completed_window_to_the_path_transition() {
+        let mut app = dwell_overview_fixture();
+        let mut hotspot = app.link.clone();
+        hotspot.ssid = Some("phone hotspot".into());
+        hotspot.gateway = Some("172.20.10.1".into());
+        hotspot.resolvers = vec!["172.20.10.1".into()];
+        app.apply(MonitorUpdate::Link {
+            generation: 2,
+            snapshot: hotspot,
+        });
+
+        let backend = TestBackend::new(160, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+
+        assert!(
+            rendered.contains("PATH WINDOWS / PROCESS LOCAL"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("prior path"), "{rendered}");
+        assert!(rendered.contains("g1"), "{rendered}");
+        assert!(rendered.contains("house"), "{rendered}");
+        assert!(rendered.contains("en0 → 192.168.1.1"), "{rendered}");
+        assert!(rendered.contains("prior support"), "{rendered}");
+        assert!(
+            rendered.contains("counters +1 errors / +1 drops"),
+            "{rendered}"
+        );
+
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let compact = buffer_text(terminal.backend());
+        assert!(!compact.contains("prior path"), "{compact}");
+        assert!(compact.contains("next:"), "{compact}");
     }
 
     #[test]
@@ -4320,10 +4528,7 @@ mod tests {
             assert!(rendered.contains("DIAGNOSIS"), "{height}\n{rendered}");
             assert!(rendered.contains("EVIDENCE LEDGER"), "{height}\n{rendered}");
             assert!(rendered.contains("SESSION EVENTS"), "{height}\n{rendered}");
-            assert!(
-                !rendered.contains("SINCE PATH CHANGE"),
-                "{height}\n{rendered}"
-            );
+            assert!(!rendered.contains("PATH WINDOWS"), "{height}\n{rendered}");
             assert!(!rendered.contains("latest rate"), "{height}\n{rendered}");
         }
 
@@ -4333,7 +4538,10 @@ mod tests {
             .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
             .unwrap();
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("SINCE PATH CHANGE"), "{rendered}");
+        assert!(
+            rendered.contains("PATH WINDOWS / PROCESS LOCAL"),
+            "{rendered}"
+        );
         assert!(rendered.contains("processes"), "{rendered}");
         assert!(rendered.contains("SESSION EVENTS"), "{rendered}");
     }
@@ -4377,7 +4585,7 @@ mod tests {
         assert!(rendered.contains("ACTIVE PROBES"), "{rendered}");
         assert!(rendered.contains("next-hop RTT"), "{rendered}");
         assert!(
-            rendered.contains("PATH DWELL / PASSIVE SOURCES"),
+            rendered.contains("PATH WINDOWS / PASSIVE SOURCES"),
             "{rendered}"
         );
         assert!(rendered.contains("interface"), "{rendered}");
@@ -4438,7 +4646,7 @@ mod tests {
                 "{height}\n{rendered}"
             );
             assert!(
-                !rendered.contains("PATH DWELL / PASSIVE SOURCES"),
+                !rendered.contains("PATH WINDOWS / PASSIVE SOURCES"),
                 "{height}\n{rendered}"
             );
         }
@@ -4451,9 +4659,51 @@ mod tests {
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("ACTIVE PROBES"), "{rendered}");
         assert!(
-            rendered.contains("PATH DWELL / PASSIVE SOURCES"),
+            rendered.contains("PATH WINDOWS / PASSIVE SOURCES"),
             "{rendered}"
         );
+        assert!(rendered.contains("neighbors"), "{rendered}");
+    }
+
+    #[test]
+    fn active_overview_defers_completed_path_windows_until_both_windows_fit() {
+        let mut app = dwell_overview_fixture();
+        let mut hotspot = app.link.clone();
+        hotspot.ssid = Some("phone hotspot".into());
+        hotspot.gateway = Some("172.20.10.1".into());
+        app.apply(MonitorUpdate::Link {
+            generation: 2,
+            snapshot: hotspot,
+        });
+        app.set_probe_policy(ProbePolicy::Active);
+
+        for height in [28, 29] {
+            let backend = TestBackend::new(120, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+                .unwrap();
+            let rendered = buffer_text(terminal.backend());
+            assert!(rendered.contains("ACTIVE PROBES"), "{height}\n{rendered}");
+            assert!(
+                rendered.contains("EVIDENCE / ACTIVITY BOUNDARY"),
+                "{height}\n{rendered}"
+            );
+            assert!(!rendered.contains("prior path"), "{height}\n{rendered}");
+        }
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+        assert!(
+            rendered.contains("PATH WINDOWS / PASSIVE SOURCES"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("prior path"), "{rendered}");
+        assert!(rendered.contains("prior support"), "{rendered}");
         assert!(rendered.contains("neighbors"), "{rendered}");
     }
 
@@ -4471,7 +4721,7 @@ mod tests {
         assert!(rendered.contains("workstation ──▶ en0"));
         assert!(rendered.contains("coverage"));
         assert!(rendered.contains("next:"));
-        assert!(!rendered.contains("SINCE PATH CHANGE"));
+        assert!(!rendered.contains("PATH WINDOWS"));
         assert!(!rendered.contains("sampled windows ≠ session traffic"));
     }
 
@@ -4493,7 +4743,7 @@ mod tests {
         assert!(rendered.contains("en0 [wifi / house]"));
         assert!(rendered.contains("coverage"));
         assert!(rendered.contains("next:"));
-        assert!(!rendered.contains("SINCE PATH CHANGE"));
+        assert!(!rendered.contains("PATH WINDOWS"));
         assert!(!rendered.contains("latest rate"));
     }
 
