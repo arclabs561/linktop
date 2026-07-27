@@ -423,6 +423,9 @@ The longer product direction, including episode stories, purpose-specific
 readiness, explicit diagnostic experiments, multi-vantage Netbraid evidence, and
 advisory traffic fingerprints, is recorded in
 [`docs/design/network-situation-intelligence.md`](docs/design/network-situation-intelligence.md).
+Its dependency-ordered delivery gates and the decisions that must precede later
+phases are recorded in
+[`docs/design/operator-intelligence-roadmap.md`](docs/design/operator-intelligence-roadmap.md).
 
 ## License
 
