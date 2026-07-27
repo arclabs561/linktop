@@ -17,6 +17,7 @@ const WARN: Color = Color::Rgb(242, 190, 70);
 const FAIL: Color = Color::Rgb(244, 91, 105);
 const MIN_EVIDENCE_COLUMNS: u16 = 60;
 const MIN_EVIDENCE_ROWS: u16 = 10;
+const PEER_CHANGE_ATTENTION_WINDOW: Duration = Duration::from_secs(60);
 
 pub fn render(
     frame: &mut Frame<'_>,
@@ -3217,6 +3218,10 @@ pub(crate) fn ordered_peer_keys(app: &App) -> Vec<PeerKey> {
 }
 
 fn peer_attention_rank(app: &App, peer: &Peer) -> u8 {
+    peer_attention_rank_at(app, peer, app.uptime())
+}
+
+fn peer_attention_rank_at(app: &App, peer: &Peer, now: Duration) -> u8 {
     if peer.binding_conflict {
         return 110;
     }
@@ -3224,7 +3229,7 @@ fn peer_attention_rank(app: &App, peer: &Peer) -> u8 {
         return 100;
     }
     let dwell = app.peer_dwell(peer);
-    if dwell.is_some_and(|dwell| dwell.binding_changes > 0) {
+    if dwell.is_some_and(|dwell| recent_peer_change(now, dwell.last_binding_change).is_some()) {
         return 95;
     }
     if matches!(
@@ -3236,10 +3241,10 @@ fn peer_attention_rank(app: &App, peer: &Peer) -> u8 {
     ) {
         return 90;
     }
-    if dwell.is_some_and(|dwell| dwell.cache_returns > 0) {
+    if dwell.is_some_and(|dwell| recent_peer_change(now, dwell.last_cache_return).is_some()) {
         return 85;
     }
-    if dwell.is_some_and(|dwell| dwell.state_changes > 0) {
+    if dwell.is_some_and(|dwell| recent_peer_change(now, dwell.last_state_change).is_some()) {
         return 80;
     }
     match peer
@@ -3255,16 +3260,20 @@ fn peer_attention_rank(app: &App, peer: &Peer) -> u8 {
     }
 }
 
-fn peer_attention_label(app: &App, peer: &Peer) -> &'static str {
+fn peer_attention_label(app: &App, peer: &Peer) -> String {
+    peer_attention_label_at(app, peer, app.uptime())
+}
+
+fn peer_attention_label_at(app: &App, peer: &Peer, now: Duration) -> String {
     if peer.binding_conflict {
-        return "source disagreement";
+        return "source disagreement".into();
     }
     if app.link.gateway.as_deref() == Some(peer.address.as_str()) {
-        return "path gateway";
+        return "path gateway".into();
     }
     let dwell = app.peer_dwell(peer);
-    if dwell.is_some_and(|dwell| dwell.binding_changes > 0) {
-        return "binding changed";
+    if let Some(age) = dwell.and_then(|dwell| recent_peer_change(now, dwell.last_binding_change)) {
+        return format!("binding changed {}", compact_age(age));
     }
     if matches!(
         peer.state
@@ -3273,13 +3282,13 @@ fn peer_attention_label(app: &App, peer: &Peer) -> &'static str {
             .as_deref(),
         Some("FAILED" | "INCOMPLETE")
     ) {
-        return "resolution issue";
+        return "resolution issue".into();
     }
-    if dwell.is_some_and(|dwell| dwell.cache_returns > 0) {
-        return "cache returned";
+    if let Some(age) = dwell.and_then(|dwell| recent_peer_change(now, dwell.last_cache_return)) {
+        return format!("cache returned {}", compact_age(age));
     }
-    if dwell.is_some_and(|dwell| dwell.state_changes > 0) {
-        return "state changed";
+    if let Some(age) = dwell.and_then(|dwell| recent_peer_change(now, dwell.last_state_change)) {
+        return format!("state changed {}", compact_age(age));
     }
     match peer
         .state
@@ -3287,11 +3296,16 @@ fn peer_attention_label(app: &App, peer: &Peer) -> &'static str {
         .map(str::to_ascii_uppercase)
         .as_deref()
     {
-        Some("PROBE" | "DELAY") => "kernel checking",
-        Some("REACHABLE") => "kernel-confirmed",
-        _ if dwell.is_some_and(|dwell| dwell.observations == 1) => "first seen this session",
-        _ => "cached only",
+        Some("PROBE" | "DELAY") => "kernel checking".into(),
+        Some("REACHABLE") => "kernel-confirmed".into(),
+        _ if dwell.is_some_and(|dwell| dwell.observations == 1) => "first seen this session".into(),
+        _ => "cached only".into(),
     }
+}
+
+fn recent_peer_change(now: Duration, observed: Option<Duration>) -> Option<Duration> {
+    let age = now.saturating_sub(observed?);
+    (age <= PEER_CHANGE_ATTENTION_WINDOW).then_some(age)
 }
 
 fn peer_session_summary(app: &App) -> String {
@@ -4346,8 +4360,27 @@ mod tests {
 
         let ordered = ordered_peers(&app);
         assert_eq!(ordered[0].address, "192.168.1.3");
-        assert_eq!(peer_attention_label(&app, ordered[0]), "binding changed");
+        assert_eq!(
+            peer_attention_label(&app, ordered[0]),
+            "binding changed now"
+        );
         assert_eq!(peer_attention_label(&app, ordered[1]), "cached only");
+
+        let changed_at = app
+            .peer_dwell(ordered[0])
+            .unwrap()
+            .last_binding_change
+            .unwrap();
+        let after_attention_window =
+            changed_at + PEER_CHANGE_ATTENTION_WINDOW + Duration::from_secs(1);
+        assert_eq!(
+            peer_attention_label_at(&app, ordered[0], after_attention_window),
+            "cached only"
+        );
+        assert_eq!(
+            peer_attention_rank_at(&app, ordered[0], after_attention_window),
+            peer_attention_rank_at(&app, ordered[1], after_attention_window)
+        );
     }
 
     #[test]

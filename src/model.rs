@@ -641,9 +641,12 @@ pub struct PeerDwell {
     pub observations: u64,
     pub previous_state: Option<String>,
     pub state_changes: u64,
+    pub last_state_change: Option<Duration>,
     pub binding_changes: u64,
+    pub last_binding_change: Option<Duration>,
     pub cache_disappearances: u64,
     pub cache_returns: u64,
+    pub last_cache_return: Option<Duration>,
     pub currently_cached: bool,
     pub latest: Peer,
 }
@@ -1615,6 +1618,7 @@ impl App {
                     && dwell.latest.mac != peer.mac
                 {
                     dwell.binding_changes += 1;
+                    dwell.last_binding_change = Some(observed_at);
                     events.push((
                         Health::Degraded,
                         format!(
@@ -1637,6 +1641,7 @@ impl App {
                 if dwell.latest.state != peer.state {
                     dwell.previous_state = dwell.latest.state.clone();
                     dwell.state_changes += 1;
+                    dwell.last_state_change = Some(observed_at);
                     events.push((
                         Health::Running,
                         format!(
@@ -1649,6 +1654,7 @@ impl App {
                 }
                 if !was_cached {
                     dwell.cache_returns += 1;
+                    dwell.last_cache_return = Some(observed_at);
                     events.push((
                         Health::Ok,
                         format!("neighbor cache returned: {}", peer.address),
@@ -1667,9 +1673,12 @@ impl App {
                         observations: 1,
                         previous_state: None,
                         state_changes: 0,
+                        last_state_change: None,
                         binding_changes: 0,
+                        last_binding_change: None,
                         cache_disappearances: 0,
                         cache_returns: 0,
+                        last_cache_return: None,
                         currently_cached: true,
                         latest: peer.clone(),
                     },
@@ -3127,6 +3136,8 @@ mod tests {
         assert_eq!(dwell.observations, 2);
         assert_eq!(dwell.binding_changes, 1);
         assert_eq!(dwell.state_changes, 1);
+        assert!(dwell.last_binding_change.is_some());
+        assert!(dwell.last_state_change.is_some());
         assert_eq!(dwell.previous_state.as_deref(), Some("STALE"));
         assert_eq!(
             app.peer_dwell_summary(),
@@ -3218,6 +3229,36 @@ mod tests {
                 .iter()
                 .any(|event| event.message.contains("not proof of departure"))
         );
+    }
+
+    #[test]
+    fn peer_dwell_records_when_a_binding_returns_to_the_cache() {
+        let mut app = App::new();
+        let peer = test_peers(Some("02:00:00:00:00:01"), Some("STALE"));
+        app.apply(MonitorUpdate::Peers {
+            generation: 0,
+            snapshot: peer.clone(),
+        });
+        app.apply(MonitorUpdate::Peers {
+            generation: 0,
+            snapshot: PeerSnapshot {
+                health: Health::Ok,
+                detail: "empty complete cache".into(),
+                path_filter: PeerPathFilter::Applied,
+                sources: vec!["arp -an".into(), "ndp -an".into()],
+                failed_sources: Vec::new(),
+                oui_source: None,
+                peers: Vec::new(),
+            },
+        });
+        app.apply(MonitorUpdate::Peers {
+            generation: 0,
+            snapshot: peer,
+        });
+
+        let dwell = app.peer_dwell(&app.peers.peers[0]).unwrap();
+        assert_eq!(dwell.cache_returns, 1);
+        assert!(dwell.last_cache_return.is_some());
     }
 
     fn test_link(interface: &str, ssid: &str, gateway: &str) -> LinkSnapshot {
