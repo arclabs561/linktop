@@ -221,3 +221,32 @@ viewport prose remain Netbraid fixture oracles, not Linktop inputs. Linktop
 continues to own its peer, counter, probe, workload, generation, and
 presentation scenarios because those facts are not represented by the current
 Netbraid host-path record.
+
+## Update (2026-07-27): reuse public scenarios in bounded screenshot QA
+
+The scenario-consumer boundary now also covers Linktop's built-in screenshot
+transaction. The exact-revision `netbraid-replay` dependency enables
+`scenario-fixtures` in the binary so an installed Linktop can run the same
+deterministic and native QA scene. This embeds the closed fixture bundles but
+adds no Netbraid executable, service, collector, sibling-checkout dependency,
+or network activity.
+
+Linktop loads `wifi-hotspot-wifi`, verifies `PUBLIC_SYNTHETIC`, obtains each
+checkpoint through a replay receipt, and consumes only typed checkpoint inputs
+at its adapter boundary. Netbraid's replay machinery constructs and validates
+the complete closed receipt, including authored conclusions and viewport
+assertions, before releasing those inputs. Linktop never inspects, branches on,
+or renders those oracle fields; an oracle mismatch rejects the scene rather
+than becoming operator evidence. The capture-owned adapter maps host,
+interface, link type, network-name visibility, next hop, resolvers, association
+ID, and BSSID. It does not reverse a network prefix into a host address or
+invent radio, peer-cache completeness, place, owner, or 802.11-roam evidence.
+
+The three records drive Linktop's path-generation and history reducers only in
+process and only inside the explicit passive screenshot scene. Ordinary
+operation does not load a scene and has no Netbraid runtime service dependency;
+screenshot continues to reject operator history. The QA clock changes when
+records enter the view, not their source evidence timestamps. Revisit the
+embedded-fixture footprint if Netbraid provides a narrower evidence-only
+built-in API, if fail-closed validation of unrelated fixture oracles becomes an
+availability problem, or if the scenario corpus grows materially.

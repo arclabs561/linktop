@@ -408,14 +408,20 @@ fn main() -> Result<()> {
                 !capture_active || mode == MonitorMode::Overview,
                 "screenshot --active is only valid for the overview"
             );
-            if scene.is_some() {
+            if let Some(scene) = scene {
                 anyhow::ensure!(
-                    matches!(mode, MonitorMode::Overview | MonitorMode::Peers),
-                    "screenshot --scene dense-peers is only valid for overview or peers"
+                    scene.supports(mode),
+                    "screenshot --scene {} is not valid for {}",
+                    scene.label(),
+                    match mode {
+                        MonitorMode::Overview => "overview",
+                        MonitorMode::Link => "link",
+                        MonitorMode::Peers => "peers",
+                    }
                 );
                 anyhow::ensure!(
                     !capture_active,
-                    "screenshot --scene dense-peers cannot be combined with --active"
+                    "screenshot --scene cannot be combined with --active"
                 );
             }
             let capture_policy = if capture_active {
@@ -1029,7 +1035,7 @@ fn run_tui(
     probe_policy: ProbePolicy,
     history_path: Option<PathBuf>,
 ) -> Result<()> {
-    let screenshot_scene = capture::child_scene_from_environment()?;
+    let mut screenshot_scene = capture::child_scene_from_environment()?;
     enable_raw_mode().context("enable terminal raw mode")?;
     let _guard = TerminalGuard;
     let mut stdout = io::stdout();
@@ -1064,8 +1070,8 @@ fn run_tui(
                     }
                 }
             }
-            if let Some(scene) = screenshot_scene {
-                capture::ensure_scene(&mut app, scene);
+            if let Some(scene) = screenshot_scene.as_mut() {
+                scene.poll(&mut app)?;
             }
             interaction.normalize_peer_selection(&app);
             terminal.draw(|frame| {
@@ -1571,7 +1577,7 @@ mod cli_tests {
     }
 
     #[test]
-    fn screenshot_parses_scheduled_interactions_and_dense_scene() {
+    fn screenshot_parses_scheduled_interactions_and_scenes() {
         let cli = Cli::try_parse_from([
             "linktop",
             "screenshot",
@@ -1600,6 +1606,21 @@ mod cli_tests {
         assert_eq!(keys.len(), 2);
         assert_eq!(resizes.len(), 1);
         assert_eq!(scene, Some(capture::CaptureScene::DensePeers));
+
+        let cli = Cli::try_parse_from([
+            "linktop",
+            "screenshot",
+            "overview",
+            "--at",
+            "1,3,5",
+            "--scene",
+            "wifi-hotspot-wifi",
+        ])
+        .unwrap();
+        let Some(Command::Screenshot { scene, .. }) = cli.command else {
+            panic!("screenshot command was not parsed");
+        };
+        assert_eq!(scene, Some(capture::CaptureScene::WifiHotspotWifi));
     }
 
     #[test]

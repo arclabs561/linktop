@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
@@ -24,9 +24,14 @@ use ratatui::style::{Color, Modifier};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use netbraid_replay::{
+    HostPathObservationV0, NetworkNameVisibilityV0, ScenarioPrivacyV0, builtin_scenario_v0,
+    replay_scenario_v0,
+};
+
 use crate::model::{
-    Address, App, Health, LinkSnapshot, MacScope, MonitorControl, MonitorMode, MonitorUpdate, Peer,
-    PeerSnapshot, ProbePolicy,
+    Address, App, Health, LinkSnapshot, MacScope, MonitorControl, MonitorMode, MonitorUpdate,
+    NetworkConfiguration, Peer, PeerSnapshot, ProbePolicy,
 };
 use crate::{
     InteractionOutcome, InteractionState, apply_monitor_update, apply_tui_key, history, net,
@@ -37,6 +42,7 @@ const POLL_STEP: Duration = Duration::from_millis(100);
 const NATIVE_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const NATIVE_RENDER_SETTLE: Duration = Duration::from_millis(200);
 const SCREENSHOT_CHILD_SCENE: &str = "LINKTOP_SCREENSHOT_CHILD_SCENE";
+const SCREENSHOT_CHILD_SCENE_GATE: &str = "LINKTOP_SCREENSHOT_CHILD_SCENE_GATE";
 const QA_MANIFEST_SCHEMA: &str = "linktop.qa_capture_manifest.v1";
 static QA_PREFLIGHT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const DENSE_SCENE_GATEWAY: &str = "192.0.2.1";
@@ -45,6 +51,11 @@ const DEFAULT_FOREGROUND: &str = "#c0cad6";
 const CELL_WIDTH: u32 = 9;
 const CELL_HEIGHT: u32 = 18;
 const PADDING: u32 = 18;
+const WIFI_SCENE_TIMELINE: [(Duration, &str); 3] = [
+    (Duration::ZERO, "wifi-initial"),
+    (Duration::from_secs(2), "hotspot-attached"),
+    (Duration::from_secs(4), "wifi-returned"),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CaptureSize {
@@ -61,12 +72,45 @@ impl fmt::Display for CaptureSize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CaptureScene {
     DensePeers,
+    WifiHotspotWifi,
 }
 
 impl CaptureScene {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::DensePeers => "dense-peers",
+            Self::WifiHotspotWifi => "wifi-hotspot-wifi",
+        }
+    }
+
+    fn stage_at(self, elapsed: Duration) -> &'static str {
+        match self {
+            Self::DensePeers => "final",
+            Self::WifiHotspotWifi if elapsed < Duration::from_secs(2) => "wifi-initial",
+            Self::WifiHotspotWifi if elapsed < Duration::from_secs(4) => "hotspot-attached",
+            Self::WifiHotspotWifi => "wifi-returned",
+        }
+    }
+
+    fn timeline(self) -> &'static [(Duration, &'static str)] {
+        match self {
+            Self::DensePeers => &[],
+            Self::WifiHotspotWifi => &WIFI_SCENE_TIMELINE,
+        }
+    }
+
+    fn transition_times(self) -> impl Iterator<Item = Duration> {
+        self.timeline().iter().skip(1).map(|(elapsed, _)| *elapsed)
+    }
+
+    fn is_timed(self) -> bool {
+        !self.timeline().is_empty()
+    }
+
+    pub(crate) fn supports(self, mode: MonitorMode) -> bool {
+        match self {
+            Self::DensePeers => matches!(mode, MonitorMode::Overview | MonitorMode::Peers),
+            Self::WifiHotspotWifi => mode == MonitorMode::Overview,
         }
     }
 }
@@ -260,6 +304,7 @@ struct ReplayPlan {
     frames: BTreeSet<Duration>,
     keys: BTreeMap<Duration, Vec<ReplayKey>>,
     resizes: BTreeMap<Duration, CaptureSize>,
+    scene_stages: Vec<QaSceneStage>,
     timestamps: Vec<Duration>,
 }
 
@@ -289,7 +334,11 @@ impl ReplayPlan {
             );
             anyhow::ensure!(
                 !(scene.is_some() && scheduled.key == ReplayKey::Active),
-                "the dense-peers scene cannot replay `a` because synthetic scenes are passive"
+                "synthetic scenes cannot replay `a` because they are passive"
+            );
+            anyhow::ensure!(
+                !(scene.is_some_and(CaptureScene::is_timed) && scheduled.key == ReplayKey::Pause),
+                "timed synthetic scenes cannot replay `p` because their QA clock is not operator-paused"
             );
             scheduled_keys
                 .entry(scheduled.at)
@@ -313,11 +362,25 @@ impl ReplayPlan {
                 );
             }
         }
+        let scene_stages = scene
+            .into_iter()
+            .flat_map(CaptureScene::timeline)
+            .filter(|(elapsed, _)| *elapsed <= final_frame)
+            .map(|(elapsed, stage)| QaSceneStage {
+                at_ms: duration_millis(*elapsed),
+                stage,
+            })
+            .collect::<Vec<_>>();
+        let scene_transitions = scene
+            .into_iter()
+            .flat_map(CaptureScene::transition_times)
+            .filter(|elapsed| *elapsed <= final_frame);
         let timestamps = frames
             .iter()
             .chain(scheduled_keys.keys())
             .chain(scheduled_resizes.keys())
             .copied()
+            .chain(scene_transitions)
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
@@ -325,6 +388,7 @@ impl ReplayPlan {
             frames,
             keys: scheduled_keys,
             resizes: scheduled_resizes,
+            scene_stages,
             timestamps,
         })
     }
@@ -364,6 +428,7 @@ impl ReplayPlan {
             frames_ms,
             keys,
             resizes,
+            scene_stages: self.scene_stages.clone(),
         }
     }
 }
@@ -386,6 +451,8 @@ struct QaReplay {
     frames_ms: Vec<u64>,
     keys: Vec<QaKeyAction>,
     resizes: Vec<QaResizeAction>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    scene_stages: Vec<QaSceneStage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -398,6 +465,12 @@ struct QaKeyAction {
 struct QaResizeAction {
     at_ms: u64,
     viewport: CaptureSize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct QaSceneStage {
+    at_ms: u64,
+    stage: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -575,11 +648,9 @@ fn qa_frame(metadata: QaFrameMetadata, artifacts: Vec<QaArtifact>) -> QaFrame {
         index: metadata.index,
         rendered_view: subject_name(metadata.rendered_mode),
         scene: metadata.scene.map_or("live", CaptureScene::label),
-        stage: if metadata.scene.is_some() {
-            "final"
-        } else {
-            "observed"
-        },
+        stage: metadata
+            .scene
+            .map_or("observed", |scene| scene.stage_at(metadata.scheduled)),
         policy: policy_name(metadata.probe_policy),
         scheduled_ms: duration_millis(metadata.scheduled),
         actual_ms: duration_millis(metadata.actual),
@@ -629,6 +700,12 @@ pub fn run(request: CaptureRequest) -> Result<()> {
     let replay_started_at = utc_timestamp();
     let started_at = Instant::now();
     let mut app = App::with_probe_policy(probe_policy);
+    let mut scene_runtime = scene
+        .map(|scene| SceneRuntime::new(scene, None))
+        .transpose()?;
+    if let Some(runtime) = scene_runtime.as_mut() {
+        runtime.advance_to(&mut app, Duration::ZERO)?;
+    }
     let mut interaction = InteractionState {
         active_mode: mode,
         peer_offset: 0,
@@ -642,8 +719,8 @@ pub fn run(request: CaptureRequest) -> Result<()> {
         for target in plan.timestamps.iter().copied() {
             wait_until(target, started_at, &updates, &mut app, None)?;
             drain_updates(&updates, &mut app, None)?;
-            if let Some(scene) = scene {
-                ensure_scene(&mut app, scene);
+            if let Some(runtime) = scene_runtime.as_mut() {
+                runtime.advance_to(&mut app, target)?;
             }
             if let Some(size) = plan.resizes.get(&target).copied() {
                 resize_terminal(&mut terminal, size)?;
@@ -785,12 +862,16 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
     let working_directory = std::env::current_dir().context("read current directory")?;
     let final_seconds = plan.final_frame().as_secs();
     let manifest_stem = manifest_stem(requested_subject, scene, &session_id, true);
+    let mut scene_gate = scene
+        .filter(|scene| scene.is_timed())
+        .map(|_| SceneGate::new(&output_directory, &manifest_stem))
+        .transpose()?;
 
     let _guard = TmuxGuard(server.clone());
     let interrupt = CaptureInterrupt::new().context("install native capture signal handlers")?;
     interrupt.check()?;
     let mut start = tmux_command(&server);
-    configure_native_environment(&mut start, scene);
+    configure_native_environment(&mut start, scene, scene_gate.as_ref().map(SceneGate::path));
     start
         .args([
             "new-session",
@@ -840,6 +921,9 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
     wait_for_native_ready(&server, session, size, NATIVE_READY_TIMEOUT, &interrupt)?;
     let replay_started_at = utc_timestamp();
     let started_at = Instant::now();
+    if let Some(gate) = scene_gate.as_mut() {
+        gate.open()?;
+    }
     let mut current_size = size;
     let mut frame_index = 0_usize;
     let mut projected_app = App::with_probe_policy(probe_policy);
@@ -896,6 +980,16 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
             continue;
         }
         frame_index += 1;
+        if let Some(scene) = scene {
+            wait_for_native_scene_stage(
+                &server,
+                session,
+                scene,
+                target,
+                NATIVE_READY_TIMEOUT,
+                &interrupt,
+            )?;
+        }
         verify_native_size(&server, session, current_size)?;
         let elapsed = started_at.elapsed();
         let rendered_mode = projected_interaction.active_mode;
@@ -1033,11 +1127,19 @@ fn tmux_command(server: &str) -> Command {
     command
 }
 
-fn configure_native_environment(command: &mut Command, scene: Option<CaptureScene>) {
+fn configure_native_environment(
+    command: &mut Command,
+    scene: Option<CaptureScene>,
+    scene_gate: Option<&Path>,
+) {
     command.env_remove("LINKTOP_HISTORY");
     command.env_remove(SCREENSHOT_CHILD_SCENE);
+    command.env_remove(SCREENSHOT_CHILD_SCENE_GATE);
     if let Some(scene) = scene {
         command.env(SCREENSHOT_CHILD_SCENE, scene.label());
+    }
+    if let Some(scene_gate) = scene_gate {
+        command.env(SCREENSHOT_CHILD_SCENE_GATE, scene_gate);
     }
 }
 
@@ -1149,6 +1251,44 @@ fn wait_for_native_ready(
     }
 }
 
+fn wait_for_native_scene_stage(
+    server: &str,
+    session: &str,
+    scene: CaptureScene,
+    elapsed: Duration,
+    timeout: Duration,
+    interrupt: &CaptureInterrupt,
+) -> Result<()> {
+    if scene == CaptureScene::DensePeers {
+        return Ok(());
+    }
+    let (network, generation) = match scene.stage_at(elapsed) {
+        "wifi-initial" => ("Northstar Lab", 1),
+        "hotspot-attached" => ("Field Kit", 2),
+        "wifi-returned" => ("Northstar Lab", 3),
+        stage => anyhow::bail!("unsupported native scene stage {stage}"),
+    };
+    let started_at = Instant::now();
+    loop {
+        interrupt.check()?;
+        let ready = capture_pane_raw(server, session, false).is_ok_and(|frame| {
+            let generation = format!("GEN {generation}");
+            frame.contains(network) && frame.contains(&generation)
+        });
+        if ready {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            started_at.elapsed() < timeout,
+            "native scene {} did not render stage {} within {:.1}s",
+            scene.label(),
+            scene.stage_at(elapsed),
+            timeout.as_secs_f64()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 struct CaptureInterrupt {
     interrupted: Arc<AtomicBool>,
     registrations: Vec<signal_hook::SigId>,
@@ -1226,17 +1366,72 @@ impl Drop for TmuxGuard {
     }
 }
 
-pub(crate) fn child_scene_from_environment() -> Result<Option<CaptureScene>> {
+struct SceneGate {
+    path: PathBuf,
+    opened: bool,
+}
+
+impl SceneGate {
+    fn new(output_directory: &Path, manifest_stem: &str) -> Result<Self> {
+        let path = output_directory.join(format!(".{manifest_stem}.scene-start"));
+        anyhow::ensure!(
+            !path.exists(),
+            "native scene start gate already exists: {}",
+            path.display()
+        );
+        Ok(Self {
+            path,
+            opened: false,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn open(&mut self) -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.path)
+            .with_context(|| format!("create native scene start gate {}", self.path.display()))?;
+        self.opened = true;
+        private_file(&self.path)?;
+        file.write_all(b"start\n")
+            .with_context(|| format!("write native scene start gate {}", self.path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync native scene start gate {}", self.path.display()))?;
+        Ok(())
+    }
+}
+
+impl Drop for SceneGate {
+    fn drop(&mut self) {
+        if self.opened {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+pub(crate) fn child_scene_from_environment() -> Result<Option<SceneRuntime>> {
     let Some(value) = std::env::var_os(SCREENSHOT_CHILD_SCENE) else {
         return Ok(None);
     };
     let value = value
         .into_string()
         .map_err(|_| anyhow::anyhow!("{SCREENSHOT_CHILD_SCENE} is not valid UTF-8"))?;
-    match value.as_str() {
-        "dense-peers" => Ok(Some(CaptureScene::DensePeers)),
+    let scene = match value.as_str() {
+        "dense-peers" => CaptureScene::DensePeers,
+        "wifi-hotspot-wifi" => CaptureScene::WifiHotspotWifi,
         _ => anyhow::bail!("{SCREENSHOT_CHILD_SCENE} has unsupported internal scene {value:?}"),
-    }
+    };
+    let gate = std::env::var_os(SCREENSHOT_CHILD_SCENE_GATE).map(PathBuf::from);
+    anyhow::ensure!(
+        !scene.is_timed() || gate.is_some(),
+        "{SCREENSHOT_CHILD_SCENE_GATE} is required for timed internal scene {}",
+        scene.label()
+    );
+    SceneRuntime::new(scene, gate).map(Some)
 }
 
 pub(crate) fn start_scene_monitor() -> (
@@ -1257,9 +1452,177 @@ pub(crate) fn start_scene_monitor() -> (
     (updates_rx, controls_tx, monitor)
 }
 
+#[cfg(test)]
 pub(crate) fn ensure_scene(app: &mut App, scene: CaptureScene) {
     match scene {
         CaptureScene::DensePeers => ensure_dense_peer_scene(app),
+        CaptureScene::WifiHotspotWifi => {
+            let mut runtime =
+                SceneRuntime::new(scene, None).expect("built-in public scenario is valid");
+            runtime
+                .advance_to(app, Duration::ZERO)
+                .expect("apply built-in public scenario");
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SceneStage {
+    at: Duration,
+    records: Vec<HostPathObservationV0>,
+}
+
+pub(crate) struct SceneRuntime {
+    scene: CaptureScene,
+    stages: Vec<SceneStage>,
+    applied_stages: usize,
+    gate: Option<PathBuf>,
+    started_at: Option<Instant>,
+}
+
+impl SceneRuntime {
+    fn new(scene: CaptureScene, gate: Option<PathBuf>) -> Result<Self> {
+        let stages = match scene {
+            CaptureScene::DensePeers => Vec::new(),
+            CaptureScene::WifiHotspotWifi => wifi_hotspot_wifi_stages()?,
+        };
+        Ok(Self {
+            scene,
+            stages,
+            applied_stages: 0,
+            gate,
+            started_at: None,
+        })
+    }
+
+    pub(crate) fn poll(&mut self, app: &mut App) -> Result<()> {
+        self.advance_to(app, Duration::ZERO)?;
+        let Some(gate) = self.gate.as_deref() else {
+            return Ok(());
+        };
+        if self.started_at.is_none() && scene_gate_is_open(gate)? {
+            self.started_at = Some(Instant::now());
+        }
+        if let Some(started_at) = self.started_at {
+            self.advance_to(app, started_at.elapsed())?;
+        }
+        Ok(())
+    }
+
+    fn advance_to(&mut self, app: &mut App, elapsed: Duration) -> Result<()> {
+        if self.scene == CaptureScene::DensePeers {
+            ensure_dense_peer_scene(app);
+            return Ok(());
+        }
+        while let Some(stage) = self.stages.get(self.applied_stages) {
+            if stage.at > elapsed {
+                break;
+            }
+            apply_host_path_stage(app, &stage.records)?;
+            self.applied_stages += 1;
+        }
+        Ok(())
+    }
+}
+
+fn wifi_hotspot_wifi_stages() -> Result<Vec<SceneStage>> {
+    let bundle =
+        builtin_scenario_v0("wifi-hotspot-wifi").context("load built-in Wi-Fi transition scene")?;
+    anyhow::ensure!(
+        bundle.manifest().privacy == ScenarioPrivacyV0::PublicSynthetic,
+        "Wi-Fi transition scene must be PUBLIC_SYNTHETIC"
+    );
+    [
+        (Duration::ZERO, "wifi-initial"),
+        (Duration::from_secs(2), "hotspot-attached"),
+        (Duration::from_secs(4), "wifi-returned"),
+    ]
+    .into_iter()
+    .map(|(at, checkpoint)| {
+        let receipt = replay_scenario_v0(&bundle, checkpoint)
+            .with_context(|| format!("replay Wi-Fi transition checkpoint {checkpoint}"))?;
+        let inputs = bundle
+            .checkpoint_inputs_v0(&receipt)
+            .with_context(|| format!("resolve Wi-Fi transition checkpoint {checkpoint}"))?;
+        anyhow::ensure!(
+            !inputs.host_path_records.is_empty(),
+            "Wi-Fi transition checkpoint {checkpoint} has no host-path evidence"
+        );
+        anyhow::ensure!(
+            inputs.saved_capture_streams.is_empty(),
+            "Wi-Fi transition checkpoint {checkpoint} unexpectedly contains packet evidence"
+        );
+        Ok(SceneStage {
+            at,
+            records: inputs.host_path_records,
+        })
+    })
+    .collect()
+}
+
+fn apply_host_path_stage(app: &mut App, records: &[HostPathObservationV0]) -> Result<()> {
+    let current = records
+        .last()
+        .context("synthetic scene stage has no current host-path record")?;
+    let generation = app.path_generation.saturating_add(1);
+    let network_configuration = (current.path.association_id.is_some()
+        || current.path.associated_bssid.is_some())
+    .then(|| {
+        Box::new(NetworkConfiguration {
+            connection_id: current.path.association_id.clone(),
+            associated_bssid: current.path.associated_bssid.clone(),
+            bssid_restricted: false,
+            method: None,
+            state: None,
+            server: None,
+            subnet_mask: None,
+            lease_seconds: None,
+            lease_started_at: None,
+            lease_expires_at: None,
+            router_arp_verified: None,
+            security: None,
+        })
+    });
+    let accepted = app.apply(MonitorUpdate::Link {
+        generation,
+        snapshot: LinkSnapshot {
+            host: current.source.observer_id.clone(),
+            interface: current.path.interface.clone(),
+            link_type: current.path.link_type.clone(),
+            underlay: None,
+            ssid: current.path.network_name.value.clone(),
+            ssid_restricted: current.path.network_name.visibility
+                == NetworkNameVisibilityV0::Restricted,
+            wifi: None,
+            gateway: current.path.next_hop.clone(),
+            public_ip: None,
+            resolvers: current.path.resolvers.clone(),
+            // Network prefixes cannot reconstruct a host address, role, or
+            // temporary-address lifetime.
+            addresses: Vec::new(),
+            network_configuration,
+        },
+    });
+    anyhow::ensure!(accepted, "synthetic host-path generation was rejected");
+    app.history_context = Some(history::summarize(
+        &records[..records.len().saturating_sub(1)],
+        current,
+    ));
+    Ok(())
+}
+
+fn scene_gate_is_open(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.file_type().is_file(),
+                "native scene start gate is not a regular file"
+            );
+            Ok(true)
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspect native scene start gate {}", path.display())),
     }
 }
 
@@ -2073,6 +2436,56 @@ mod tests {
 
         let active = ["2:a".parse::<ScheduledKey>().unwrap()];
         assert!(ReplayPlan::new(&[5], &active, &[], Some(CaptureScene::DensePeers)).is_err());
+
+        let pause = ["2:p".parse::<ScheduledKey>().unwrap()];
+        assert!(ReplayPlan::new(&[5], &pause, &[], Some(CaptureScene::WifiHotspotWifi)).is_err());
+    }
+
+    #[test]
+    fn timed_scene_transitions_are_receipted_and_run_between_frames() {
+        let plan =
+            ReplayPlan::new(&[1, 3, 5], &[], &[], Some(CaptureScene::WifiHotspotWifi)).unwrap();
+
+        assert_eq!(
+            plan.timestamps,
+            [1, 2, 3, 4, 5]
+                .into_iter()
+                .map(Duration::from_secs)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            plan.scene_stages,
+            vec![
+                QaSceneStage {
+                    at_ms: 0,
+                    stage: "wifi-initial",
+                },
+                QaSceneStage {
+                    at_ms: 2_000,
+                    stage: "hotspot-attached",
+                },
+                QaSceneStage {
+                    at_ms: 4_000,
+                    stage: "wifi-returned",
+                },
+            ]
+        );
+        let frame = qa_frame(
+            QaFrameMetadata {
+                index: 2,
+                rendered_mode: MonitorMode::Overview,
+                probe_policy: ProbePolicy::Passive,
+                scene: Some(CaptureScene::WifiHotspotWifi),
+                scheduled: Duration::from_secs(3),
+                actual: Duration::from_millis(3_010),
+                viewport: CaptureSize {
+                    columns: 60,
+                    rows: 10,
+                },
+            },
+            Vec::new(),
+        );
+        assert_eq!(frame.stage, "hotspot-attached");
     }
 
     #[test]
@@ -2150,7 +2563,13 @@ mod tests {
         let mut command = Command::new("linktop");
         command.env("LINKTOP_HISTORY", "/private/host-history.jsonl");
         command.env(SCREENSHOT_CHILD_SCENE, "stale-scene");
-        configure_native_environment(&mut command, Some(CaptureScene::DensePeers));
+        command.env(SCREENSHOT_CHILD_SCENE_GATE, "/private/stale-gate");
+        let gate = Path::new("/private/session-gate");
+        configure_native_environment(
+            &mut command,
+            Some(CaptureScene::WifiHotspotWifi),
+            Some(gate),
+        );
 
         let environment = command
             .get_envs()
@@ -2164,8 +2583,37 @@ mod tests {
             environment
                 .get(std::ffi::OsStr::new(SCREENSHOT_CHILD_SCENE))
                 .and_then(|value| value.as_deref()),
-            Some(std::ffi::OsStr::new("dense-peers"))
+            Some(std::ffi::OsStr::new("wifi-hotspot-wifi"))
         );
+        assert_eq!(
+            environment
+                .get(std::ffi::OsStr::new(SCREENSHOT_CHILD_SCENE_GATE))
+                .and_then(|value| value.as_deref()),
+            Some(gate.as_os_str())
+        );
+    }
+
+    #[test]
+    fn native_scene_gate_is_private_and_removed_with_its_guard() {
+        let directory = TestDirectory::new("native-scene-gate");
+        let path;
+        {
+            let mut gate = SceneGate::new(&directory.0, "transaction").unwrap();
+            path = gate.path().to_owned();
+            assert!(!path.exists());
+            gate.open().unwrap();
+            assert!(scene_gate_is_open(&path).unwrap());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                assert_eq!(
+                    fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
+        assert!(!path.exists());
     }
 
     #[test]
@@ -2210,6 +2658,103 @@ mod tests {
         assert!(rendered.contains("binding changed"));
         assert!(rendered.contains("Synthetic"));
         assert!(rendered.contains("en-doc0 192.0.2."));
+    }
+
+    #[test]
+    fn wifi_hotspot_return_scene_uses_typed_history_and_path_generations() {
+        let mut app = App::with_probe_policy(ProbePolicy::Passive);
+        let mut runtime = SceneRuntime::new(CaptureScene::WifiHotspotWifi, None).unwrap();
+
+        runtime
+            .advance_to(&mut app, Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(app.path_generation, 1);
+        assert_eq!(app.link.ssid.as_deref(), Some("Northstar Lab"));
+        assert_eq!(
+            app.history_context.as_ref().map(|context| context.kind),
+            Some(crate::model::HistoryContextKind::FirstObservation)
+        );
+
+        runtime
+            .advance_to(&mut app, Duration::from_secs(3))
+            .unwrap();
+        assert_eq!(app.path_generation, 2);
+        assert_eq!(app.link.ssid.as_deref(), Some("Field Kit"));
+        assert_eq!(
+            app.history_context.as_ref().map(|context| context.kind),
+            Some(crate::model::HistoryContextKind::Changed)
+        );
+        assert_eq!(app.completed_path_dwells.len(), 1);
+
+        runtime
+            .advance_to(&mut app, Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(app.path_generation, 3);
+        assert_eq!(app.link.ssid.as_deref(), Some("Northstar Lab"));
+        assert_eq!(
+            app.history_context.as_ref().map(|context| context.kind),
+            Some(crate::model::HistoryContextKind::Returned)
+        );
+        assert_eq!(app.completed_path_dwells.len(), 2);
+
+        runtime
+            .advance_to(&mut app, Duration::from_secs(30))
+            .unwrap();
+        assert_eq!(app.path_generation, 3);
+        assert_eq!(app.completed_path_dwells.len(), 2);
+    }
+
+    #[test]
+    fn wifi_hotspot_return_scene_preserves_operator_priority_at_every_qa_size() {
+        let mut app = App::with_probe_policy(ProbePolicy::Passive);
+        let mut runtime = SceneRuntime::new(CaptureScene::WifiHotspotWifi, None).unwrap();
+        for (elapsed, network) in [(1, "Northstar Lab"), (3, "Field Kit"), (5, "Northstar Lab")] {
+            runtime
+                .advance_to(&mut app, Duration::from_secs(elapsed))
+                .unwrap();
+            for (width, height) in [(60, 10), (100, 24), (160, 30)] {
+                let backend = TestBackend::new(width, height);
+                let mut terminal = Terminal::new(backend).unwrap();
+                terminal
+                    .draw(|frame| ui::render(frame, &app, MonitorMode::Overview, 0, true))
+                    .unwrap();
+                let rendered = buffer_text(terminal.backend().buffer());
+                assert!(
+                    rendered.contains(network),
+                    "{elapsed}s {width}x{height}\n{rendered}"
+                );
+                assert!(
+                    rendered.contains("UNTESTED"),
+                    "{elapsed}s {width}x{height}\n{rendered}"
+                );
+                assert!(
+                    rendered.contains("PASSIVE"),
+                    "{elapsed}s {width}x{height}\n{rendered}"
+                );
+                assert!(!rendered.to_lowercase().contains("owner"));
+                assert!(!rendered.contains("location:"));
+                assert!(!rendered.contains("802.11 roam"));
+                let context_is_visible = match elapsed {
+                    1 => rendered.contains("first observation"),
+                    3 => {
+                        rendered.contains("new network context") || rendered.contains("new context")
+                    }
+                    5 => rendered.contains("returned"),
+                    _ => unreachable!(),
+                };
+                if height == 10 {
+                    assert!(rendered.contains("path"), "{rendered}");
+                    assert!(rendered.contains("coverage"), "{rendered}");
+                    assert!(
+                        rendered.contains("next: [a] run bounded path probes"),
+                        "{rendered}"
+                    );
+                    assert!(!context_is_visible, "{rendered}");
+                } else {
+                    assert!(context_is_visible, "{rendered}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -2441,6 +2986,7 @@ mod tests {
                 frames_ms: vec![1_000, 2_000],
                 keys: Vec::new(),
                 resizes: Vec::new(),
+                scene_stages: Vec::new(),
             },
             Vec::new(),
         );
@@ -2474,6 +3020,7 @@ mod tests {
                 frames_ms: vec![1_000],
                 keys: Vec::new(),
                 resizes: Vec::new(),
+                scene_stages: Vec::new(),
             },
             vec![qa_frame(
                 QaFrameMetadata {
@@ -2533,6 +3080,7 @@ mod tests {
                 frames_ms: Vec::new(),
                 keys: Vec::new(),
                 resizes: Vec::new(),
+                scene_stages: Vec::new(),
             },
             Vec::new(),
         );

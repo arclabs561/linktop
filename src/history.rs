@@ -331,7 +331,7 @@ fn source(available: bool, name: &str, observed: &mut Vec<String>, missing: &mut
     }
 }
 
-fn summarize(
+pub(crate) fn summarize(
     prior_records: &[HostPathObservationV0],
     current: &HostPathObservationV0,
 ) -> HistoryContext {

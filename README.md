@@ -318,6 +318,8 @@ linktop screenshot peers --at 5,15 --columns 100 --rows 24
 linktop screenshot link --at 12 --columns 100 --rows 24
 linktop screenshot overview --scene dense-peers --at 1,3,5 \
   --key 1:3 --resize 3:80x20 --key 3:page-down --key 5:home
+linktop screenshot overview --scene wifi-hotspot-wifi --at 1,3,5 \
+  --columns 160 --rows 30 --resize 3:60x10 --resize 5:100x24
 ```
 
 Repeatable `--key AT:KEY` and `--resize AT:COLSxROWS` actions reproduce
@@ -339,6 +341,21 @@ generation-scoped dwell instead of bypassing the application model. It is
 available for overview and peers screenshots and cannot be combined with
 active probes or history.
 
+`--scene wifi-hotspot-wifi` uses Netbraid's receipt-bound
+`PUBLIC_SYNTHETIC` host-path inputs. It applies an initial Wi-Fi path at 0s, a
+hotspot attachment at 2s, and the known Wi-Fi return at 4s, so captures at
+1s/3s/5s show each stable stage. The source records retain their own evidence
+times; only their application to the QA view is accelerated. Netbraid validates
+the closed checkpoint receipt, including its fixture oracles, before releasing
+typed inputs; Linktop does not inspect, branch on, or render those authored
+conclusions or viewport assertions. Only reversible host-path fields enter the
+Linktop model; network prefixes do not become host addresses, and absent radio,
+peer-cache, place, owner, or 802.11-roam evidence stays absent. The scene
+exercises real path generations, bounded dwell, and the production history
+reducer without reading or writing an operator history file. Its timeline and
+per-frame stage are recorded in the QA manifest. Timed scenes reject replayed
+pause because their accelerated QA clock is intentionally not operator-paused.
+
 Use `--native` to exercise the actual Crossterm alternate-screen application in
 a fixed-size tmux PTY. It captures one ANSI terminal frame, derives visible text
 from those same bytes, and saves a self-contained HTML reconstruction with the
@@ -349,6 +366,8 @@ linktop screenshot overview --native --at 2,5,12 --columns 100 --rows 24
 linktop screenshot peers --native --at 5,15 --columns 80 --rows 20
 linktop screenshot overview --native --scene dense-peers --at 1,3 \
   --key 1:3 --resize 3:80x20
+linktop screenshot overview --native --scene wifi-hotspot-wifi --at 1,3,5 \
+  --columns 160 --rows 30 --resize 3:60x10 --resize 5:100x24
 ```
 
 Native capture requires tmux; it does not require ImageMagick or a foreground
@@ -359,6 +378,10 @@ settles after each replayed action, and verifies the tmux pane dimensions before
 writing a frame. The child does not inherit `LINKTOP_HISTORY` or an ambient
 fixture selector; an explicit history path remains the only history authority.
 Interrupting the transaction also terminates its isolated tmux server and child.
+Timed native scenes render their baseline before readiness, then begin from a
+private parent/child start gate. Linktop waits for the expected SSID and path
+generation before each frame, avoiding child-startup timing as a hidden oracle.
+The gate is removed when the transaction exits and is never a manifest artifact.
 
 The command writes to `./linktop-captures/` by default. Repository development
 can use `just capture-ui overview 160 26 2,5,12`, which keeps artifacts under

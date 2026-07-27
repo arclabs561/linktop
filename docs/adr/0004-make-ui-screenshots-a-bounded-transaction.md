@@ -211,3 +211,31 @@ publication and makes later changes detectable, but does not authorize
 publication or retention. Wall-clock timestamps order receipts for human QA;
 `duration_ms` and frame `actual_ms` remain the monotonic timing authority if the
 host clock steps during a capture.
+
+## Update (2026-07-27): make path-transition scenes timed and stage-verifiable
+
+The operator-scenario gate now needs more than a synthetic final state.
+`wifi-hotspot-wifi` consumes receipt-bound public-synthetic host-path inputs and
+applies its initial Wi-Fi, hotspot, and returned Wi-Fi stages at an accelerated
+0s/2s/4s QA timeline. These are generation-tagged model updates followed by
+Linktop's production history reduction. Netbraid validates the complete closed
+checkpoint receipt, including its fixture oracles, before returning typed
+inputs; Linktop neither interprets those authored conclusions and viewport
+assertions nor uses them as model updates. Missing host-address role, radio,
+peer-cache completeness, place, owner, and roam evidence remains missing.
+
+The deterministic replay plan inserts the two scene transitions before
+same-time resize, key, and frame work. The native child renders the baseline
+before readiness, then starts its monotonic scene clock only after the parent
+creates a private no-clobber gate. Before accepting a native frame, the parent
+waits for the expected network label and path generation. The gate is private,
+transaction-scoped, removed by its guard, and excluded from the artifact
+manifest. Child process startup time is therefore not part of scene semantics.
+
+The replay receipt records the fixed scene timeline, and each frame records its
+resolved stage. Timed scenes reject pause replay because the compressed QA
+clock is not an operator-controlled live lifetime. They remain passive,
+replace host collectors with an inert monitor, reject active probes and
+durable history, and do not create a general event language or assertion
+engine. Process-local synthetic comparison exercises rendering and reducers;
+it does not read, append, or retain private operator evidence.
