@@ -131,7 +131,9 @@ viewport, and compare both semantics and presentation.
 
 Complete the highest-value scenario matrix:
 
-- Wi-Fi to hotspot and back, same-SSID BSSID roam, and unrelated networks;
+- Wi-Fi to hotspot and back; same-SSID BSSID attachment changes;
+  independently evidenced 802.11 roam/ESS continuity; and unrelated-site or
+  unrelated-network variation;
 - attachment-stable VPN entry, exit, and split routes;
 - gateway, resolver, and remote-edge impairment;
 - incomplete and stale peer-cache coverage;
@@ -154,15 +156,21 @@ supported evidence frame; no control or selected row falls outside the
 viewport; no view switch widens acquisition.
 
 Checkpoint (2026-07-27): Linktop pins one exact Netbraid 0.3 source revision
-and independently reduces the typed checkpoint inputs for the three initial
-public scenarios: Wi-Fi/hotspot recurrence, overlay exit without provider or
-intent attribution, and a stale cache-source gap that cannot become presence
-or departure. Authenticated deterministic and native captures exercise the
-same synthetic dense-peer session at 60x10, 100x24, and 160x30, including
-resize, view navigation, and row selection. This is a real Phase 1 slice, not
-the gate: same-SSID roam, split-route detail, impairment combinations,
-saved-capture combinations, and scenario-driven rendering across every subject
-remain open.
+and independently reduces typed checkpoint inputs for four public scenarios:
+Wi-Fi/hotspot recurrence; a compatible same-SSID BSSID attachment transition
+followed by an incompatible reused-label boundary; overlay exit without
+provider or intent attribution; and a stale cache-source gap that cannot
+become presence or departure. The same-SSID attachment-boundary scenario drives
+the same typed history conclusion through plain history output, the live JSON
+projection, and deterministic overview rendering above minimum height; at
+60x10, the compact overview retains the current diagnosis, path, evidence
+coverage, and complete action ahead of history context. Authenticated
+deterministic and native captures separately exercise the dense-peer session
+at those sizes, including resize, view navigation, and row selection. This is
+a real Phase 1 slice, not the gate: independently evidenced 802.11 roam/ESS and
+unrelated-site variation, split-route detail, impairment combinations,
+saved-capture combinations, native capture of the new transition, and
+scenario-driven rendering across every subject remain open.
 
 Reversibility: fixtures and ranking can evolve without changing machine schema
 meaning or collector policy.

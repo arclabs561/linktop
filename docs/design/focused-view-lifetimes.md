@@ -301,7 +301,10 @@ minimum supported 60×10 frame preserves the live subject/policy header and
 operator-control footer in every view. Its overview body reserves the remaining
 four rows for diagnosis, current path, evidence coverage or blind spot, and one
 complete bounded action; change, workload, and configuration context are
-admitted as height grows.
+admitted only when another row is available. This follows actual row capacity
+rather than width, so a resize cannot duplicate or drop a conclusion or let
+history displace a live cause-specific diagnosis. The `UNTESTED` status,
+passive policy, coverage, and complete action remain visible.
 
 The built-in `screenshot` transaction runs any live subject against the same monitor,
 model, and Ratatui renderer in a fixed-size headless terminal. Repeatable,

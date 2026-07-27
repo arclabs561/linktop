@@ -1252,7 +1252,7 @@ fn run_plain(
             println!("{line}");
         }
         if let Some(line) = history_line {
-            println!("+{} history  {line}", plain::format_elapsed(app.uptime()));
+            println!("{}", plain::format_history_update(app.uptime(), &line));
         }
     }
     controls.send(MonitorControl::Stop).ok();

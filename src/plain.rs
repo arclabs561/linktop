@@ -817,6 +817,10 @@ pub(crate) fn format_elapsed(duration: Duration) -> String {
     )
 }
 
+pub(crate) fn format_history_update(elapsed: Duration, summary: &str) -> String {
+    format!("+{} history  {summary}", format_elapsed(elapsed))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
