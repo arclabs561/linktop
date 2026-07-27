@@ -6,7 +6,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::prelude::{Color, Frame, Line, Modifier, Span, Style};
 use ratatui::widgets::{Block, Borders, Paragraph, Sparkline, Wrap};
 
-use crate::model::{App, EventKind, Health, MonitorMode, Peer, ProbeKind, SituationKind};
+use crate::model::{App, EventKind, Health, MonitorMode, Peer, PeerKey, ProbeKind, SituationKind};
 
 const INK: Color = Color::Rgb(192, 202, 214);
 const MUTED: Color = Color::Rgb(95, 109, 126);
@@ -2201,7 +2201,15 @@ fn render_peer_table(frame: &mut Frame<'_>, area: Rect, app: &App, peer_offset: 
     let capacity = peer_table_capacity(area);
     let wide = area.width >= 138;
     let tight = area.width < 90;
-    let offset = peer_offset.min(peers.len().saturating_sub(capacity.max(1)));
+    let selected_index = peer_offset.min(peers.len().saturating_sub(1));
+    let offset = if capacity == 0 {
+        0
+    } else {
+        selected_index
+            .checked_div(capacity)
+            .unwrap_or(0)
+            .saturating_mul(capacity)
+    };
     let end = (offset + capacity).min(peers.len());
     let mut lines = Vec::new();
 
@@ -2214,16 +2222,32 @@ fn render_peer_table(frame: &mut Frame<'_>, area: Rect, app: &App, peer_offset: 
             ),
             Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
         )));
-        for peer in peers.iter().skip(offset).take(capacity) {
-            lines.push(peer_wide_line(peer, app, address_width, area.width));
+        for (index, peer) in peers.iter().enumerate().skip(offset).take(capacity) {
+            lines.push(peer_wide_line(
+                peer,
+                app,
+                address_width,
+                area.width,
+                index == selected_index,
+            ));
         }
     } else if tight {
-        for peer in peers.iter().skip(offset).take(capacity) {
-            lines.extend(peer_tight_lines(peer, app, area.width));
+        for (index, peer) in peers.iter().enumerate().skip(offset).take(capacity) {
+            lines.extend(peer_tight_lines(
+                peer,
+                app,
+                area.width,
+                index == selected_index,
+            ));
         }
     } else {
-        for peer in peers.iter().skip(offset).take(capacity) {
-            lines.extend(peer_narrow_lines(peer, app, area.width));
+        for (index, peer) in peers.iter().enumerate().skip(offset).take(capacity) {
+            lines.extend(peer_narrow_lines(
+                peer,
+                app,
+                area.width,
+                index == selected_index,
+            ));
         }
     }
 
@@ -2274,7 +2298,13 @@ fn peer_table_capacity(area: Rect) -> usize {
         .unwrap_or(0)
 }
 
-fn peer_wide_line<'a>(peer: &'a Peer, app: &App, address_width: usize, width: u16) -> Line<'a> {
+fn peer_wide_line<'a>(
+    peer: &'a Peer,
+    app: &App,
+    address_width: usize,
+    width: u16,
+    selected: bool,
+) -> Line<'a> {
     let gateway = app.link.gateway.as_deref() == Some(peer.address.as_str());
     let fixed_width = 51 + address_width;
     let detail_width = usize::from(width.saturating_sub(2))
@@ -2282,8 +2312,8 @@ fn peer_wide_line<'a>(peer: &'a Peer, app: &App, address_width: usize, width: u1
         .max(1);
     Line::from(vec![
         Span::styled(
-            if gateway { " ▶ " } else { "   " },
-            Style::default().fg(if gateway { ACCENT } else { MUTED }),
+            if selected { " ▶ " } else { "   " },
+            Style::default().fg(if selected { ACCENT } else { MUTED }),
         ),
         Span::styled(
             format!("{:<7} ", peer.interface.as_deref().unwrap_or("?")),
@@ -2320,7 +2350,7 @@ fn peer_wide_line<'a>(peer: &'a Peer, app: &App, address_width: usize, width: u1
     ])
 }
 
-fn peer_tight_lines<'a>(peer: &'a Peer, app: &App, width: u16) -> Vec<Line<'a>> {
+fn peer_tight_lines<'a>(peer: &'a Peer, app: &App, width: u16, selected: bool) -> Vec<Line<'a>> {
     let gateway = app.link.gateway.as_deref() == Some(peer.address.as_str());
     let role = if gateway { "gateway" } else { "neighbor" };
     let state = peer.state.as_deref().unwrap_or("cached");
@@ -2336,8 +2366,8 @@ fn peer_tight_lines<'a>(peer: &'a Peer, app: &App, width: u16) -> Vec<Line<'a>> 
     vec![
         Line::from(vec![
             Span::styled(
-                if gateway { " ▶ " } else { "   " },
-                Style::default().fg(if gateway { ACCENT } else { MUTED }),
+                if selected { " ▶ " } else { "   " },
+                Style::default().fg(if selected { ACCENT } else { MUTED }),
             ),
             Span::styled(
                 format!("{:<7}", peer.interface.as_deref().unwrap_or("?")),
@@ -2371,7 +2401,7 @@ fn peer_tight_lines<'a>(peer: &'a Peer, app: &App, width: u16) -> Vec<Line<'a>> 
     ]
 }
 
-fn peer_narrow_lines<'a>(peer: &'a Peer, app: &App, width: u16) -> Vec<Line<'a>> {
+fn peer_narrow_lines<'a>(peer: &'a Peer, app: &App, width: u16, selected: bool) -> Vec<Line<'a>> {
     let gateway = app.link.gateway.as_deref() == Some(peer.address.as_str());
     let state = peer.state.as_deref().unwrap_or("cached");
     let dwell = peer_dwell_compact_label(app, peer);
@@ -2383,8 +2413,8 @@ fn peer_narrow_lines<'a>(peer: &'a Peer, app: &App, width: u16) -> Vec<Line<'a>>
     vec![
         Line::from(vec![
             Span::styled(
-                if gateway { " ▶ " } else { "   " },
-                Style::default().fg(if gateway { ACCENT } else { MUTED }),
+                if selected { " ▶ " } else { "   " },
+                Style::default().fg(if selected { ACCENT } else { MUTED }),
             ),
             Span::styled(
                 format!("{:<7} ", fit(peer.interface.as_deref().unwrap_or("?"), 7)),
@@ -3163,9 +3193,27 @@ fn compact_telemetry_line(app: &App, width: u16) -> Line<'_> {
 fn ordered_peers(app: &App) -> Vec<&crate::model::Peer> {
     let mut peers: Vec<_> = app.peers.peers.iter().collect();
     peers.sort_by(|left, right| {
-        peer_attention_rank(app, right).cmp(&peer_attention_rank(app, left))
+        peer_attention_rank(app, right)
+            .cmp(&peer_attention_rank(app, left))
+            .then_with(|| left.interface.cmp(&right.interface))
+            .then_with(|| {
+                match (
+                    left.address.parse::<std::net::IpAddr>(),
+                    right.address.parse::<std::net::IpAddr>(),
+                ) {
+                    (Ok(left), Ok(right)) => left.cmp(&right),
+                    _ => left.address.cmp(&right.address),
+                }
+            })
     });
     peers
+}
+
+pub(crate) fn ordered_peer_keys(app: &App) -> Vec<PeerKey> {
+    ordered_peers(app)
+        .into_iter()
+        .map(PeerKey::from_peer)
+        .collect()
 }
 
 fn peer_attention_rank(app: &App, peer: &Peer) -> u8 {
@@ -3623,8 +3671,9 @@ mod tests {
             .draw(|frame| render(frame, &app, MonitorMode::Peers, 12, false))
             .unwrap();
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("13-19 / 24"));
+        assert!(rendered.contains("8-14 / 24"));
         assert!(rendered.contains("192.168.1.13"));
+        assert!(rendered.contains("▶ en0"));
         assert!(!rendered.contains("192.168.1.2 "));
     }
 
