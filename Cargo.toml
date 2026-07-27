@@ -14,8 +14,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.6", features = ["derive"] }
 crossterm = "0.29"
 if-addrs = "0.15"
-netbraid-evidence = { git = "https://github.com/arclabs561/netbraid.git", rev = "8f5f83bcdf7ec1f7ba282a741ab0a9ffe628c304" }
-netbraid-replay = { git = "https://github.com/arclabs561/netbraid.git", rev = "8f5f83bcdf7ec1f7ba282a741ab0a9ffe628c304" }
+netbraid-evidence = { git = "https://github.com/arclabs561/netbraid.git", rev = "ab553a5e7c22b6344d4b60f632075691f4a966b6" }
+netbraid-replay = { git = "https://github.com/arclabs561/netbraid.git", rev = "ab553a5e7c22b6344d4b60f632075691f4a966b6" }
 ratatui = "0.30"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -26,5 +26,5 @@ strip-ansi-escapes = "0.2.1"
 wait-timeout = "0.2"
 
 [dev-dependencies]
-netbraid-replay = { git = "https://github.com/arclabs561/netbraid.git", rev = "8f5f83bcdf7ec1f7ba282a741ab0a9ffe628c304", features = ["scenario-fixtures"] }
+netbraid-replay = { git = "https://github.com/arclabs561/netbraid.git", rev = "ab553a5e7c22b6344d4b60f632075691f4a966b6", features = ["scenario-fixtures"] }
 pretty_assertions = "1.4"

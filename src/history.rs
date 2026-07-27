@@ -579,8 +579,10 @@ fn make_private_file(_path: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::model::{
-        Address, MacScope, NetworkConfiguration, Peer, PeerPathFilter, PeerSnapshot, ProbePolicy,
+        Address, MacScope, MonitorMode, NetworkConfiguration, Peer, PeerPathFilter, PeerSnapshot,
+        ProbePolicy,
     };
+    use ratatui::{Terminal, backend::TestBackend};
 
     fn app(ssid: &str, gateway: &str, bssid: &str) -> App {
         let mut app = App::new();
@@ -663,6 +665,67 @@ mod tests {
             .checkpoint_inputs_v0(&receipt)
             .expect("resolve receipt-bound checkpoint inputs")
             .host_path_records
+    }
+
+    fn scenario_app(record: &HostPathObservationV0, context: HistoryContext) -> App {
+        let interface = record.path.interface.clone();
+        let network_configuration = (record.path.association_id.is_some()
+            || record.path.associated_bssid.is_some())
+        .then(|| {
+            Box::new(NetworkConfiguration {
+                connection_id: record.path.association_id.clone(),
+                associated_bssid: record.path.associated_bssid.clone(),
+                bssid_restricted: false,
+                method: None,
+                state: None,
+                server: None,
+                subnet_mask: None,
+                lease_seconds: None,
+                lease_started_at: None,
+                lease_expires_at: None,
+                router_arp_verified: None,
+                security: None,
+            })
+        });
+        let mut app = App::new();
+        app.path_generation = 1;
+        app.link = LinkSnapshot {
+            host: record.source.observer_id.clone(),
+            interface,
+            link_type: record.path.link_type.clone(),
+            underlay: None,
+            ssid: record.path.network_name.value.clone(),
+            ssid_restricted: record.path.network_name.visibility
+                == NetworkNameVisibilityV0::Restricted,
+            wifi: None,
+            gateway: record.path.next_hop.clone(),
+            public_ip: None,
+            resolvers: record.path.resolvers.clone(),
+            // A HostPathObservation carries network boundaries, not reversible
+            // host-address role or temporary-address evidence.
+            addresses: Vec::new(),
+            network_configuration,
+        };
+        app.history_context = Some(context);
+        app
+    }
+
+    fn render_overview_text(app: &App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("create deterministic terminal");
+        terminal
+            .draw(|frame| crate::ui::render(frame, app, MonitorMode::Overview, 0, true))
+            .expect("render overview");
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area;
+        let mut output = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                output.push_str(buffer[(x, y)].symbol());
+            }
+            output.push('\n');
+        }
+        output
     }
 
     #[test]
@@ -831,6 +894,139 @@ mod tests {
         assert_eq!(summary.kind, HistoryContextKind::FirstObservation);
         assert!(!summary.summary.contains("present"));
         assert!(!summary.summary.contains("departed"));
+    }
+
+    #[test]
+    fn netbraid_same_ssid_boundary_is_consistent_across_operator_surfaces() {
+        for (checkpoint, expected_kind, wire_kind, summary_fragment, tui_fragment) in [
+            (
+                "mesh-baseline",
+                HistoryContextKind::FirstObservation,
+                "first_observation",
+                "first observation for this host",
+                "first observation",
+            ),
+            (
+                "mesh-new-attachment",
+                HistoryContextKind::Recurring,
+                "recurring",
+                "recurring network context",
+                "recurring",
+            ),
+            (
+                "same-label-new-boundary",
+                HistoryContextKind::Changed,
+                "changed",
+                "new network context relative to prior",
+                "new context",
+            ),
+        ] {
+            let records = scenario_inputs("same-ssid-attachment-boundary", checkpoint);
+            let current = records.last().expect("checkpoint has host-path evidence");
+            let context = summarize(&records[..records.len() - 1], current);
+
+            assert_eq!(context.kind, expected_kind);
+            assert!(context.summary.contains(summary_fragment));
+            assert!(context.summary.contains("place unknown"));
+            assert_eq!(context.context_anchor, "gateway link binding observed");
+            assert_eq!(
+                context.place_authority,
+                "unknown · assertion source not configured"
+            );
+            if checkpoint == "mesh-new-attachment" {
+                assert!(context.summary.contains("new BSSID attachment"));
+            }
+            if checkpoint == "same-label-new-boundary" {
+                assert!(context.summary.contains("next_hop_link_address"));
+                assert!(context.summary.contains("resolvers"));
+                assert!(context.summary.contains("address_prefixes"));
+            }
+
+            let app = scenario_app(current, context.clone());
+            let plain_line =
+                crate::plain::format_history_update(std::time::Duration::ZERO, &context.summary);
+            assert!(plain_line.contains(summary_fragment));
+            assert!(!plain_line.to_lowercase().contains("owner"));
+            assert!(!plain_line.contains("802.11 roam"));
+
+            let mut live = crate::output::LiveObservationStream::start(ProbePolicy::Passive, None);
+            let document = live
+                .observe(
+                    crate::output::LiveTrigger::Link,
+                    MonitorMode::Overview,
+                    &app,
+                )
+                .expect("first material projection emits a live checkpoint");
+            let projection = serde_json::to_value(document).unwrap();
+            assert_eq!(projection["schema"], "linktop.live_observation.v1");
+            assert_eq!(projection["acquisition"]["policy"], "passive");
+            assert_eq!(projection["assessment"]["path_status"], "untested");
+            assert_eq!(
+                projection
+                    .pointer("/evidence/history_context/kind")
+                    .and_then(serde_json::Value::as_str),
+                Some(wire_kind)
+            );
+            assert_eq!(
+                projection
+                    .pointer("/evidence/history_context/summary")
+                    .and_then(serde_json::Value::as_str),
+                Some(context.summary.as_str())
+            );
+            assert_eq!(
+                projection
+                    .pointer("/evidence/history_context/compact_summary")
+                    .and_then(serde_json::Value::as_str),
+                Some(context.compact_summary.as_str())
+            );
+            assert_eq!(
+                projection
+                    .pointer("/evidence/history_context/place_authority")
+                    .and_then(serde_json::Value::as_str),
+                Some("unknown · assertion source not configured")
+            );
+
+            for (width, height) in [(60, 10), (70, 14), (75, 10), (76, 10), (100, 24), (160, 30)] {
+                let rendered = render_overview_text(&app, width, height);
+                assert!(rendered.contains("Northstar Mesh"));
+                assert!(!rendered.contains("location:"));
+                assert!(!rendered.to_lowercase().contains("owner:"));
+                assert!(!rendered.contains("802.11 roam"));
+                if height == 10 {
+                    assert!(
+                        rendered.contains("default route observed"),
+                        "{checkpoint} diagnosis missing at {width}x{height}:\n{rendered}"
+                    );
+                    assert!(
+                        !rendered.contains(tui_fragment),
+                        "{checkpoint} context displaced the minimum diagnosis at {width}x{height}:\n{rendered}"
+                    );
+                    assert!(rendered.contains("UNTESTED"));
+                    assert!(rendered.contains("PASSIVE"));
+                    assert!(rendered.contains("path"));
+                    assert!(rendered.contains("coverage"));
+                    assert!(
+                        rendered.contains("next: [a] run bounded path probes")
+                            || rendered.contains(
+                                "next: [a] enables next-hop, DNS, HTTPS, and public-egress probes"
+                            ),
+                        "{checkpoint} complete action missing at {width}x{height}:\n{rendered}"
+                    );
+                } else {
+                    assert!(
+                        rendered.contains(tui_fragment) || rendered.contains(summary_fragment),
+                        "{checkpoint} conclusion missing at {width}x{height}:\n{rendered}"
+                    );
+                }
+                if matches!((width, height), (70, 14)) {
+                    assert_eq!(
+                        rendered.matches(tui_fragment).count(),
+                        1,
+                        "{checkpoint} context duplicated or omitted at {width}x{height}:\n{rendered}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

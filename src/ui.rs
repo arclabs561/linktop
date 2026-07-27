@@ -2728,6 +2728,7 @@ fn render_overview_compact(frame: &mut Frame<'_>, area: Rect, app: &App, can_nav
         .split(area);
     render_header(frame, chunks[0], app, MonitorMode::Overview);
     let diagnosis = overview_diagnosis(app);
+    let available = chunks[1].height.saturating_sub(2) as usize;
     let ssid = app
         .link
         .ssid
@@ -2759,7 +2760,7 @@ fn render_overview_compact(frame: &mut Frame<'_>, area: Rect, app: &App, can_nav
         compact_diagnosis_action(app, &diagnosis, area.width),
         Style::default().fg(ACCENT),
     )));
-    if diagnosis.context_is_salient {
+    if diagnosis.context_is_salient && lines.len() < available {
         lines.push(Line::from(Span::styled(
             fit(
                 &diagnosis.compact_context,
@@ -2809,7 +2810,6 @@ fn render_overview_compact(frame: &mut Frame<'_>, area: Rect, app: &App, can_nav
         }));
     }
     lines.push(compact_telemetry_line(app, area.width));
-    let available = chunks[1].height.saturating_sub(2) as usize;
     if lines.len() < available {
         let event_count = available - lines.len();
         lines.extend(app.events.iter().rev().take(event_count).map(|event| {
@@ -3999,6 +3999,47 @@ mod tests {
             .unwrap();
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("next: [a] run bounded path probes"));
+    }
+
+    #[test]
+    fn minimum_overview_keeps_active_failure_ahead_of_history_context() {
+        let mut app = App::with_probe_policy(ProbePolicy::Active);
+        app.apply(MonitorUpdate::ProbeFinished {
+            generation: 0,
+            kind: ProbeKind::Gateway,
+            result: ProbeResult {
+                health: Health::Failed,
+                detail: "next hop did not reply".into(),
+                latency_ms: None,
+                metrics: None,
+            },
+        });
+        app.history_context = Some(HistoryContext {
+            kind: crate::model::HistoryContextKind::Changed,
+            summary: "new network context relative to prior".into(),
+            compact_summary: "new context · place unknown".into(),
+            context_anchor: "gateway link binding observed".into(),
+            place_authority: "unknown · assertion source not configured".into(),
+            evidence: "typed history evidence".into(),
+        });
+
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+
+        assert!(
+            rendered.contains("next-hop RTT failed — next hop did not reply"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("new context"), "{rendered}");
+        assert!(rendered.contains("coverage"), "{rendered}");
+        assert!(
+            rendered.contains("next: [2] inspect the local link"),
+            "{rendered}"
+        );
     }
 
     #[test]
