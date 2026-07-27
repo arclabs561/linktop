@@ -58,8 +58,12 @@ struct LiveOptions {
     interval: Option<u64>,
 
     /// Stream the live monitor as append-only text instead of opening the TUI.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "jsonl")]
     plain: bool,
+
+    /// Stream versioned self-contained live observation records as JSON Lines.
+    #[arg(long, conflicts_with = "plain")]
+    jsonl: bool,
 
     /// Exit a live overview, link, or peers view after this many seconds.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=86_400))]
@@ -171,6 +175,7 @@ impl From<CaptureView> for MonitorMode {
 enum LiveOutput {
     Tui,
     Plain,
+    Jsonl,
     Once,
 }
 
@@ -263,8 +268,13 @@ fn main() -> Result<()> {
             } else {
                 let interval = live.interval();
                 let dwell = live.dwell();
-                let live_output =
-                    choose_live_output(terminal_stdin, terminal_stdout, live.plain, dwell);
+                let live_output = choose_live_output(
+                    terminal_stdin,
+                    terminal_stdout,
+                    live.plain,
+                    live.jsonl,
+                    dwell,
+                );
                 match live_output {
                     LiveOutput::Tui => run_tui(
                         interval,
@@ -274,6 +284,13 @@ fn main() -> Result<()> {
                         None,
                     ),
                     LiveOutput::Plain => run_plain(
+                        interval,
+                        MonitorMode::Link,
+                        dwell,
+                        ProbePolicy::Passive,
+                        None,
+                    ),
+                    LiveOutput::Jsonl => run_jsonl(
                         interval,
                         MonitorMode::Link,
                         dwell,
@@ -294,8 +311,13 @@ fn main() -> Result<()> {
             } else {
                 let interval = live.interval();
                 let dwell = live.dwell();
-                let live_output =
-                    choose_live_output(terminal_stdin, terminal_stdout, live.plain, dwell);
+                let live_output = choose_live_output(
+                    terminal_stdin,
+                    terminal_stdout,
+                    live.plain,
+                    live.jsonl,
+                    dwell,
+                );
                 match live_output {
                     LiveOutput::Tui => run_tui(
                         interval,
@@ -305,6 +327,13 @@ fn main() -> Result<()> {
                         None,
                     ),
                     LiveOutput::Plain => run_plain(
+                        interval,
+                        MonitorMode::Peers,
+                        dwell,
+                        ProbePolicy::Passive,
+                        None,
+                    ),
+                    LiveOutput::Jsonl => run_jsonl(
                         interval,
                         MonitorMode::Peers,
                         dwell,
@@ -339,7 +368,12 @@ fn main() -> Result<()> {
             resizes,
             scene,
         }) => {
-            reject_live_lifetime_options("screenshot", root_live.plain, root_live.dwell())?;
+            reject_live_lifetime_options(
+                "screenshot",
+                root_live.plain,
+                root_live.jsonl,
+                root_live.dwell(),
+            )?;
             let interval = merge_interval(root_live.interval, interval)?;
             reject_root_active("screenshot", active)?;
             reject_history("screenshot", explicit_history.as_ref())?;
@@ -384,8 +418,13 @@ fn main() -> Result<()> {
         None => {
             let interval = root_live.interval();
             let dwell = root_live.dwell();
-            let live_output =
-                choose_live_output(terminal_stdin, terminal_stdout, root_live.plain, dwell);
+            let live_output = choose_live_output(
+                terminal_stdin,
+                terminal_stdout,
+                root_live.plain,
+                root_live.jsonl,
+                dwell,
+            );
             let default_history = resolve_default_history(
                 explicit_history,
                 std::env::var_os("LINKTOP_HISTORY"),
@@ -406,8 +445,15 @@ fn main() -> Result<()> {
                     probe_policy,
                     default_history,
                 ),
+                LiveOutput::Jsonl => run_jsonl(
+                    interval,
+                    MonitorMode::Overview,
+                    dwell,
+                    probe_policy,
+                    default_history,
+                ),
                 LiveOutput::Once if default_history.is_some() => {
-                    anyhow::bail!("--history requires a live terminal or --plain")
+                    anyhow::bail!("--history requires a live terminal, --plain, or --jsonl")
                 }
                 LiveOutput::Once if probe_policy.is_active() => probe(false),
                 LiveOutput::Once => snapshot(false),
@@ -443,9 +489,14 @@ fn merge_live_options(root: LiveOptions, command: LiveOptions) -> Result<LiveOpt
         root.dwell.is_none() || command.dwell.is_none(),
         "--dwell may be specified either before or after the subcommand, not both"
     );
+    anyhow::ensure!(
+        !(root.plain || command.plain) || !(root.jsonl || command.jsonl),
+        "--plain cannot be combined with --jsonl"
+    );
     Ok(LiveOptions {
         interval: command.interval.or(root.interval),
         plain: root.plain || command.plain,
+        jsonl: root.jsonl || command.jsonl,
         dwell: command.dwell.or(root.dwell),
     })
 }
@@ -454,9 +505,12 @@ fn choose_live_output(
     terminal_stdin: bool,
     terminal_stdout: bool,
     plain: bool,
+    jsonl: bool,
     dwell: Option<Duration>,
 ) -> LiveOutput {
-    if plain {
+    if jsonl {
+        LiveOutput::Jsonl
+    } else if plain {
         LiveOutput::Plain
     } else if terminal_stdin && terminal_stdout {
         LiveOutput::Tui
@@ -472,11 +526,17 @@ fn reject_live_options(subject: &str, live: &LiveOptions) -> Result<()> {
         live.interval.is_none(),
         "--interval cannot be combined with {subject}"
     );
-    reject_live_lifetime_options(subject, live.plain, live.dwell())
+    reject_live_lifetime_options(subject, live.plain, live.jsonl, live.dwell())
 }
 
-fn reject_live_lifetime_options(subject: &str, plain: bool, dwell: Option<Duration>) -> Result<()> {
+fn reject_live_lifetime_options(
+    subject: &str,
+    plain: bool,
+    jsonl: bool,
+    dwell: Option<Duration>,
+) -> Result<()> {
     anyhow::ensure!(!plain, "--plain cannot be combined with {subject}");
+    anyhow::ensure!(!jsonl, "--jsonl cannot be combined with {subject}");
     anyhow::ensure!(dwell.is_none(), "--dwell cannot be combined with {subject}");
     Ok(())
 }
@@ -1138,6 +1198,9 @@ fn run_plain(
         |duration| format!("exits after {}s", duration.as_secs()),
     );
     println!("LINKTOP LIVE  {subject} / {lifetime}");
+    for line in plain::format_progress_snapshot(&app, mode) {
+        println!("{line}");
+    }
     let deadline = dwell.map(|duration| Instant::now() + duration);
     loop {
         let update = if let Some(deadline) = deadline {
@@ -1157,9 +1220,9 @@ fn run_plain(
             }
         };
         let observed = update.clone();
-        let before = plain::PlainState::from(&app);
-        let history_line = apply_monitor_update(&mut app, history.as_mut(), update);
-        for line in plain::format_update(&observed, &before, &app) {
+        let before = plain::PlainState::for_mode(&app, mode);
+        let (_, history_line) = apply_monitor_update(&mut app, history.as_mut(), update);
+        for line in plain::format_update_for_mode(&observed, &before, &app, mode) {
             println!("{line}");
         }
         if let Some(line) = history_line {
@@ -1169,9 +1232,66 @@ fn run_plain(
     controls.send(MonitorControl::Stop).ok();
     monitor.join().ok();
     if dwell.is_some() {
+        for line in plain::format_final_progress_summary(&app, mode) {
+            println!("{line}");
+        }
         for line in plain::format_dwell_summary(&app, mode.dwell_collector_scope()) {
             println!("{line}");
         }
+    }
+    Ok(())
+}
+
+fn run_jsonl(
+    interval: Duration,
+    mode: MonitorMode,
+    dwell: Option<Duration>,
+    probe_policy: ProbePolicy,
+    history_path: Option<PathBuf>,
+) -> Result<()> {
+    let (updates, controls, monitor) = net::start_monitor(interval, mode, probe_policy);
+    let mut app = model::App::with_probe_policy(probe_policy);
+    let mut history = history_path.map(history::HistorySession::open);
+    if let Some(history) = &history {
+        history.attach(&mut app);
+    }
+    let mut stream = output::LiveObservationStream::start(probe_policy, dwell);
+    let deadline = dwell.map(|duration| Instant::now() + duration);
+    let result = (|| -> Result<()> {
+        loop {
+            let update = if let Some(deadline) = deadline {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match updates.recv_timeout(remaining.min(Duration::from_millis(250))) {
+                    Ok(update) => update,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            } else {
+                match updates.recv() {
+                    Ok(update) => update,
+                    Err(_) => break,
+                }
+            };
+            let trigger = output::LiveTrigger::from(&update);
+            let (accepted, _) = apply_monitor_update(&mut app, history.as_mut(), update);
+            if !accepted {
+                continue;
+            }
+            if let Some(document) = stream.observe(trigger, mode, &app) {
+                output::print_jsonl(&document)?;
+            }
+        }
+        Ok(())
+    })();
+
+    controls.send(MonitorControl::Stop).ok();
+    monitor.join().ok();
+    result?;
+    if let Some(final_summary) = stream.final_summary(mode, &app) {
+        output::print_jsonl(&final_summary)?;
     }
     Ok(())
 }
@@ -1180,10 +1300,13 @@ pub(crate) fn apply_monitor_update(
     app: &mut model::App,
     history: Option<&mut history::HistorySession>,
     update: model::MonitorUpdate,
-) -> Option<String> {
+) -> (bool, Option<String>) {
     let observed = update.clone();
-    app.apply(update);
-    history.and_then(|history| history.observe_update(&observed, app))
+    let accepted = app.apply(update);
+    let history_line = accepted
+        .then(|| history.and_then(|history| history.observe_update(&observed, app)))
+        .flatten();
+    (accepted, history_line)
 }
 
 fn history_status(app: &model::App) -> (&str, &str) {
@@ -1307,6 +1430,7 @@ mod cli_tests {
         let snapshot_help = String::from_utf8(snapshot_help).unwrap();
         assert!(!snapshot_help.contains("--interval"));
         assert!(!snapshot_help.contains("--plain"));
+        assert!(!snapshot_help.contains("--jsonl"));
         assert!(!snapshot_help.contains("--dwell"));
         assert!(!snapshot_help.contains("--history"));
 
@@ -1320,6 +1444,7 @@ mod cli_tests {
         assert!(peers_help.contains("--interval"));
         assert!(peers_help.contains("default: 2"));
         assert!(peers_help.contains("--plain"));
+        assert!(peers_help.contains("--jsonl"));
         assert!(peers_help.contains("--dwell"));
         assert!(!peers_help.contains("--history"));
 
@@ -1333,6 +1458,7 @@ mod cli_tests {
         assert!(screenshot_help.contains("--interval"));
         assert!(screenshot_help.contains("default: 2"));
         assert!(!screenshot_help.contains("--plain"));
+        assert!(!screenshot_help.contains("--jsonl"));
         assert!(!screenshot_help.contains("--dwell"));
         assert!(!screenshot_help.contains("--history"));
     }
@@ -1507,6 +1633,16 @@ mod cli_tests {
             .is_err()
         );
         assert!(
+            reject_live_options(
+                "link --json",
+                &LiveOptions {
+                    jsonl: true,
+                    ..LiveOptions::default()
+                }
+            )
+            .is_err()
+        );
+        assert!(
             reject_history(
                 "screenshot",
                 Some(&PathBuf::from("/private/history-must-not-change.jsonl"))
@@ -1516,36 +1652,60 @@ mod cli_tests {
     }
 
     #[test]
+    fn jsonl_is_an_explicit_live_mode_and_conflicts_with_plain() {
+        let cli = Cli::try_parse_from(["linktop", "--jsonl", "--dwell", "1"]).unwrap();
+        assert!(cli.live.jsonl);
+        assert!(!cli.live.plain);
+        assert!(
+            Cli::try_parse_from(["linktop", "--plain", "--jsonl"])
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be used with")
+        );
+    }
+
+    #[test]
     fn output_policy_covers_terminal_pipe_stream_and_dwell_contracts() {
         let dwell = Some(Duration::from_secs(5));
-        assert_eq!(choose_live_output(true, true, false, None), LiveOutput::Tui);
         assert_eq!(
-            choose_live_output(false, true, false, None),
-            LiveOutput::Once
-        );
-        assert_eq!(
-            choose_live_output(true, false, false, None),
-            LiveOutput::Once
-        );
-        assert_eq!(
-            choose_live_output(false, false, false, None),
-            LiveOutput::Once
-        );
-        assert_eq!(
-            choose_live_output(true, true, true, None),
-            LiveOutput::Plain
-        );
-        assert_eq!(
-            choose_live_output(false, false, true, None),
-            LiveOutput::Plain
-        );
-        assert_eq!(
-            choose_live_output(true, true, false, dwell),
+            choose_live_output(true, true, false, false, None),
             LiveOutput::Tui
         );
         assert_eq!(
-            choose_live_output(false, true, false, dwell),
+            choose_live_output(false, true, false, false, None),
+            LiveOutput::Once
+        );
+        assert_eq!(
+            choose_live_output(true, false, false, false, None),
+            LiveOutput::Once
+        );
+        assert_eq!(
+            choose_live_output(false, false, false, false, None),
+            LiveOutput::Once
+        );
+        assert_eq!(
+            choose_live_output(true, true, true, false, None),
             LiveOutput::Plain
+        );
+        assert_eq!(
+            choose_live_output(false, false, true, false, None),
+            LiveOutput::Plain
+        );
+        assert_eq!(
+            choose_live_output(true, true, false, false, dwell),
+            LiveOutput::Tui
+        );
+        assert_eq!(
+            choose_live_output(false, true, false, false, dwell),
+            LiveOutput::Plain
+        );
+        assert_eq!(
+            choose_live_output(true, true, false, true, None),
+            LiveOutput::Jsonl
+        );
+        assert_eq!(
+            choose_live_output(false, false, false, true, dwell),
+            LiveOutput::Jsonl
         );
     }
 

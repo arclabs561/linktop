@@ -108,14 +108,27 @@ inferred from the terminal or selected view.
 `linktop link` and `linktop peers` also open live focused views on a terminal;
 the peers view is scrollable and rereads only the native cache. Redirecting
 either command with no lifetime option remains a one-shot snapshot. Use
-`--plain` to explicitly choose a timestamped, append-only stream, and
-`--dwell SECONDS` to request and bound any live
+`--plain` to explicitly choose a timestamped, append-only human stream,
+`--jsonl` to choose the versioned live machine stream, and `--dwell SECONDS`
+to request and bound any live
 overview, link, or peers observation. Plain mode is useful for logs, `tee`,
 remote shells, and support handoffs; it never emits cursor-control sequences.
+Plain and JSONL are mutually exclusive and neither changes passive or active
+acquisition policy.
 Combining `--plain` with `--dwell` closes the stream with a collector-scoped
 summary of the current path generation and up to eight completed generations
 observed by that process. Evidence a focused command did not collect is
-labelled `not collected`; the summary is not persisted.
+labelled `not collected`; the summary is not persisted. A bounded JSONL dwell
+ends with one `final_summary`; an operator-selected unbounded JSONL stream has
+no fabricated terminal record, built-in persistence, or network publication.
+
+Live usefulness follows each claim's evidence horizon, not process uptime.
+Path context, cumulative counters, and each completed probe are exposed as
+soon as observed. Interface rate requires two compatible counter reads.
+Next-hop distribution uses the latest twenty attempts, remains insufficient
+before five attempts, and requires at least two successful RTT observations
+for adjacent variation. Human and machine views report the same support,
+scope, source age or span when known, and typed limitations.
 
 Finite text and the TUI are expert human interfaces, not machine APIs.
 `--json` emits one versioned JSON document for agents and programs:
@@ -132,15 +145,25 @@ default-path prefixes, and effective resolvers when the one-shot link
 observation supplied them. Use these contracts instead of parsing prose or
 terminal columns.
 
+`--jsonl` emits `linktop.live_observation.v1` from that same typed model.
+Self-contained records identify an initial or periodic checkpoint, a
+path-generation transition, or the bounded final summary and carry sequence,
+acquisition lifetime, generation, assessment, claim progress, and evidence.
+Material state changes emit immediately; full checkpoints recur at a bounded
+cadence while accepted updates continue, and high-frequency non-material
+updates between them are suppressed. `--json` remains finite and unchanged.
+
 ```sh
 linktop
 linktop --plain
 linktop --plain --interval 5 | tee linktop.log
+linktop --jsonl --dwell 30
 linktop --dwell 30
 linktop --history ~/.local/state/linktop/host-path.jsonl
 linktop --plain --dwell 30 --history ~/.local/state/linktop/host-path.jsonl
 linktop --active
 linktop --active --plain --dwell 30
+linktop --active --jsonl
 linktop snapshot
 linktop snapshot --json
 linktop probe
@@ -150,6 +173,7 @@ linktop link --json
 linktop peers
 linktop peers --dwell 30
 linktop peers --plain --dwell 30 | tee peers.log
+linktop peers --jsonl --dwell 30
 linktop peers --json
 linktop speed 192.168.1.10
 ```

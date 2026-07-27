@@ -168,3 +168,19 @@ evidence hierarchy as cited context; they cannot override fresh host evidence
 or path-critical probes. This extends rather than replaces the typed situation
 model. Purpose-specific readiness and statistical baselines remain separate
 future decisions.
+
+## Update (2026-07-26): mature each claim on its own evidence horizon
+
+ADR-0010 replaces the global presentation idea of gateway or baseline
+“warm-up” with typed claim-specific progress. A directly observed route,
+cumulative counter, or completed probe is useful immediately and no longer
+waits behind the next-hop distribution. Interface rate remains insufficient
+until two compatible counter reads. Next-hop variation remains insufficient
+until the latest assessment window contains five attempts and at least two
+successful RTT observations.
+
+The path verdict, TUI, plain stream, and live JSONL now use the same latest
+twenty-attempt assessment aggregate. A longer sparkline is labelled as display
+history rather than allowed to disagree with the verdict window. This refines
+startup presentation without weakening the existing sparse-distribution,
+causal-order, or abstention rules.

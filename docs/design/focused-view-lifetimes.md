@@ -19,9 +19,10 @@ showing one, without an overflow marker or drill-down, is not honest enough.
 
 ## Context
 
-Linktop has three output contracts already: an alternate-screen TUI for a terminal, a
-bounded report when stdout is redirected, and an explicit append-only `--plain`
-stream. It also has four different jobs:
+Linktop has distinct output contracts: an alternate-screen TUI, a bounded
+report when stdout is redirected, an explicit append-only human `--plain`
+stream, finite versioned JSON, and an explicit live versioned JSONL stream. It
+also has four different jobs:
 
 - overview: observe local context passively by default and correlate it with
   bounded path probes only after explicit active enablement;
@@ -82,19 +83,19 @@ interaction.
 
 Use subject, output mode, and lifetime as separate axes:
 
-| Invocation | Interactive terminal | Noninteractive output | `--plain` | `--json` |
-| --- | --- | --- | --- | --- |
-| `linktop` | live overview TUI | one snapshot | live overview stream | not yet global |
-| `linktop snapshot` | one report | one report | invalid | one report |
-| `linktop link` | live focused TUI | one link snapshot | live focused stream | one snapshot |
-| `linktop peers` | live scrollable TUI | one cache snapshot | live focused stream | one snapshot |
-| `linktop speed HOST` | bounded progress/result | bounded result | invalid | one result |
+| Invocation | Interactive terminal | Noninteractive output | `--plain` | `--json` | `--jsonl` |
+| --- | --- | --- | --- | --- | --- |
+| `linktop` | live overview TUI | one snapshot | live overview stream | invalid | live overview records |
+| `linktop snapshot` | one report | one report | invalid | one report | invalid |
+| `linktop link` | live focused TUI | one link snapshot | live focused stream | one snapshot | live focused records |
+| `linktop peers` | live scrollable TUI | one cache snapshot | live focused stream | one snapshot | live focused records |
+| `linktop speed HOST` | bounded progress/result | bounded result | invalid | one result | invalid |
 
 Add `--dwell SECONDS` for live overview, link, and peers modes. Without it, an
 interactive or plain live view runs until interrupted. With it, the same view exits
 after the observation window. `--dwell` never changes a passive command into an active
-one. JSON remains a single observation in this slice; a future JSON event stream must
-use an explicit `--json-stream` contract rather than overloading `--json`.
+one. `--json` remains a single observation. `--jsonl` explicitly chooses the
+continuous structured contract rather than overloading finite JSON.
 
 ### Projection contracts
 
@@ -108,6 +109,7 @@ by the terminal library that happens to render them:
 | redirected one-shot text | human report, shell handoff, and scrollback | one observation | caller-owned stdout | bounded expert prose; scripts must not parse wording or columns |
 | `--plain` / `--dwell` | human log and supervised temporal observation | explicit stream, optionally bounded | caller-owned stdout | timestamped append-only prose; not a structured event API |
 | `--json` | agent or program consuming one observation or experiment | one observation or bounded experiment | caller-owned stdout | versioned schema discriminator; one JSON document |
+| `--jsonl` | agent or program consuming current live state | explicit stream, optionally bounded | caller-owned stdout only | versioned self-contained checkpoints/transitions/final; not a delta or replay API |
 | `--history` | durable host-path recurrence evidence | live overview session | private Netmon `HostPathObservationV0` JSONL | versioned evidence/replay contract; one writer owns each log |
 | `screenshot` | human or agent layout QA | bounded frame transaction | private QA files chosen by caller | text/SVG or text/ANSI/HTML artifacts plus a versioned private completion manifest; never network evidence |
 | Netmon finite PCAP text | human inspection of a saved capture | one normalization run | caller-owned stdout | bounded expert prose; not for parsing |
@@ -145,12 +147,30 @@ not a passive host-path assessment.
 Earlier raw, unversioned JSON was experimental implementation serialization and
 is not a compatibility contract.
 
+`linktop.live_observation.v1` identifies self-contained live overview, link,
+or peers state. Each record carries sequence, acquisition policy and lifetime,
+wall-clock start and emission time, monotonic elapsed time, path generation,
+typed assessment, a stable claim-progress vector, and current evidence.
+Records emit for the initial projection, material assessment/progress/path/
+probe/peer/history changes, and at a five-second checkpoint ceiling while accepted
+updates continue. Rate-only, workload-rate, count-only, and source-age-only
+updates between those boundaries do not create a full record. Path-generation
+changes are explicit transitions.
+
+A bounded dwell emits exactly one terminal summary and closes unresolved
+claims against that acquisition window. An unbounded run is an explicit local
+stdout projection and has no fabricated final, built-in persistence, network
+publication, service, or daemon. Only accepted current-generation updates may
+emit. Live v1 is output-only; delta delivery, acknowledgement, replay, and
+per-peer transition reconstruction are not implied.
+
 The v1 compatibility rule is additive: existing field names, types, meanings,
 and nesting do not change within v1. New optional evidence may be added when a
 collector gains evidence, but removing a field, changing its type or meaning,
 or changing required nesting requires a new schema discriminator. Exact
-pretty-JSON golden documents for snapshot, probe, link, peers, and speed gate
-the current complete shape, including model-backed nested evidence.
+pretty-JSON golden documents for snapshot, probe, link, peers, speed, and a
+bounded live final gate the current complete shape, including model-backed
+nested evidence and typed limitation codes.
 
 The TUI, one-shot text, and plain stream are for people, including expert
 operators. Agents and programs consume versioned JSON or Netmon records, not
@@ -175,6 +195,12 @@ by the process, preserving interface, radio, workload-window, and peer-cache
 aggregates only when the command's collector plan acquired them. A link or peers
 session says `not collected` for disabled sources rather than presenting absent
 collection as zero activity.
+
+Plain startup groups the collector plan so direct path and counter facts are
+not buried under schema-shaped progress rows. Material progress transitions
+still carry exact counts, span, age, basis, scope, and human renderings of the
+typed limitation codes. The overview summarizes the first complete neighbor
+inventory; the focused peers stream owns full initial rows.
 
 Focused monitoring uses workload-specific schedules:
 
@@ -370,6 +396,8 @@ rows into a durable peer inventory.
    selection, and lifetime validation.
 6. Record the implemented behavior in ADR-0002 and ADR-0003, then update README
    examples and install the new binary.
+7. Add the shared claim-progress projection and explicit live JSONL contract
+   under ADR-0010 without changing finite JSON or acquisition policy.
 
 ## Decision gates
 
@@ -378,16 +406,17 @@ rows into a durable peer inventory.
 - If users need durable peer history or cross-source explanations, extend the
   versioned Netmon contract under a separate decision rather than adding a Linktop
   database.
-- If a second machine consumer needs live structured events, add explicit NDJSON with
-  a schema version; do not make `--json` continuous.
+- If a live consumer needs deltas, loss recovery, replay, or independently
+  reconstructible per-peer transitions, add that contract explicitly; do not
+  reinterpret live-v1 checkpoints as events.
 - If TTY auto-interactivity breaks a real one-shot human workflow, add an explicit
   `--once` modifier without reverting pipe safety.
 - If path identity needs evidence beyond interface, SSID, gateway, resolvers, and local
   addresses, extend the typed fingerprint; do not infer network identity from public IP
   alone.
-- If a machine consumer needs continuous live state, introduce an explicit
-  versioned NDJSON event contract and replay fixture; never overload `--json`
-  or make an agent scrape the TUI or plain stream.
+- If JSONL becomes automatic collection, a daemon or service, durable
+  retention, telemetry, or a network publisher, revisit the Linktop ownership
+  boundary before implementing it.
 - If screenshot artifacts gain a consumer outside private QA, design
   publication, retention, sanitization, and compatibility separately; the
   private completion manifest is not that external evidence boundary.

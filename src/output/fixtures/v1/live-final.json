@@ -1,0 +1,298 @@
+{
+  "schema": "linktop.live_observation.v1",
+  "producer": {
+    "name": "linktop",
+    "version": "0.1.0"
+  },
+  "line": "final_summary",
+  "sequence": 1,
+  "subject": "overview",
+  "emitted_at": "2026-07-26T20:00:01.000Z",
+  "acquisition": {
+    "policy": "passive",
+    "lifetime": "bounded_dwell",
+    "started_at": "2026-07-26T20:00:00Z",
+    "elapsed_ms": 1000
+  },
+  "generation": 1,
+  "assessment": {
+    "situation": {
+      "health": "unavailable",
+      "kind": "passive_observation"
+    },
+    "path_status": "untested",
+    "evidence_coverage": "partial"
+  },
+  "progress": [
+    {
+      "claim": "path_context",
+      "state": "available",
+      "basis": "observed",
+      "scope": {
+        "kind": "current_path_generation",
+        "generation": 1,
+        "subject": "effective default route and corroborated physical underlay"
+      },
+      "observations": 1,
+      "observed_span_ms": 0
+    },
+    {
+      "claim": "interface_totals",
+      "state": "unavailable",
+      "basis": "observed",
+      "scope": {
+        "kind": "current_sample",
+        "generation": 1,
+        "subject": "interface en0 cumulative counters"
+      },
+      "limitations": [
+        {
+          "code": "bounded_acquisition_ended_before_availability"
+        }
+      ]
+    },
+    {
+      "claim": "interface_rate",
+      "state": "unavailable",
+      "basis": "derived",
+      "scope": {
+        "kind": "current_path_generation",
+        "generation": 1,
+        "subject": "compatible counter deltas for interface en0"
+      },
+      "observations": 0,
+      "required_observations": 2,
+      "valid_intervals": 0,
+      "limitations": [
+        {
+          "code": "bounded_acquisition_ended_before_availability"
+        }
+      ]
+    },
+    {
+      "claim": "radio_link",
+      "state": "available",
+      "basis": "observed",
+      "scope": {
+        "kind": "current_path_generation",
+        "generation": 1,
+        "subject": "associated interface en0 radio link"
+      },
+      "observations": 1
+    },
+    {
+      "claim": "neighbor_cache",
+      "state": "unavailable",
+      "basis": "observed",
+      "scope": {
+        "kind": "current_path_generation",
+        "generation": 1,
+        "subject": "native cache rows filtered to interface en0 and current path prefixes"
+      },
+      "limitations": [
+        {
+          "code": "cache_not_liveness_identity_activity_or_traffic"
+        },
+        {
+          "code": "bounded_acquisition_ended_before_availability"
+        }
+      ]
+    },
+    {
+      "claim": "workload_attribution",
+      "state": "unavailable",
+      "basis": "observed",
+      "scope": {
+        "kind": "current_path_generation",
+        "generation": 1,
+        "subject": "sampled host process-accounting windows on external interfaces"
+      },
+      "observations": 0,
+      "observed_span_ms": 0,
+      "limitations": [
+        {
+          "code": "sampled_host_accounting_no_endpoint_protocol_peer_person_or_intent"
+        },
+        {
+          "code": "bounded_acquisition_ended_before_availability"
+        }
+      ]
+    },
+    {
+      "claim": "gateway_rtt",
+      "state": "not_collected",
+      "basis": "observed",
+      "scope": {
+        "kind": "current_sample",
+        "generation": 1,
+        "subject": "configured next hop 192.0.2.1"
+      }
+    },
+    {
+      "claim": "dns_reachability",
+      "state": "not_collected",
+      "basis": "observed",
+      "scope": {
+        "kind": "current_sample",
+        "generation": 1,
+        "subject": "configured resolver path resolving example.com"
+      }
+    },
+    {
+      "claim": "https_reachability",
+      "state": "not_collected",
+      "basis": "observed",
+      "scope": {
+        "kind": "current_sample",
+        "generation": 1,
+        "subject": "HTTPS GET to example.com"
+      }
+    },
+    {
+      "claim": "public_egress",
+      "state": "not_collected",
+      "basis": "observed",
+      "scope": {
+        "kind": "current_sample",
+        "generation": 1,
+        "subject": "bounded public-egress address provider lookup"
+      }
+    },
+    {
+      "claim": "gateway_variation",
+      "state": "not_collected",
+      "basis": "derived",
+      "scope": {
+        "kind": "assessment_window",
+        "generation": 1,
+        "subject": "next-hop RTT variation",
+        "maximum_observations": 20
+      }
+    }
+  ],
+  "evidence": {
+    "path": {
+      "host": "operator-host",
+      "interface": "en0",
+      "link_type": "wifi",
+      "ssid": "lab",
+      "ssid_restricted": false,
+      "wifi": {
+        "signal_dbm": -52.0,
+        "noise_dbm": -91.0,
+        "signal_percent": 84.0,
+        "channel": 149,
+        "channel_width_mhz": 80,
+        "frequency_mhz": 5745,
+        "band": "5 GHz",
+        "phy": "802.11ax",
+        "tx_rate_mbps": 1200.0,
+        "rx_rate_mbps": 960.0,
+        "mcs": 11
+      },
+      "gateway": "192.0.2.1",
+      "public_ip": null,
+      "resolvers": [
+        "192.0.2.53"
+      ],
+      "addresses": [
+        {
+          "interface": "en0",
+          "address": "192.0.2.10",
+          "family": 4,
+          "is_default": true,
+          "is_temporary": false
+        }
+      ],
+      "network_configuration": {
+        "connection_id": "lab-wifi",
+        "associated_bssid": "00:11:22:33:44:55",
+        "bssid_restricted": false,
+        "method": "DHCP",
+        "state": "BOUND",
+        "server": "192.0.2.1",
+        "subnet_mask": "255.255.255.0",
+        "lease_seconds": 86400,
+        "lease_started_at": "2026-07-26T12:00:00Z",
+        "lease_expires_at": "2026-07-27T12:00:00Z",
+        "router_arp_verified": true,
+        "security": "WPA3 Personal"
+      }
+    },
+    "interface_counters": null,
+    "interface_rate": null,
+    "probes": [
+      {
+        "kind": "gateway",
+        "health": "unavailable",
+        "detail": "active check disabled",
+        "latency_ms": null,
+        "metrics": null,
+        "age_ms": null
+      },
+      {
+        "kind": "dns",
+        "health": "unavailable",
+        "detail": "active check disabled",
+        "latency_ms": null,
+        "metrics": null,
+        "age_ms": null
+      },
+      {
+        "kind": "https",
+        "health": "unavailable",
+        "detail": "active check disabled",
+        "latency_ms": null,
+        "metrics": null,
+        "age_ms": null
+      },
+      {
+        "kind": "public_ip",
+        "health": "unavailable",
+        "detail": "active check disabled",
+        "latency_ms": null,
+        "metrics": null,
+        "age_ms": null
+      }
+    ],
+    "gateway_assessment": {
+      "attempts": 0,
+      "successful_attempts": 0,
+      "required_attempts": 5,
+      "maximum_attempts": 20,
+      "metrics": null
+    },
+    "neighbors": {
+      "health": "queued",
+      "detail": "waiting for neighbor cache",
+      "path_filter": "pending",
+      "sources": [],
+      "failed_sources": [],
+      "oui_source": null,
+      "peers": []
+    },
+    "workload": {
+      "health": "queued",
+      "detail": "waiting for per-process traffic accounting",
+      "source": null,
+      "interval_ms": 1000,
+      "processes": []
+    },
+    "dwell": {
+      "observed_span_ms": 0,
+      "interface_samples": 0,
+      "interface_valid_intervals": 0,
+      "wifi_samples": 0,
+      "workload_windows": 0,
+      "workload_observed_ms": 0,
+      "neighbors": {
+        "current": 0,
+        "observed": 0,
+        "changed": 0,
+        "disappeared": 0
+      }
+    },
+    "last_path_change": null,
+    "history_context": null
+  }
+}

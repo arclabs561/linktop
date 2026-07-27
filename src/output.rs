@@ -1,15 +1,22 @@
 use anyhow::Result;
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
-use std::time::Instant;
+use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
+use crate::metrics::LatencyMetrics;
 use crate::model::{
-    Address, Health, InterfaceCounters, LinkSnapshot, MacScope, PathUnderlay, Peer, PeerPathFilter,
-    PeerSnapshot, ProbePolicy, SnapshotProbe, SnapshotReport, SnapshotSummary,
+    Address, App, AppProjection, EvidenceClaim, EvidenceCoverage, EvidenceLimitation,
+    EvidenceProgress, EvidenceProgressState, Health, HistoryContext, InterfaceCounters,
+    LinkSnapshot, LiveAssessment, LiveEvidence, LiveGatewayAssessmentEvidence, MacScope,
+    MonitorMode, MonitorUpdate, PathStatus, PathUnderlay, Peer, PeerPathFilter, PeerSnapshot,
+    ProbeKind, ProbePolicy, Situation, SnapshotProbe, SnapshotReport, SnapshotSummary,
 };
 
 pub const OBSERVATION_SCHEMA_V1: &str = "linktop.observation.v1";
 pub const SPEED_EXPERIMENT_SCHEMA_V1: &str = "linktop.speed_experiment.v1";
+pub const LIVE_OBSERVATION_SCHEMA_V1: &str = "linktop.live_observation.v1";
+const LIVE_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -49,7 +56,7 @@ impl AcquisitionWindow {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct Producer {
     pub name: &'static str,
     pub version: &'static str,
@@ -60,6 +67,265 @@ impl Producer {
         name: "linktop",
         version: env!("CARGO_PKG_VERSION"),
     };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveLineKind {
+    Checkpoint,
+    Transition,
+    FinalSummary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveTrigger {
+    Link,
+    PathSettling,
+    Wifi,
+    Peers,
+    Traffic,
+    Workload,
+    ProbeStarted,
+    ProbeFinished,
+    Notice,
+}
+
+impl From<&MonitorUpdate> for LiveTrigger {
+    fn from(update: &MonitorUpdate) -> Self {
+        match update {
+            MonitorUpdate::Link { .. } => Self::Link,
+            MonitorUpdate::PathSettling { .. } => Self::PathSettling,
+            MonitorUpdate::Wifi { .. } => Self::Wifi,
+            MonitorUpdate::Peers { .. } => Self::Peers,
+            MonitorUpdate::Traffic { .. } => Self::Traffic,
+            MonitorUpdate::Workload { .. } => Self::Workload,
+            MonitorUpdate::ProbeStarted { .. } => Self::ProbeStarted,
+            MonitorUpdate::ProbeFinished { .. } => Self::ProbeFinished,
+            MonitorUpdate::Notice(_) => Self::Notice,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveAcquisition {
+    pub policy: ProbePolicy,
+    pub lifetime: &'static str,
+    pub started_at: String,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveObservationDocument {
+    pub schema: &'static str,
+    pub producer: Producer,
+    pub line: LiveLineKind,
+    pub sequence: u64,
+    pub subject: MonitorMode,
+    pub emitted_at: String,
+    pub acquisition: LiveAcquisition,
+    pub generation: u64,
+    pub assessment: LiveAssessment,
+    pub progress: Vec<EvidenceProgress>,
+    pub evidence: LiveEvidence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<LiveTrigger>,
+}
+
+#[derive(Debug)]
+pub struct LiveObservationStream {
+    started_at: String,
+    started: Instant,
+    policy: ProbePolicy,
+    lifetime: &'static str,
+    bounded: bool,
+    sequence: u64,
+    last_material_state: Option<LiveMaterialState>,
+    last_emitted_elapsed: Option<Duration>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LiveMaterialState {
+    generation: u64,
+    situation: Situation,
+    path_status: PathStatus,
+    evidence_coverage: EvidenceCoverage,
+    progress: Vec<(
+        EvidenceClaim,
+        EvidenceProgressState,
+        Vec<EvidenceLimitation>,
+    )>,
+    path: String,
+    probes: Vec<LiveProbeMaterialState>,
+    gateway_assessment: Option<LiveGatewayAssessmentEvidence>,
+    neighbors: Option<PeerSnapshot>,
+    history_context: Option<HistoryContext>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LiveProbeMaterialState {
+    kind: ProbeKind,
+    health: Health,
+    detail: String,
+    latency_ms: Option<f64>,
+    metrics: Option<LatencyMetrics>,
+}
+
+impl LiveMaterialState {
+    fn from_projection(projection: &AppProjection) -> Self {
+        Self {
+            generation: projection.generation,
+            situation: projection.assessment.situation,
+            path_status: projection.assessment.path_status,
+            evidence_coverage: projection.assessment.evidence_coverage,
+            progress: projection
+                .progress
+                .iter()
+                .map(|progress| (progress.claim, progress.state, progress.limitations.clone()))
+                .collect(),
+            path: format!("{:?}", projection.evidence.path),
+            probes: projection
+                .evidence
+                .probes
+                .iter()
+                .map(|probe| LiveProbeMaterialState {
+                    kind: probe.kind,
+                    health: probe.health,
+                    detail: probe.detail.clone(),
+                    latency_ms: probe.latency_ms,
+                    metrics: probe.metrics.clone(),
+                })
+                .collect(),
+            gateway_assessment: projection.evidence.gateway_assessment.clone(),
+            neighbors: projection.evidence.neighbors.clone(),
+            history_context: projection.evidence.history_context.clone(),
+        }
+    }
+}
+
+impl LiveObservationStream {
+    pub fn start(policy: ProbePolicy, dwell: Option<Duration>) -> Self {
+        Self {
+            started_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            started: Instant::now(),
+            policy,
+            lifetime: if dwell.is_some() {
+                "bounded_dwell"
+            } else {
+                "unbounded_stream"
+            },
+            bounded: dwell.is_some(),
+            sequence: 0,
+            last_material_state: None,
+            last_emitted_elapsed: None,
+        }
+    }
+
+    pub fn observe(
+        &mut self,
+        trigger: LiveTrigger,
+        subject: MonitorMode,
+        app: &App,
+    ) -> Option<LiveObservationDocument> {
+        self.observe_at(
+            trigger,
+            subject,
+            app.projection(subject),
+            Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            self.started.elapsed(),
+        )
+    }
+
+    fn observe_at(
+        &mut self,
+        trigger: LiveTrigger,
+        subject: MonitorMode,
+        projection: AppProjection,
+        emitted_at: String,
+        elapsed: Duration,
+    ) -> Option<LiveObservationDocument> {
+        let material_state = LiveMaterialState::from_projection(&projection);
+        let generation_changed = self
+            .last_material_state
+            .as_ref()
+            .is_some_and(|previous| previous.generation != material_state.generation);
+        let material_changed = self
+            .last_material_state
+            .as_ref()
+            .is_none_or(|previous| previous != &material_state);
+        let checkpoint_due = self
+            .last_emitted_elapsed
+            .is_none_or(|last| elapsed.saturating_sub(last) >= LIVE_CHECKPOINT_INTERVAL);
+        self.last_material_state = Some(material_state);
+        if !material_changed && !checkpoint_due {
+            return None;
+        }
+
+        self.sequence = self.sequence.saturating_add(1);
+        self.last_emitted_elapsed = Some(elapsed);
+        Some(self.document_at(
+            if generation_changed {
+                LiveLineKind::Transition
+            } else {
+                LiveLineKind::Checkpoint
+            },
+            Some(trigger),
+            subject,
+            projection,
+            emitted_at,
+            elapsed,
+        ))
+    }
+
+    pub fn final_summary(
+        &mut self,
+        subject: MonitorMode,
+        app: &App,
+    ) -> Option<LiveObservationDocument> {
+        if !self.bounded {
+            return None;
+        }
+        self.sequence = self.sequence.saturating_add(1);
+        let projection = app.final_projection(subject);
+        Some(self.document_at(
+            LiveLineKind::FinalSummary,
+            None,
+            subject,
+            projection,
+            Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            self.started.elapsed(),
+        ))
+    }
+
+    fn document_at(
+        &self,
+        line: LiveLineKind,
+        trigger: Option<LiveTrigger>,
+        subject: MonitorMode,
+        projection: AppProjection,
+        emitted_at: String,
+        elapsed: Duration,
+    ) -> LiveObservationDocument {
+        LiveObservationDocument {
+            schema: LIVE_OBSERVATION_SCHEMA_V1,
+            producer: Producer::LINKTOP,
+            line,
+            sequence: self.sequence,
+            subject,
+            emitted_at,
+            acquisition: LiveAcquisition {
+                policy: self.policy,
+                lifetime: self.lifetime,
+                started_at: self.started_at.clone(),
+                elapsed_ms: duration_ms(elapsed),
+            },
+            generation: projection.generation,
+            assessment: projection.assessment,
+            progress: projection.progress,
+            evidence: projection.evidence,
+            trigger,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -320,6 +586,19 @@ impl<E> SpeedExperimentDocument<E> {
 pub fn print_json(document: &impl Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(document)?);
     Ok(())
+}
+
+pub fn print_jsonl(document: &impl Serialize) -> Result<()> {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    serde_json::to_writer(&mut stdout, document)?;
+    stdout.write_all(b"\n")?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
 }
 
 #[cfg(test)]
@@ -665,6 +944,228 @@ mod tests {
             "2026-07-26T20:00:00Z"
         );
         assert!(experiment["acquisition"]["elapsed_ms"].as_u64().unwrap() >= 10);
+    }
+
+    #[test]
+    fn live_jsonl_records_are_self_contained_sequenced_and_bounded_by_contract() {
+        let mut app = crate::model::App::new();
+        assert!(app.apply(crate::model::MonitorUpdate::Link {
+            generation: 1,
+            snapshot: test_link(),
+        }));
+        let mut bounded =
+            LiveObservationStream::start(ProbePolicy::Passive, Some(Duration::from_secs(1)));
+        let checkpoint = bounded
+            .observe(LiveTrigger::Link, crate::model::MonitorMode::Overview, &app)
+            .expect("first accepted projection emits a checkpoint");
+        let value = serde_json::to_value(&checkpoint).unwrap();
+        assert_eq!(value["schema"], LIVE_OBSERVATION_SCHEMA_V1);
+        assert_eq!(value["line"], "checkpoint");
+        assert_eq!(value["sequence"], 1);
+        assert_eq!(value["subject"], "overview");
+        assert_eq!(value["acquisition"]["policy"], "passive");
+        assert_eq!(value["acquisition"]["lifetime"], "bounded_dwell");
+        assert!(value["acquisition"]["started_at"].is_string());
+        assert!(value["acquisition"]["elapsed_ms"].is_number());
+        assert_eq!(value["generation"], 1);
+        assert_eq!(value["assessment"]["path_status"], "untested");
+        assert!(value["progress"].is_array());
+        assert_eq!(value["evidence"]["path"]["interface"], "en0");
+        assert_eq!(value["trigger"], "link");
+
+        let final_summary = bounded
+            .final_summary(crate::model::MonitorMode::Overview, &app)
+            .expect("bounded dwell has a terminal summary");
+        assert_eq!(final_summary.line, LiveLineKind::FinalSummary);
+        assert_eq!(final_summary.sequence, 2);
+        assert!(final_summary.trigger.is_none());
+        assert!(
+            final_summary
+                .progress
+                .iter()
+                .all(|progress| progress.state != crate::model::EvidenceProgressState::Collecting)
+        );
+        let final_value = serde_json::to_value(&final_summary).unwrap();
+        assert!(
+            final_value["progress"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|progress| { progress["limitations"].as_array().into_iter().flatten() })
+                .any(|limitation| {
+                    limitation["code"] == "bounded_acquisition_ended_before_availability"
+                })
+        );
+
+        let mut unbounded = LiveObservationStream::start(ProbePolicy::Passive, None);
+        assert!(
+            unbounded
+                .final_summary(crate::model::MonitorMode::Overview, &app)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn live_stream_suppresses_nonmaterial_updates_until_checkpoint_or_transition() {
+        let mut app = crate::model::App::new();
+        let mut stream = LiveObservationStream::start(ProbePolicy::Passive, None);
+        let subject = crate::model::MonitorMode::Overview;
+        let first = stream
+            .observe_at(
+                LiveTrigger::Notice,
+                subject,
+                app.projection(subject),
+                "2026-07-26T20:00:00.000Z".into(),
+                Duration::ZERO,
+            )
+            .expect("first projection is a checkpoint");
+        assert_eq!(first.line, LiveLineKind::Checkpoint);
+
+        let counters = |received_bytes, transmitted_bytes| InterfaceCounters {
+            interface: "en0".into(),
+            received_bytes,
+            transmitted_bytes,
+            received_packets: received_bytes / 100,
+            transmitted_packets: transmitted_bytes / 100,
+            receive_errors: 0,
+            transmit_errors: 0,
+            drops: 0,
+        };
+        for (index, counters) in [
+            counters(1_000, 2_000),
+            counters(2_000, 4_000),
+            counters(3_000, 6_000),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            std::thread::sleep(Duration::from_millis(1));
+            assert!(app.apply(crate::model::MonitorUpdate::Traffic {
+                generation: 0,
+                counters: Some(counters),
+            }));
+            let observed = stream.observe_at(
+                LiveTrigger::Traffic,
+                subject,
+                app.projection(subject),
+                format!("2026-07-26T20:00:0{}.000Z", index + 1),
+                Duration::from_secs((index + 1) as u64),
+            );
+            if index < 2 {
+                assert!(observed.is_some(), "progress state transition emits");
+            } else {
+                assert!(
+                    observed.is_none(),
+                    "rate-only high-frequency update is suppressed"
+                );
+            }
+        }
+
+        let periodic = stream
+            .observe_at(
+                LiveTrigger::Traffic,
+                subject,
+                app.projection(subject),
+                "2026-07-26T20:00:07.000Z".into(),
+                Duration::from_secs(7),
+            )
+            .expect("five-second checkpoint interval emits current full state");
+        assert_eq!(periodic.line, LiveLineKind::Checkpoint);
+
+        assert!(app.apply(crate::model::MonitorUpdate::Link {
+            generation: 1,
+            snapshot: test_link(),
+        }));
+        let transition = stream
+            .observe_at(
+                LiveTrigger::Link,
+                subject,
+                app.projection(subject),
+                "2026-07-26T20:00:08.000Z".into(),
+                Duration::from_secs(8),
+            )
+            .expect("generation change is material");
+        assert_eq!(transition.line, LiveLineKind::Transition);
+        assert_eq!(transition.sequence, 5);
+    }
+
+    #[test]
+    fn same_health_probe_measurement_change_emits_immediately() {
+        let mut app = crate::model::App::with_probe_policy(ProbePolicy::Active);
+        let mut stream = LiveObservationStream::start(ProbePolicy::Active, None);
+        let subject = crate::model::MonitorMode::Overview;
+        assert!(
+            stream
+                .observe_at(
+                    LiveTrigger::Notice,
+                    subject,
+                    app.projection(subject),
+                    "2026-07-26T20:00:00.000Z".into(),
+                    Duration::ZERO,
+                )
+                .is_some()
+        );
+
+        for (index, latency_ms) in [10.0, 12.0].into_iter().enumerate() {
+            assert!(app.apply(crate::model::MonitorUpdate::ProbeFinished {
+                generation: 0,
+                kind: ProbeKind::Dns,
+                result: crate::model::ProbeResult {
+                    health: Health::Ok,
+                    detail: "resolved".into(),
+                    latency_ms: Some(latency_ms),
+                    metrics: None,
+                },
+            }));
+            assert!(
+                stream
+                    .observe_at(
+                        LiveTrigger::ProbeFinished,
+                        subject,
+                        app.projection(subject),
+                        format!("2026-07-26T20:00:0{}.000Z", index + 1),
+                        Duration::from_secs((index + 1) as u64),
+                    )
+                    .is_some(),
+                "same-health probe measurement {index} must be material"
+            );
+        }
+    }
+
+    #[test]
+    fn live_v1_bounded_final_matches_an_exact_readable_golden() {
+        let mut app = crate::model::App::new();
+        assert!(app.apply(crate::model::MonitorUpdate::Link {
+            generation: 1,
+            snapshot: test_link(),
+        }));
+        let mut projection = app.final_projection(crate::model::MonitorMode::Overview);
+        for progress in &mut projection.progress {
+            if progress.observed_span_ms.is_some() {
+                progress.observed_span_ms = Some(0);
+            }
+            if progress.source_age_ms.is_some() {
+                progress.source_age_ms = Some(0);
+            }
+        }
+        projection.evidence.dwell.observed_span_ms = 0;
+
+        let mut stream =
+            LiveObservationStream::start(ProbePolicy::Passive, Some(Duration::from_secs(1)));
+        stream.started_at = "2026-07-26T20:00:00Z".into();
+        stream.sequence = 1;
+        let document = stream.document_at(
+            LiveLineKind::FinalSummary,
+            None,
+            crate::model::MonitorMode::Overview,
+            projection,
+            "2026-07-26T20:00:01.000Z".into(),
+            Duration::from_secs(1),
+        );
+        assert_golden(
+            &document,
+            include_str!("output/fixtures/v1/live-final.json"),
+        );
     }
 
     #[test]
