@@ -330,6 +330,18 @@ combined with active probes or durable history. The scene replaces the host
 monitor with an inert control loop, so no live route, radio, process, or
 neighbor collector can contaminate the fixture.
 
+The named `wifi-hotspot-wifi` scene loads receipt-bound public-synthetic
+Netbraid host-path inputs and compresses their QA clock to 0s/2s/4s. Its
+initial Wi-Fi, hotspot, and returned Wi-Fi records cross the normal Linktop
+generation and history reducers. Netbraid validates the full closed checkpoint
+receipt before returning typed inputs; Linktop does not interpret the receipt's
+authored conclusions or viewport assertions. The fixture adapter preserves
+only reversible host-path evidence and leaves address role, radio, peer-cache
+completeness, place, owner, and roam unobserved. The native child begins the
+timed sequence only after a private readiness barrier, while the deterministic
+lane inserts the same transition instants into its replay plan. Both receipts
+name the timeline and stage of every frame.
+
 An optional `--native` lane runs the current executable in a fixed-size tmux PTY and
 captures its real alternate-screen output at the same times. It captures one ANSI
 pane snapshot, derives plain text from those same bytes, and writes self-contained

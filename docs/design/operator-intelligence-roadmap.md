@@ -167,10 +167,15 @@ projection, and deterministic overview rendering above minimum height; at
 coverage, and complete action ahead of history context. Authenticated
 deterministic and native captures separately exercise the dense-peer session
 at those sizes, including resize, view navigation, and row selection. This is
-a real Phase 1 slice, not the gate: independently evidenced 802.11 roam/ESS and
+a real Phase 1 slice. A timed `wifi-hotspot-wifi` scene now drives the same
+receipt-bound public-synthetic inputs through real path generations and
+process-local history at 0s/2s/4s. Deterministic and native 1s/3s/5s captures
+exercise 160x30, minimum 60x10, and 100x24; the returned-context inference is
+visible when height permits, while the minimum frame retains diagnosis, path,
+coverage, and action. Independently evidenced 802.11 roam/ESS and
 unrelated-site variation, split-route detail, impairment combinations,
-saved-capture combinations, native capture of the new transition, and
-scenario-driven rendering across every subject remain open.
+saved-capture combinations, and scenario-driven rendering across every subject
+remain open.
 
 Reversibility: fixtures and ranking can evolve without changing machine schema
 meaning or collector policy.

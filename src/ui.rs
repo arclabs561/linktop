@@ -676,11 +676,34 @@ fn salient_context(app: &App) -> (String, String, bool) {
             EventKind::Session | EventKind::Path | EventKind::Probe => false,
         })
         .map(|event| (event.elapsed, event.message.clone()));
-    if let Some((elapsed, message)) = [path_change, event_change]
-        .into_iter()
-        .flatten()
-        .max_by_key(|(elapsed, _)| *elapsed)
-    {
+    if let Some((elapsed, message)) = event_change.as_ref().filter(|(event_elapsed, _)| {
+        path_change
+            .as_ref()
+            .is_none_or(|(path_elapsed, _)| event_elapsed >= path_elapsed)
+    }) {
+        let message = format!("change   +{} {message}", format_duration(*elapsed));
+        return (message.clone(), message, true);
+    }
+    if let Some((elapsed, message)) = path_change {
+        if let Some(history) = app.history_context.as_ref().filter(|history| {
+            matches!(
+                history.kind,
+                crate::model::HistoryContextKind::Recurring
+                    | crate::model::HistoryContextKind::Compatible
+                    | crate::model::HistoryContextKind::Changed
+                    | crate::model::HistoryContextKind::Returned
+            )
+        }) {
+            return (
+                format!("history  +{} {}", format_duration(elapsed), history.summary),
+                format!(
+                    "history  +{} {}",
+                    format_duration(elapsed),
+                    history.compact_summary
+                ),
+                true,
+            );
+        }
         let message = format!("change   +{} {message}", format_duration(elapsed));
         return (message.clone(), message, true);
     }
