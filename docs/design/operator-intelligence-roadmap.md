@@ -111,8 +111,11 @@ focused views, active-operation boundary, common typed projection, session
 peer dwell, current-path recurrence, saved-evidence review, and bounded
 screenshot transactions are implemented.
 
-Gate: passed. Canonical tests and lint are green; portable and native captures
-exercise wide, shallow, narrow, resize, navigation, and dense-peer cases.
+Gate: passed. Canonical tests and lint are green; deterministic UI and capture
+contract tests exercise wide, shallow, narrow, resize, navigation, and
+dense-peer cases. The native runner is implemented, but retained native
+artifacts are not treated as authenticated gate evidence without their
+completion manifests.
 
 Value: Linktop is useful immediately as a live instrument, a finite report, a
 bounded stream, or a deterministic QA subject.
