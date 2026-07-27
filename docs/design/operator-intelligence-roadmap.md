@@ -113,9 +113,11 @@ screenshot transactions are implemented.
 
 Gate: passed. Canonical tests and lint are green; deterministic UI and capture
 contract tests exercise wide, shallow, narrow, resize, navigation, and
-dense-peer cases. The native runner is implemented, but retained native
-artifacts are not treated as authenticated gate evidence without their
-completion manifests.
+dense-peer cases. The native runner is implemented, and an ignored private QA
+transaction has exercised minimum, medium, and wide PTY sizes, resize,
+navigation, and peer selection with a completion-last manifest whose artifact
+lengths and digests were independently verified. Retained captures without
+that manifest still are not authenticated gate evidence.
 
 Value: Linktop is useful immediately as a live instrument, a finite report, a
 bounded stream, or a deterministic QA subject.
@@ -151,6 +153,17 @@ native screenshots agree on the content contract; 60x10 remains the minimum
 supported evidence frame; no control or selected row falls outside the
 viewport; no view switch widens acquisition.
 
+Checkpoint (2026-07-27): Linktop pins one exact Netbraid 0.3 source revision
+and independently reduces the typed checkpoint inputs for the three initial
+public scenarios: Wi-Fi/hotspot recurrence, overlay exit without provider or
+intent attribution, and a stale cache-source gap that cannot become presence
+or departure. Authenticated deterministic and native captures exercise the
+same synthetic dense-peer session at 60x10, 100x24, and 160x30, including
+resize, view navigation, and row selection. This is a real Phase 1 slice, not
+the gate: same-SSID roam, split-route detail, impairment combinations,
+saved-capture combinations, and scenario-driven rendering across every subject
+remain open.
+
 Reversibility: fixtures and ranking can evolve without changing machine schema
 meaning or collector policy.
 
@@ -162,12 +175,14 @@ typed changes, source and coverage gaps, explicit active-operation receipts,
 artifact digests, and final human and machine summaries. Ordinary Linktop exit
 must not save packets or silently create a durable history.
 
-The grounded product design already selects an explicit Linktop recording
-transaction as the operator-owned container. Before code, write a Linktop ADR
-that fixes its format, no-clobber/atomic completion, interruption,
-sensitivity labels, packet-retention opt-in, sanitization receipts, and replay
-contract. Embed versioned Netbraid records when reusable; do not transfer
-transaction ownership to Netbraid.
+ADR-0012 now ratifies the explicit Linktop recording transaction as the
+operator-owned container. It fixes the inspectable directory format, OS-level
+no-replace completion, interruption boundary, mandatory replay-input stream,
+reducer provenance, sensitivity labels, packet-retention opt-in,
+sanitization receipts, and replay contract. Implementation remains blocked
+until Linktop can serialize every source observation needed to derive its
+terminal conclusions again. Versioned Netbraid records remain embedded when
+reusable; transaction ownership does not move to Netbraid.
 
 Consumer: the operator, a later shell session, or an agent reviewing a bounded
 incident.
@@ -274,14 +289,13 @@ changing evidence or diagnosis.
 
 ## Structural forks requiring a decision before code
 
-1. Incident-capsule container and its canonical completion, replay, and
-   sanitization receipt. Linktop owns the transaction; Netbraid may own
-   embedded reusable records.
-2. Purpose-profile compatibility if purpose becomes a machine-readable
+The incident-capsule fork is resolved by ADR-0012. Remaining forks are:
+
+1. Purpose-profile compatibility if purpose becomes a machine-readable
    contract rather than local presentation configuration.
-3. A new collector whose activation depends on the selected view. The default
+2. A new collector whose activation depends on the selected view. The default
    answer is no; a new activity boundary requires an ADR.
-4. Candidate or place presentation that needs private binding authority.
+3. Candidate or place presentation that needs private binding authority.
    Linktop may project cited facts but must not acquire that authority.
 
 ## Deferred, not promised

@@ -1311,17 +1311,18 @@ dependencies = [
 
 [[package]]
 name = "netbraid-evidence"
-version = "0.2.0"
-source = "git+https://github.com/arclabs561/netbraid.git?rev=3e63eb27d1903b2440487a0c6de5b400a9cbde54#3e63eb27d1903b2440487a0c6de5b400a9cbde54"
+version = "0.3.0"
+source = "git+https://github.com/arclabs561/netbraid.git?rev=8f5f83bcdf7ec1f7ba282a741ab0a9ffe628c304#8f5f83bcdf7ec1f7ba282a741ab0a9ffe628c304"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "netbraid-replay"
-version = "0.2.0"
-source = "git+https://github.com/arclabs561/netbraid.git?rev=3e63eb27d1903b2440487a0c6de5b400a9cbde54#3e63eb27d1903b2440487a0c6de5b400a9cbde54"
+version = "0.3.0"
+source = "git+https://github.com/arclabs561/netbraid.git?rev=8f5f83bcdf7ec1f7ba282a741ab0a9ffe628c304#8f5f83bcdf7ec1f7ba282a741ab0a9ffe628c304"
 dependencies = [
+ "libc",
  "netbraid-evidence",
  "serde",
  "serde_json",
