@@ -150,3 +150,16 @@ help advertises only its observation interval; snapshot, probe, and speed help
 no longer offers live options that runtime would reject or ignore. This changes
 neither acquisition policy nor the existing before-or-after-subcommand
 compatibility path.
+
+## Update (2026-07-26): add an explicit structured live lifetime
+
+The structured-live-consumer review trigger fired in ADR-0010. Live overview,
+link, and peers subjects now accept explicit `--jsonl` and emit the distinct
+`linktop.live_observation.v1` checkpoint contract. This does not overload
+finite `--json`, infer an active policy, or make redirected output unbounded
+without an explicit live option.
+
+A bounded JSONL dwell has one terminal summary. An unbounded stream has no
+fabricated terminal record. The live schema and claim-specific progress rules
+are governed by ADR-0010; the finite observation and speed contracts above
+remain unchanged.

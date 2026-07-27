@@ -52,8 +52,8 @@ change, diagnosis, or acquisition gap merely because they are easy to collect.
 
 - Is this connection ready for an interactive shell, video call, deployment,
   game, or transfer?
-- Is that answer supported by enough fresh evidence, or is the baseline still
-  warming?
+- Which claims are already available, which are still collecting or
+  insufficient, and what exact support or limitation closes the gap?
 - Am I using the expected interface, network, gateway, resolver, VPN, address
   families, and public egress?
 
@@ -165,6 +165,12 @@ The model should expose a small set of durable product objects:
 
 Those objects should project into the TUI, concise text, JSON/JSONL, saved
 captures, and replay without acquiring different semantics in each renderer.
+The current live Linktop projection implements the claim-level subset:
+observed or derived basis; collecting, available, insufficient, stale,
+unavailable, unsupported, or not-collected state; typed sample, generation, or
+assessment scope; exact applicable counts; and typed limitations. Candidate
+and verified objects remain future intelligence layers, not unused live-schema
+vocabulary.
 
 ## Terminal interaction precedents
 
@@ -218,14 +224,22 @@ generic “jitter” value is not sufficient. Linktop names its current variatio
 measure mean absolute adjacent RTT difference, `mean |ΔRTT|`; it does not claim
 one-way IPDV.
 
+Process uptime is not evidence support. Route context and cumulative counters
+can be useful after one observation, an interface rate needs two compatible
+counter reads, and each active probe becomes usable on its first completion.
+The next-hop assessment uses the latest twenty attempts; distribution requires
+five attempts, while adjacent variation additionally requires two successful
+RTT observations. A longer sparkline is labelled display history rather than
+used as a second verdict window.
+
 ## Intelligence horizons
 
 ### Now: useful with no new privilege or daemon
 
 - Default to passive default-route, radio, counter, and neighbor-cache
   observation; require `probe`, `--active`, or `a` for transmitted path probes.
-- Separate path health, evidence coverage, path transition, and baseline
-  warm-up.
+- Separate path health, evidence coverage, path transition, and each claim's
+  evidence maturity.
 - Rank failures in path dependency order and keep supporting enrichment out of
   the path verdict.
 - Show evidence age and ignore stale results from earlier path generations.

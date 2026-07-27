@@ -4,9 +4,10 @@ use std::time::Duration;
 use chrono::{Local, SecondsFormat};
 
 use crate::model::{
-    App, DwellCollectorScope, DwellPathIdentity, EvidenceCoverage, LinkSnapshot,
-    MAX_COMPLETED_PATH_DWELLS, MonitorUpdate, PathDwell, Peer, PeerDwellSummary, PeerSnapshot,
-    ProbeKind, Situation,
+    App, DwellCollectorScope, DwellPathIdentity, EvidenceBasis, EvidenceClaim, EvidenceCoverage,
+    EvidenceLimitation, EvidenceProgress, EvidenceProgressState, EvidenceScope, LinkSnapshot,
+    MAX_COMPLETED_PATH_DWELLS, MonitorMode, MonitorUpdate, PathDwell, Peer, PeerDwellSummary,
+    PeerSnapshot, ProbeKind, Situation,
 };
 
 #[derive(Debug, Clone)]
@@ -15,20 +16,38 @@ pub struct PlainState {
     peers: PeerSnapshot,
     situation: Situation,
     evidence_coverage: EvidenceCoverage,
+    progress: Vec<EvidenceProgress>,
 }
 
 impl From<&App> for PlainState {
     fn from(app: &App) -> Self {
+        Self::for_mode(app, MonitorMode::Overview)
+    }
+}
+
+impl PlainState {
+    pub fn for_mode(app: &App, mode: MonitorMode) -> Self {
         Self {
             link: app.link.clone(),
             peers: app.peers.clone(),
             situation: app.situation(),
-            evidence_coverage: app.evidence_coverage(),
+            evidence_coverage: app.projection(mode).assessment.evidence_coverage,
+            progress: app.evidence_progress(mode),
         }
     }
 }
 
+#[cfg(test)]
 pub fn format_update(update: &MonitorUpdate, before: &PlainState, app: &App) -> Vec<String> {
+    format_update_for_mode(update, before, app, MonitorMode::Overview)
+}
+
+pub fn format_update_for_mode(
+    update: &MonitorUpdate,
+    before: &PlainState,
+    app: &App,
+    mode: MonitorMode,
+) -> Vec<String> {
     let elapsed = format_elapsed(app.uptime());
     let mut lines = match update {
         MonitorUpdate::Link { snapshot: link, .. } if path_changed(&before.link, link) => {
@@ -71,25 +90,43 @@ pub fn format_update(update: &MonitorUpdate, before: &PlainState, app: &App) -> 
             }
             lines
         }
-        MonitorUpdate::Peers { snapshot: peers, .. }
-            if before.peers.peers != peers.peers
-                || before.peers.health != peers.health
-                || before.peers.failed_sources != peers.failed_sources =>
+        MonitorUpdate::Peers {
+            snapshot: peers, ..
+        } if before.peers.peers != peers.peers
+            || before.peers.health != peers.health
+            || before.peers.failed_sources != peers.failed_sources =>
         {
             peer_change_lines(
                 &elapsed,
                 &before.peers,
                 peers,
                 app.link.observation_gateway(),
+                mode,
             )
         }
         MonitorUpdate::Traffic {
             counters: Some(counters),
             ..
-        } => app
-            .interface_rate
-            .as_ref()
-            .map(|rate| {
+        } => {
+            let rate_progress = app.progress_for(mode, EvidenceClaim::InterfaceRate);
+            app.interface_rate.as_ref().map_or_else(
+                || {
+                    vec![format!(
+                        "+{elapsed} traffic  interface={} totals=rx:{} tx:{} packets=rx:{} tx:{} errors={} drops={} · rate {} n={}/{} valid={} [source: kernel interface counters]",
+                        counters.interface,
+                        human_bytes(counters.received_bytes),
+                        human_bytes(counters.transmitted_bytes),
+                        counters.received_packets,
+                        counters.transmitted_packets,
+                        counters.receive_errors.saturating_add(counters.transmit_errors),
+                        counters.drops,
+                        rate_progress.state.label(),
+                        rate_progress.observations.unwrap_or_default(),
+                        rate_progress.required_observations.unwrap_or_default(),
+                        rate_progress.valid_intervals.unwrap_or_default()
+                    )]
+                },
+                |rate| {
                 vec![format!(
                     "+{elapsed} traffic  interface={} rx={} tx={} packets={:.0}/{:.0}s errors=+{} drops=+{} [source: kernel interface counters]",
                     counters.interface,
@@ -100,8 +137,9 @@ pub fn format_update(update: &MonitorUpdate, before: &PlainState, app: &App) -> 
                     rate.error_delta,
                     rate.drop_delta
                 )]
-            })
-            .unwrap_or_default(),
+            },
+            )
+        }
         MonitorUpdate::Workload { snapshot, .. } => {
             if snapshot.processes.is_empty() {
                 vec![format!(
@@ -143,20 +181,46 @@ pub fn format_update(update: &MonitorUpdate, before: &PlainState, app: &App) -> 
                 .latency_ms
                 .map(|value| format!("rtt={value:.1}ms "))
                 .unwrap_or_default();
-            if *kind == ProbeKind::Gateway
-                && let Some(metrics) = &app.gateway_metrics
-            {
-                measurements = format!(
-                    "rtt={} p50={} p95={} mean|ΔRTT|={} loss={} ",
-                    human_ms(result.latency_ms),
-                    human_ms(metrics.rtt_p50_ms),
-                    human_ms(metrics.rtt_p95_ms),
-                    human_ms(metrics.mean_abs_adjacent_rtt_delta_ms),
-                    metrics
-                        .loss_rate
-                        .map(|value| format!("{:.0}%", value * 100.0))
-                        .unwrap_or_else(|| "?".into())
-                );
+            if *kind == ProbeKind::Gateway {
+                let variation =
+                    app.progress_for(MonitorMode::Overview, EvidenceClaim::GatewayVariation);
+                let attempts = variation.observations.unwrap_or_default();
+                let required = variation.required_observations.unwrap_or_default();
+                let successful = variation.successful_observations.unwrap_or_default();
+                measurements = if variation.state == EvidenceProgressState::Available {
+                    let metrics = app
+                        .gateway_assessment_metrics()
+                        .expect("available gateway variation has assessment metrics");
+                    format!(
+                        "rtt={} assessment=latest-{} p50={} p95={} mean|ΔRTT|={} loss={} ",
+                        human_ms(result.latency_ms),
+                        metrics.sent,
+                        human_ms(metrics.rtt_p50_ms),
+                        human_ms(metrics.rtt_p95_ms),
+                        human_ms(metrics.mean_abs_adjacent_rtt_delta_ms),
+                        metrics
+                            .loss_rate
+                            .map(|value| format!("{:.0}%", value * 100.0))
+                            .unwrap_or_else(|| "?".into())
+                    )
+                } else if let Some(metrics) = app.gateway_assessment_metrics() {
+                    format!(
+                        "rtt={} assessment=latest-{} loss={} variation={} n={attempts}/{required} successful={successful} ",
+                        human_ms(result.latency_ms),
+                        metrics.sent,
+                        metrics
+                            .loss_rate
+                            .map(|value| format!("{:.0}%", value * 100.0))
+                            .unwrap_or_else(|| "?".into()),
+                        variation.state.label(),
+                    )
+                } else {
+                    format!(
+                        "rtt={} distribution={} n={attempts}/{required} successful={successful} ",
+                        human_ms(result.latency_ms),
+                        variation.state.label()
+                    )
+                };
             }
             vec![format!(
                 "+{elapsed} {:<8} {:<13} {measurements}{}",
@@ -176,7 +240,7 @@ pub fn format_update(update: &MonitorUpdate, before: &PlainState, app: &App) -> 
         | MonitorUpdate::ProbeStarted { .. } => Vec::new(),
     };
     let situation = app.situation();
-    let evidence_coverage = app.evidence_coverage();
+    let evidence_coverage = app.projection(mode).assessment.evidence_coverage;
     if before.situation != situation || before.evidence_coverage != evidence_coverage {
         let diagnosis = crate::ui::overview_diagnosis(app);
         lines.push(format!(
@@ -186,7 +250,176 @@ pub fn format_update(update: &MonitorUpdate, before: &PlainState, app: &App) -> 
             diagnosis.summary
         ));
     }
+    let progress = app.evidence_progress(mode);
+    for (before, after) in before.progress.iter().zip(&progress) {
+        if progress_materially_changed(before, after) {
+            lines.push(format!(
+                "+{elapsed} progress  {}",
+                format_progress_claim(after)
+            ));
+        }
+    }
     lines
+}
+
+pub fn format_progress_snapshot(app: &App, mode: MonitorMode) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut groups: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for progress in app.evidence_progress(mode) {
+        groups
+            .entry(progress.state.label())
+            .or_default()
+            .push(progress.claim.label());
+    }
+    if let Some(collecting) = groups.remove(EvidenceProgressState::Collecting.label()) {
+        lines.push(format!("plan      collecting: {}", collecting.join(", ")));
+    }
+    if let Some(not_collected) = groups.remove(EvidenceProgressState::NotCollected.label()) {
+        lines.push(format!(
+            "policy    not collected: {} [collector scope or passive policy]",
+            not_collected.join(", ")
+        ));
+    }
+    for (state, claims) in groups {
+        lines.push(format!("plan      {state}: {}", claims.join(", ")));
+    }
+    lines
+}
+
+pub fn format_final_progress_summary(app: &App, mode: MonitorMode) -> Vec<String> {
+    let projection = app.final_projection(mode);
+    let mut lines = vec![
+        "EVIDENCE AT ACQUISITION END  unresolved claims are closed against this bounded window"
+            .into(),
+    ];
+    lines.extend(
+        projection
+            .progress
+            .iter()
+            .map(|progress| format!("progress  {}", format_progress_claim(progress))),
+    );
+    lines
+}
+
+fn progress_materially_changed(before: &EvidenceProgress, after: &EvidenceProgress) -> bool {
+    before.state != after.state || before.limitations != after.limitations
+}
+
+fn format_progress_claim(progress: &EvidenceProgress) -> String {
+    let mut support = Vec::new();
+    if let Some(observations) = progress.observations {
+        support.push(progress.required_observations.map_or_else(
+            || format!("n={observations}"),
+            |required| format!("n={observations}/{required}"),
+        ));
+    }
+    if let Some(successful) = progress.successful_observations {
+        support.push(format!("successful={successful}"));
+    }
+    if let Some(intervals) = progress.valid_intervals {
+        support.push(format!("valid_intervals={intervals}"));
+    }
+    if let Some(span) = progress.observed_span_ms {
+        support.push(format!(
+            "span={}",
+            compact_duration(Duration::from_millis(span))
+        ));
+    }
+    if let Some(age) = progress.source_age_ms {
+        support.push(format!(
+            "age={}",
+            compact_duration(Duration::from_millis(age))
+        ));
+    }
+    support.push(format!("basis={}", evidence_basis_label(progress.basis)));
+    support.push(format!("scope={}", evidence_scope_label(&progress.scope)));
+    if !progress.limitations.is_empty() {
+        support.push(format!(
+            "limits={}",
+            progress
+                .limitations
+                .iter()
+                .map(evidence_limitation_label)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    format!(
+        "{}={} [{}]",
+        progress.claim.label(),
+        progress.state.label(),
+        support.join(" · ")
+    )
+}
+
+fn evidence_limitation_label(limitation: &EvidenceLimitation) -> String {
+    match limitation {
+        EvidenceLimitation::RouteSettlingLastConfirmed => {
+            "default route settling; last confirmed path retained".into()
+        }
+        EvidenceLimitation::CumulativeCountersNoAttribution => {
+            "cumulative counters do not attribute process or peer traffic".into()
+        }
+        EvidenceLimitation::MinimumCompatibleCounterObservations { required } => {
+            format!("requires {required} compatible cumulative counter observations")
+        }
+        EvidenceLimitation::CounterResetsExcluded { count } => {
+            format!("{count} counter reset(s) excluded")
+        }
+        EvidenceLimitation::PlatformRadioTelemetryUnavailable => {
+            "platform exposed no radio telemetry".into()
+        }
+        EvidenceLimitation::NativeSourcesUnavailable { sources } => {
+            format!("native sources unavailable: {}", sources.join(", "))
+        }
+        EvidenceLimitation::CacheNotLivenessIdentityActivityOrTraffic => {
+            "cache evidence is not liveness, identity, activity, or traffic".into()
+        }
+        EvidenceLimitation::SampledHostAccountingNoEndpointProtocolPeerPersonOrIntent => {
+            "sampled host accounting does not attribute endpoint, protocol, peer, person, or intent"
+                .into()
+        }
+        EvidenceLimitation::OlderThanAssessmentFreshnessWindow => {
+            "observation older than assessment freshness window".into()
+        }
+        EvidenceLimitation::PublicEgressNotReachabilityDependency => {
+            "public egress identity is not a reachability dependency".into()
+        }
+        EvidenceLimitation::MinimumCurrentGenerationAttempts { required } => {
+            format!("requires {required} current-generation attempts")
+        }
+        EvidenceLimitation::MinimumSuccessfulRttObservations { required } => {
+            format!("requires {required} successful RTT observations")
+        }
+        EvidenceLimitation::BoundedAcquisitionEndedBeforeAvailability => {
+            "bounded acquisition ended before availability".into()
+        }
+    }
+}
+
+fn evidence_basis_label(basis: EvidenceBasis) -> &'static str {
+    match basis {
+        EvidenceBasis::Observed => "observed",
+        EvidenceBasis::Derived => "derived",
+    }
+}
+
+fn evidence_scope_label(scope: &EvidenceScope) -> String {
+    match scope {
+        EvidenceScope::CurrentSample {
+            generation,
+            subject,
+        } => format!("g{generation} current sample: {subject}"),
+        EvidenceScope::CurrentPathGeneration {
+            generation,
+            subject,
+        } => format!("g{generation} current path: {subject}"),
+        EvidenceScope::AssessmentWindow {
+            generation,
+            subject,
+            maximum_observations,
+        } => format!("g{generation} latest {maximum_observations} observations: {subject}"),
+    }
 }
 
 pub fn format_dwell_summary(app: &App, scope: DwellCollectorScope) -> Vec<String> {
@@ -457,6 +690,7 @@ fn peer_change_lines(
     before: &PeerSnapshot,
     after: &PeerSnapshot,
     gateway: Option<&str>,
+    mode: MonitorMode,
 ) -> Vec<String> {
     let sources = if after.sources.is_empty() {
         "source unavailable".into()
@@ -470,6 +704,9 @@ fn peer_change_lines(
     let old = peer_map(&before.peers);
     let new = peer_map(&after.peers);
     if before.health == crate::model::Health::Queued {
+        if mode != MonitorMode::Peers {
+            return lines;
+        }
         lines.extend(
             new.values()
                 .map(|peer| format!("+{elapsed} neighbor = {}", peer_label(peer, gateway))),
@@ -584,9 +821,76 @@ pub(crate) fn format_elapsed(duration: Duration) -> String {
 mod tests {
     use super::*;
     use crate::model::{
-        Address, Health, InterfaceDwell, InterfaceRate, LinkSnapshot, MonitorMode, PathUnderlay,
-        ProbePolicy, ProbeResult, ProcessTraffic, WifiDwell, WorkloadDwell, WorkloadSnapshot,
+        Address, Health, InterfaceCounters, InterfaceDwell, InterfaceRate, LinkSnapshot,
+        MonitorMode, PathUnderlay, ProbePolicy, ProbeResult, ProcessTraffic, WifiDwell,
+        WorkloadDwell, WorkloadSnapshot,
     };
+
+    #[test]
+    fn first_counter_sample_reports_totals_and_rate_support_separately() {
+        let mut app = App::new();
+        let before = PlainState::from(&app);
+        let update = MonitorUpdate::Traffic {
+            generation: 0,
+            counters: Some(InterfaceCounters {
+                interface: "en0".into(),
+                received_bytes: 1_000,
+                transmitted_bytes: 2_000,
+                received_packets: 10,
+                transmitted_packets: 20,
+                receive_errors: 1,
+                transmit_errors: 2,
+                drops: 3,
+            }),
+        };
+        app.apply(update.clone());
+        let rendered = format_update(&update, &before, &app).join("\n");
+
+        assert!(rendered.contains("totals=rx:1.0KB tx:2.0KB"));
+        assert!(rendered.contains("rate insufficient n=1/2 valid=0"));
+        assert!(rendered.contains("interface totals=available"));
+        assert!(rendered.contains("interface rate=insufficient"));
+    }
+
+    #[test]
+    fn settled_counter_progress_does_not_repeat_on_every_plain_sample() {
+        let mut app = App::new();
+        let counters = |received_bytes, transmitted_bytes| InterfaceCounters {
+            interface: "en0".into(),
+            received_bytes,
+            transmitted_bytes,
+            received_packets: received_bytes / 100,
+            transmitted_packets: transmitted_bytes / 100,
+            receive_errors: 0,
+            transmit_errors: 0,
+            drops: 0,
+        };
+        app.apply(MonitorUpdate::Traffic {
+            generation: 0,
+            counters: Some(counters(1_000, 2_000)),
+        });
+        std::thread::sleep(Duration::from_millis(1));
+        app.apply(MonitorUpdate::Traffic {
+            generation: 0,
+            counters: Some(counters(2_000, 4_000)),
+        });
+        assert_eq!(
+            app.progress_for(MonitorMode::Overview, EvidenceClaim::InterfaceRate)
+                .state,
+            EvidenceProgressState::Available
+        );
+
+        let before = PlainState::from(&app);
+        let update = MonitorUpdate::Traffic {
+            generation: 0,
+            counters: Some(counters(3_000, 6_000)),
+        };
+        std::thread::sleep(Duration::from_millis(1));
+        app.apply(update.clone());
+        let rendered = format_update(&update, &before, &app).join("\n");
+        assert!(rendered.contains("traffic"));
+        assert!(!rendered.contains("progress"));
+    }
 
     #[test]
     fn live_probe_line_is_append_only_plain_text() {
@@ -605,8 +909,29 @@ mod tests {
         app.apply(update.clone());
         let rendered = format_update(&update, &before, &app).join("\n");
         assert!(rendered.contains("next-hop RTT"));
-        assert!(rendered.contains("p50=3.0ms"));
+        assert!(rendered.contains("rtt=3.2ms"));
+        assert!(rendered.contains("distribution=insufficient n=1/5 successful=1"));
+        assert!(!rendered.contains("p50="));
         assert!(!rendered.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn initial_progress_is_a_compact_plan_not_a_schema_dump() {
+        let app = App::new();
+        let lines = format_progress_snapshot(&app, MonitorMode::Overview);
+        assert!(lines.len() <= 3, "{lines:#?}");
+        assert!(lines.iter().any(|line| line.starts_with("plan")));
+        assert!(lines.iter().any(|line| line.starts_with("policy")));
+        assert!(!lines.iter().any(|line| line.contains("basis=")));
+    }
+
+    #[test]
+    fn bounded_final_progress_closes_every_collecting_claim() {
+        let app = App::new();
+        let rendered = format_final_progress_summary(&app, MonitorMode::Overview).join("\n");
+        assert!(rendered.contains("EVIDENCE AT ACQUISITION END"));
+        assert!(!rendered.contains("=collecting"));
+        assert!(rendered.contains("bounded acquisition ended before availability"));
     }
 
     #[test]
@@ -646,6 +971,53 @@ mod tests {
         assert!(rendered.contains("rx=32.77 Kbit/s"));
         assert!(rendered.contains("window: 1s"));
         assert!(rendered.contains("source: nettop external-interface deltas"));
+    }
+
+    #[test]
+    fn overview_summarizes_initial_neighbor_inventory_while_peers_lists_it() {
+        let snapshot = PeerSnapshot {
+            health: Health::Ok,
+            detail: "3 cached peer(s); no liveness scan".into(),
+            path_filter: crate::model::PeerPathFilter::Applied,
+            sources: vec!["arp -an".into()],
+            failed_sources: Vec::new(),
+            oui_source: None,
+            peers: (1..=3)
+                .map(|last| Peer {
+                    address: format!("192.0.2.{last}"),
+                    mac: None,
+                    interface: Some("en0".into()),
+                    state: None,
+                    binding_conflict: false,
+                    mac_scope: None,
+                    registrant: None,
+                })
+                .collect(),
+        };
+        let update = MonitorUpdate::Peers {
+            generation: 0,
+            snapshot,
+        };
+
+        let mut overview_app = App::new();
+        let overview_before = PlainState::for_mode(&overview_app, MonitorMode::Overview);
+        overview_app.apply(update.clone());
+        let overview = format_update_for_mode(
+            &update,
+            &overview_before,
+            &overview_app,
+            MonitorMode::Overview,
+        )
+        .join("\n");
+        assert!(overview.contains("neighbors 3 cached peer(s)"));
+        assert!(!overview.contains("neighbor ="));
+
+        let mut peers_app = App::new();
+        let peers_before = PlainState::for_mode(&peers_app, MonitorMode::Peers);
+        peers_app.apply(update.clone());
+        let peers = format_update_for_mode(&update, &peers_before, &peers_app, MonitorMode::Peers)
+            .join("\n");
+        assert_eq!(peers.matches("neighbor =").count(), 3);
     }
 
     #[test]

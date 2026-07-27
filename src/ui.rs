@@ -6,7 +6,10 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::prelude::{Color, Frame, Line, Modifier, Span, Style};
 use ratatui::widgets::{Block, Borders, Paragraph, Sparkline, Wrap};
 
-use crate::model::{App, EventKind, Health, MonitorMode, Peer, PeerKey, ProbeKind, SituationKind};
+use crate::model::{
+    App, EventKind, EvidenceClaim, EvidenceProgressState, Health, MonitorMode, Peer, PeerKey,
+    ProbeKind, SituationKind,
+};
 
 const INK: Color = Color::Rgb(192, 202, 214);
 const MUTED: Color = Color::Rgb(95, 109, 126);
@@ -215,18 +218,7 @@ fn render_overview_evidence(frame: &mut Frame<'_>, area: Rect, app: &App) {
         lines.push(Line::from(vec![
             Span::styled("interface  ", Style::default().fg(MUTED)),
             Span::styled(
-                app.interface_rate.as_ref().map_or_else(
-                    || "rate baseline pending".into(),
-                    |rate| {
-                        format!(
-                            "rx {} · tx {} · errors +{} · drops +{}",
-                            crate::speed::human_rate(Some(rate.received_bits_per_second)),
-                            crate::speed::human_rate(Some(rate.transmitted_bits_per_second)),
-                            rate.error_delta,
-                            rate.drop_delta
-                        )
-                    },
-                ),
+                interface_progress_summary(app, MonitorMode::Overview),
                 Style::default().fg(INK),
             ),
         ]));
@@ -509,13 +501,12 @@ pub(crate) fn overview_diagnosis(app: &App) -> OverviewDiagnosis {
                 .map(|kind| kind.label())
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("collecting path evidence: {pending}")
+            if pending.is_empty() {
+                "collecting local route and link context".into()
+            } else {
+                format!("collecting path evidence: {pending}")
+            }
         }
-        SituationKind::WarmingBaseline => format!(
-            "warming next-hop RTT baseline {}/{}; core path checks settled",
-            app.gateway_attempts,
-            crate::model::MIN_GATEWAY_ASSESSMENT_SAMPLES
-        ),
         SituationKind::EvidenceGap if health == Health::Unavailable => {
             "path evidence is unavailable from this host".into()
         }
@@ -572,11 +563,20 @@ pub(crate) fn overview_diagnosis(app: &App) -> OverviewDiagnosis {
         "radio n/a"
     };
     let mut coverage = if app.probe_policy().is_active() {
-        format!(
+        let mut coverage = format!(
             "coverage {} · core {settled}/{} · {public_evidence} · {peer_evidence} · {radio_evidence}",
             app.evidence_coverage().label(),
             ProbeKind::PATH.len()
-        )
+        );
+        let variation = app.progress_for(MonitorMode::Overview, EvidenceClaim::GatewayVariation);
+        if variation.state == EvidenceProgressState::Insufficient {
+            coverage.push_str(&format!(
+                " · variation insufficient {}/{}",
+                variation.observations.unwrap_or_default(),
+                variation.required_observations.unwrap_or_default()
+            ));
+        }
+        coverage
     } else {
         format!(
             "passive coverage {} · route {} · {peer_evidence} · {radio_evidence} · probes off",
@@ -619,9 +619,7 @@ pub(crate) fn overview_diagnosis(app: &App) -> OverviewDiagnosis {
         SituationKind::GatewayLoss | SituationKind::GatewayVariation => {
             "next: [2] compare radio and traffic against the gateway episode"
         }
-        SituationKind::Collecting | SituationKind::WarmingBaseline => {
-            "next: allow the initial path evidence to settle"
-        }
+        SituationKind::Collecting => "next: allow the initial path evidence to settle",
         SituationKind::EvidenceGap if health == Health::Unavailable => {
             "next: [2] inspect which local path evidence is unavailable"
         }
@@ -1075,18 +1073,7 @@ fn render_latency(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 )
             },
         );
-        let traffic = app.interface_rate.as_ref().map_or_else(
-            || "rate baseline pending".into(),
-            |rate| {
-                format!(
-                    "rx {} / tx {} / errors +{} / drops +{}",
-                    crate::speed::human_rate(Some(rate.received_bits_per_second)),
-                    crate::speed::human_rate(Some(rate.transmitted_bits_per_second)),
-                    rate.error_delta,
-                    rate.drop_delta
-                )
-            },
-        );
+        let traffic = interface_progress_summary(app, MonitorMode::Overview);
         let resolvers = if app.link.resolvers.is_empty() {
             "unavailable".into()
         } else {
@@ -1138,32 +1125,46 @@ fn render_latency(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     }
     let samples: Vec<u64> = app.gateway_samples.iter().copied().collect();
-    let latest = samples.last().copied();
+    let latest_attempt = latest_gateway_attempt_label(app);
     let max = samples.iter().copied().max().unwrap_or(1).max(10);
-    let distribution = app.gateway_metrics.as_ref().map(|metrics| {
+    let variation = app.progress_for(MonitorMode::Overview, EvidenceClaim::GatewayVariation);
+    let attempts = variation.observations.unwrap_or_default();
+    let required = variation.required_observations.unwrap_or_default();
+    let successful = variation.successful_observations.unwrap_or_default();
+    let title = if variation.state == EvidenceProgressState::Available {
+        let metrics = app
+            .gateway_assessment_metrics()
+            .expect("available gateway variation has assessment metrics");
         format!(
-            "p50 {} / p95 {} / mean|ΔRTT| {} / loss {}",
+            " NEXT-HOP RTT / {latest_attempt} / recent n={} p50/p95={}/{} loss={} ",
+            metrics.sent,
             human_ms(metrics.rtt_p50_ms),
             human_ms(metrics.rtt_p95_ms),
-            human_ms(metrics.mean_abs_adjacent_rtt_delta_ms),
             metrics
                 .loss_rate
                 .map(|value| format!("{:.0}%", value * 100.0))
-                .unwrap_or_else(|| "?".into())
+                .unwrap_or_else(|| "?".into()),
         )
-    });
-    let title = match (latest, distribution) {
-        (Some(value), Some(distribution)) => format!(
-            " NEXT-HOP RTT / latest {value}ms / {distribution} / n {}/{} ",
-            app.gateway_attempts,
-            crate::model::MAX_GATEWAY_SAMPLES
-        ),
-        (Some(value), None) => format!(
-            " NEXT-HOP RTT / latest {value}ms / n {}/{} ",
-            app.gateway_attempts,
-            crate::model::MAX_GATEWAY_SAMPLES
-        ),
-        (None, _) => " NEXT-HOP RTT / waiting for probes ".into(),
+    } else if let Some(metrics) = app.gateway_assessment_metrics() {
+        format!(
+            " NEXT-HOP RTT / {latest_attempt} / n={} replies={successful} loss={} / variation {} ",
+            metrics.sent,
+            metrics
+                .loss_rate
+                .map(|value| format!("{:.0}%", value * 100.0))
+                .unwrap_or_else(|| "?".into()),
+            variation.state.label(),
+        )
+    } else if app.latest_gateway_outcome().is_some() {
+        format!(
+            " NEXT-HOP RTT / {latest_attempt} / variation {} n={attempts}/{required} replies={successful} ",
+            variation.state.label()
+        )
+    } else {
+        format!(
+            " NEXT-HOP RTT / waiting / distribution {} n {attempts}/{required} ",
+            variation.state.label()
+        )
     };
     frame.render_widget(
         Sparkline::default()
@@ -1287,8 +1288,8 @@ fn render_path_dwell(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if !has_path_dwell_evidence(app) {
         frame.render_widget(
             Paragraph::new(vec![dwell_line(
-                "coverage",
-                "no valid counter, radio, workload, or neighbor-cache dwell samples".into(),
+                "progress",
+                dwell_progress_summary(app),
                 value_width,
             )])
             .block(instrument_block(" SINCE PATH CHANGE ")),
@@ -1411,6 +1412,36 @@ fn has_path_dwell_evidence(app: &App) -> bool {
         || app.path_dwell.wifi.samples > 0
         || app.path_dwell.workload.sampled_windows > 0
         || peers.observed > 0
+}
+
+fn dwell_progress_summary(app: &App) -> String {
+    let claims = [
+        (EvidenceClaim::InterfaceTotals, "totals"),
+        (EvidenceClaim::InterfaceRate, "rate"),
+        (EvidenceClaim::RadioLink, "radio"),
+        (EvidenceClaim::WorkloadAttribution, "workload"),
+        (EvidenceClaim::NeighborCache, "cache"),
+    ];
+    [
+        EvidenceProgressState::Available,
+        EvidenceProgressState::Insufficient,
+        EvidenceProgressState::Collecting,
+        EvidenceProgressState::Stale,
+        EvidenceProgressState::Unavailable,
+        EvidenceProgressState::Unsupported,
+        EvidenceProgressState::NotCollected,
+    ]
+    .into_iter()
+    .filter_map(|state| {
+        let labels = claims
+            .iter()
+            .filter(|(claim, _)| app.progress_for(MonitorMode::Overview, *claim).state == state)
+            .map(|(_, label)| *label)
+            .collect::<Vec<_>>();
+        (!labels.is_empty()).then(|| format!("{}: {}", state.label(), labels.join(", ")))
+    })
+    .collect::<Vec<_>>()
+    .join(" · ")
 }
 
 fn render_active_path_dwell(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -2846,6 +2877,31 @@ fn compact_rate(bits_per_second: f64) -> String {
     }
 }
 
+fn interface_progress_summary(app: &App, mode: MonitorMode) -> String {
+    if let Some(rate) = &app.interface_rate {
+        return format!(
+            "rate available · rx {} · tx {} · errors +{} · drops +{}",
+            crate::speed::human_rate(Some(rate.received_bits_per_second)),
+            crate::speed::human_rate(Some(rate.transmitted_bits_per_second)),
+            rate.error_delta,
+            rate.drop_delta
+        );
+    }
+    let totals = app.progress_for(mode, EvidenceClaim::InterfaceTotals);
+    let rate = app.progress_for(mode, EvidenceClaim::InterfaceRate);
+    let support = rate.observations.map_or_else(String::new, |observations| {
+        rate.required_observations.map_or_else(
+            || format!(" n={observations}"),
+            |required| format!(" n={observations}/{required}"),
+        )
+    });
+    format!(
+        "totals {} · rate {}{support}",
+        totals.state.label(),
+        rate.state.label()
+    )
+}
+
 fn compact_diagnosis_summary(app: &App, diagnosis: &OverviewDiagnosis, width: u16) -> String {
     let summary = if width >= 90 {
         diagnosis.summary.clone()
@@ -2887,11 +2943,6 @@ fn compact_diagnosis_summary(app: &App, diagnosis: &OverviewDiagnosis, width: u1
                 format!("HTTPS slow: {} / limit 1000ms", human_ms(probe.latency_ms))
             }
             SituationKind::StalePathEvidence => "core path evidence stale; r refreshes".into(),
-            SituationKind::WarmingBaseline => format!(
-                "warming next-hop {}/{}; core passed",
-                app.gateway_attempts,
-                crate::model::MIN_GATEWAY_ASSESSMENT_SAMPLES
-            ),
             SituationKind::Ready => "core path checks passed".into(),
             SituationKind::EvidenceGap if diagnosis.health == Health::Ok => {
                 "path works; supporting evidence partial".into()
@@ -2986,7 +3037,17 @@ fn compact_coverage_line(app: &App, width: u16) -> Line<'static> {
             .map(|kind| app.probe_view(*kind))
             .filter(|probe| !matches!(probe.health, Health::Queued | Health::Running))
             .count();
-        format!("core {settled}/{}", ProbeKind::PATH.len())
+        let variation = app.progress_for(MonitorMode::Overview, EvidenceClaim::GatewayVariation);
+        if variation.state == EvidenceProgressState::Insufficient {
+            format!(
+                "core {settled}/{} · variation {}/{} insufficient",
+                ProbeKind::PATH.len(),
+                variation.observations.unwrap_or_default(),
+                variation.required_observations.unwrap_or_default()
+            )
+        } else {
+            format!("core {settled}/{}", ProbeKind::PATH.len())
+        }
     } else {
         "probes off".into()
     };
@@ -2997,10 +3058,27 @@ fn compact_coverage_line(app: &App, width: u16) -> Line<'static> {
             "history"
         }
     });
-    let mut summary = format!(
-        "coverage {} · {cache} · {probes}",
-        app.evidence_coverage().label()
-    );
+    let rate = app.progress_for(MonitorMode::Overview, EvidenceClaim::InterfaceRate);
+    let rate = if rate.state == EvidenceProgressState::Insufficient {
+        format!(
+            "rate {}/{} insufficient",
+            rate.observations.unwrap_or_default(),
+            rate.required_observations.unwrap_or_default()
+        )
+    } else {
+        format!("rate {}", rate.state.label())
+    };
+    let mut summary = if app.probe_policy().is_active() {
+        format!(
+            "coverage {} · {probes} · {rate} · {cache}",
+            app.evidence_coverage().label()
+        )
+    } else {
+        format!(
+            "coverage {} · {rate} · {cache} · {probes}",
+            app.evidence_coverage().label()
+        )
+    };
     if let Some(history) = history {
         summary.push_str(&format!(" · {history}"));
     }
@@ -3024,7 +3102,14 @@ fn gateway_summary_line(app: &App, width: u16) -> Line<'_> {
             ),
         ]);
     }
-    if let Some(metrics) = &app.gateway_metrics {
+    let variation = app.progress_for(MonitorMode::Overview, EvidenceClaim::GatewayVariation);
+    let attempts = variation.observations.unwrap_or_default();
+    let required = variation.required_observations.unwrap_or_default();
+    let successful = variation.successful_observations.unwrap_or_default();
+    if variation.state == EvidenceProgressState::Available {
+        let metrics = app
+            .gateway_assessment_metrics()
+            .expect("available gateway variation has assessment metrics");
         if width < 70 {
             return Line::from(vec![
                 Span::styled("next hop  ", Style::default().fg(MUTED)),
@@ -3062,11 +3147,37 @@ fn gateway_summary_line(app: &App, width: u16) -> Line<'_> {
                 Style::default().fg(INK),
             ),
         ])
+    } else if app.latest_gateway_outcome().is_some() {
+        Line::from(vec![
+            Span::styled("next hop  ", Style::default().fg(MUTED)),
+            Span::styled(
+                format!(
+                    "{}  distribution {} n={attempts}/{required} successful={successful}",
+                    latest_gateway_attempt_label(app),
+                    variation.state.label()
+                ),
+                Style::default().fg(INK),
+            ),
+        ])
     } else {
         Line::from(vec![
             Span::styled("next hop  ", Style::default().fg(MUTED)),
-            Span::styled("waiting for latency samples", Style::default().fg(INK)),
+            Span::styled(
+                format!(
+                    "waiting for RTT · distribution {} n={attempts}/{required}",
+                    variation.state.label()
+                ),
+                Style::default().fg(INK),
+            ),
         ])
+    }
+}
+
+fn latest_gateway_attempt_label(app: &App) -> String {
+    match app.latest_gateway_outcome() {
+        Some(Some(latency_ms)) => format!("latest reply {latency_ms}ms"),
+        Some(None) => "latest attempt no reply".into(),
+        None => "waiting for RTT".into(),
     }
 }
 
@@ -3325,7 +3436,8 @@ mod tests {
         assert!(rendered.contains("EVIDENCE LEDGER"));
         assert!(rendered.contains("SESSION EVENTS"));
         assert!(!rendered.contains("ACTIVE PROBES / OFF"));
-        assert!(rendered.contains("reachability is not tested"));
+        assert!(rendered.contains("collecting local route and link context"));
+        assert!(!rendered.contains("default route an unknown interface"));
     }
 
     #[test]
@@ -3401,7 +3513,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_passive_overview_collapses_empty_dwell_evidence() {
+    fn wide_passive_overview_labels_each_empty_evidence_horizon() {
         let app = App::new();
         let backend = TestBackend::new(160, 30);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -3411,7 +3523,7 @@ mod tests {
         let rendered = buffer_text(terminal.backend());
 
         assert!(rendered.contains("SINCE PATH CHANGE"));
-        assert!(rendered.contains("no valid counter, radio, workload"));
+        assert!(rendered.contains("collecting: totals, rate, radio, workload, cache"));
         assert!(!rendered.contains("latest rate"));
         assert!(rendered.contains("SESSION EVENTS"));
     }
@@ -3869,6 +3981,100 @@ mod tests {
     }
 
     #[test]
+    fn compact_overview_exposes_first_counter_fact_before_rate_is_available() {
+        let mut app = App::new();
+        app.link.interface = Some("en0".into());
+        app.link.link_type = Some("ethernet".into());
+        app.link.gateway = Some("192.0.2.1".into());
+        app.apply(MonitorUpdate::Traffic {
+            generation: 0,
+            counters: Some(InterfaceCounters {
+                interface: "en0".into(),
+                received_bytes: 1_000,
+                transmitted_bytes: 2_000,
+                received_packets: 10,
+                transmitted_packets: 20,
+                receive_errors: 0,
+                transmit_errors: 0,
+                drops: 0,
+            }),
+        });
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+
+        assert!(rendered.contains("rate 1/2 insufficient"), "{rendered}");
+        assert!(rendered.contains("default route observed"), "{rendered}");
+        assert!(rendered.contains("next: [a]"), "{rendered}");
+    }
+
+    #[test]
+    fn normal_overview_labels_totals_available_while_rate_is_insufficient() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Traffic {
+            generation: 0,
+            counters: Some(InterfaceCounters {
+                interface: "en0".into(),
+                received_bytes: 1_000,
+                transmitted_bytes: 2_000,
+                received_packets: 10,
+                transmitted_packets: 20,
+                receive_errors: 0,
+                transmit_errors: 0,
+                drops: 0,
+            }),
+        });
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+
+        assert!(
+            rendered.contains("totals available · rate insufficient n=1/2"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn compact_active_overview_keeps_path_answer_and_variation_support() {
+        let mut app = App::with_probe_policy(ProbePolicy::Active);
+        for (kind, latency) in [
+            (ProbeKind::Gateway, 4.0),
+            (ProbeKind::Dns, 12.0),
+            (ProbeKind::Https, 80.0),
+        ] {
+            app.apply(MonitorUpdate::ProbeFinished {
+                generation: 0,
+                kind,
+                result: ProbeResult {
+                    health: Health::Ok,
+                    detail: "responded".into(),
+                    latency_ms: Some(latency),
+                    metrics: None,
+                },
+            });
+        }
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+
+        assert!(rendered.contains("path works"), "{rendered}");
+        assert!(
+            rendered.contains("variation 1/5 insufficient"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("next:"), "{rendered}");
+    }
+
+    #[test]
     fn wide_passive_overview_tells_the_path_scoped_dwell_story() {
         let app = dwell_overview_fixture();
         let backend = TestBackend::new(160, 30);
@@ -3925,7 +4131,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_workload_dwell_is_presented_as_a_coverage_gap() {
+    fn empty_workload_dwell_is_presented_as_claim_specific_progress() {
         let app = App::new();
         let backend = TestBackend::new(160, 30);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -3934,7 +4140,7 @@ mod tests {
             .unwrap();
         let rendered = buffer_text(terminal.backend());
 
-        assert!(rendered.contains("no valid counter, radio, workload"));
+        assert!(rendered.contains("collecting: totals, rate, radio, workload, cache"));
         assert!(!rendered.contains("latest=peak none"));
     }
 
@@ -3969,6 +4175,42 @@ mod tests {
         assert!(rendered.contains("interface"), "{rendered}");
         assert!(rendered.contains("workload"), "{rendered}");
         assert!(rendered.contains("neighbors"), "{rendered}");
+    }
+
+    #[test]
+    fn gateway_view_labels_the_latest_attempt_not_the_latest_success() {
+        let mut app = dwell_overview_fixture();
+        app.set_probe_policy(ProbePolicy::Active);
+        app.apply(MonitorUpdate::ProbeFinished {
+            generation: 1,
+            kind: ProbeKind::Gateway,
+            result: ProbeResult {
+                health: Health::Ok,
+                detail: "gateway replied".into(),
+                latency_ms: Some(4.0),
+                metrics: None,
+            },
+        });
+        app.apply(MonitorUpdate::ProbeFinished {
+            generation: 1,
+            kind: ProbeKind::Gateway,
+            result: ProbeResult {
+                health: Health::Failed,
+                detail: "no reply".into(),
+                latency_ms: None,
+                metrics: None,
+            },
+        });
+
+        let backend = TestBackend::new(160, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+
+        assert!(rendered.contains("latest attempt no reply"), "{rendered}");
+        assert!(!rendered.contains("latest reply 4ms"), "{rendered}");
     }
 
     #[test]

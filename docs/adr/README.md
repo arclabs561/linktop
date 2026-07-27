@@ -16,3 +16,4 @@ network addresses, SSIDs, and other private observations out of these records.
 | [0007](0007-prioritize-change-context-and-consequential-workload.md) | Prioritize change, context, and consequential workload | Accepted |
 | [0008](0008-consume-versioned-netmon-evidence-without-cli-coupling.md) | Consume versioned Netmon evidence without CLI coupling | Accepted |
 | [0009](0009-separate-effective-route-from-physical-underlay.md) | Separate effective route from physical underlay | Accepted |
+| [0010](0010-project-live-evidence-once-across-human-and-machine-outputs.md) | Project live evidence once across human and machine outputs | Accepted |

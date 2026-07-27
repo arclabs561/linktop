@@ -1235,10 +1235,10 @@ fn parse_macos_hardware_interfaces(output: &str) -> BTreeMap<String, String> {
             } else {
                 label
             });
-        } else if let Some(value) = line.strip_prefix("Device:") {
-            if let Some(link_type) = hardware_port.take() {
-                hardware.insert(value.trim().to_string(), link_type);
-            }
+        } else if let Some(value) = line.strip_prefix("Device:")
+            && let Some(link_type) = hardware_port.take()
+        {
+            hardware.insert(value.trim().to_string(), link_type);
         }
     }
     hardware

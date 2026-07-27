@@ -150,7 +150,7 @@ pub struct InterfaceCounters {
     pub drops: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct InterfaceRate {
     pub received_bits_per_second: f64,
     pub transmitted_bits_per_second: f64,
@@ -286,7 +286,7 @@ pub struct NetworkConfiguration {
     pub security: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProcessTraffic {
     pub process: String,
     pub processes: usize,
@@ -426,7 +426,7 @@ pub struct PathChange {
     pub current: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HistoryContext {
     pub kind: HistoryContextKind,
     pub summary: String,
@@ -436,7 +436,8 @@ pub struct HistoryContext {
     pub evidence: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HistoryContextKind {
     Configured,
     Loaded,
@@ -759,7 +760,7 @@ pub struct PeerDwell {
     pub latest: Peer,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PeerDwellSummary {
     pub current: usize,
     pub observed: usize,
@@ -806,7 +807,7 @@ pub enum PeerPathFilter {
     Unavailable,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PeerSnapshot {
     pub health: Health,
     pub detail: String,
@@ -911,7 +912,8 @@ pub enum EventKind {
     Notice,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SituationKind {
     Paused,
     PathTransition,
@@ -927,12 +929,11 @@ pub enum SituationKind {
     SlowHttps,
     StalePathEvidence,
     Collecting,
-    WarmingBaseline,
     EvidenceGap,
     Ready,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Situation {
     pub health: Health,
     pub kind: SituationKind,
@@ -976,7 +977,8 @@ pub enum MonitorUpdate {
     Notice(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MonitorMode {
     Overview,
     Link,
@@ -1022,6 +1024,233 @@ impl MonitorMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum EvidenceProgressState {
+    Collecting,
+    Available,
+    Insufficient,
+    Stale,
+    Unavailable,
+    Unsupported,
+    NotCollected,
+}
+
+impl EvidenceProgressState {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Collecting => "collecting",
+            Self::Available => "available",
+            Self::Insufficient => "insufficient",
+            Self::Stale => "stale",
+            Self::Unavailable => "unavailable",
+            Self::Unsupported => "unsupported",
+            Self::NotCollected => "not collected",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceBasis {
+    Observed,
+    Derived,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EvidenceScope {
+    CurrentSample {
+        generation: u64,
+        subject: String,
+    },
+    CurrentPathGeneration {
+        generation: u64,
+        subject: String,
+    },
+    AssessmentWindow {
+        generation: u64,
+        subject: String,
+        maximum_observations: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceClaim {
+    PathContext,
+    InterfaceTotals,
+    InterfaceRate,
+    RadioLink,
+    NeighborCache,
+    WorkloadAttribution,
+    GatewayRtt,
+    GatewayVariation,
+    DnsReachability,
+    HttpsReachability,
+    PublicEgress,
+}
+
+impl EvidenceClaim {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::PathContext => "path context",
+            Self::InterfaceTotals => "interface totals",
+            Self::InterfaceRate => "interface rate",
+            Self::RadioLink => "radio link",
+            Self::NeighborCache => "neighbor cache",
+            Self::WorkloadAttribution => "workload attribution",
+            Self::GatewayRtt => "next-hop RTT",
+            Self::GatewayVariation => "next-hop variation",
+            Self::DnsReachability => "DNS reachability",
+            Self::HttpsReachability => "HTTPS reachability",
+            Self::PublicEgress => "public egress",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EvidenceProgress {
+    pub claim: EvidenceClaim,
+    pub state: EvidenceProgressState,
+    pub basis: EvidenceBasis,
+    pub scope: EvidenceScope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observations: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub successful_observations: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_observations: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_intervals: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_span_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_age_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub limitations: Vec<EvidenceLimitation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum EvidenceLimitation {
+    RouteSettlingLastConfirmed,
+    CumulativeCountersNoAttribution,
+    MinimumCompatibleCounterObservations { required: u64 },
+    CounterResetsExcluded { count: u64 },
+    PlatformRadioTelemetryUnavailable,
+    NativeSourcesUnavailable { sources: Vec<String> },
+    CacheNotLivenessIdentityActivityOrTraffic,
+    SampledHostAccountingNoEndpointProtocolPeerPersonOrIntent,
+    OlderThanAssessmentFreshnessWindow,
+    PublicEgressNotReachabilityDependency,
+    MinimumCurrentGenerationAttempts { required: u64 },
+    MinimumSuccessfulRttObservations { required: u64 },
+    BoundedAcquisitionEndedBeforeAvailability,
+}
+
+impl EvidenceProgress {
+    fn new(
+        claim: EvidenceClaim,
+        state: EvidenceProgressState,
+        basis: EvidenceBasis,
+        scope: EvidenceScope,
+    ) -> Self {
+        Self {
+            claim,
+            state,
+            basis,
+            scope,
+            observations: None,
+            successful_observations: None,
+            required_observations: None,
+            valid_intervals: None,
+            observed_span_ms: None,
+            source_age_ms: None,
+            limitations: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveAssessment {
+    pub situation: Situation,
+    pub path_status: PathStatus,
+    pub evidence_coverage: EvidenceCoverage,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveProbeEvidence {
+    pub kind: ProbeKind,
+    pub health: Health,
+    pub detail: String,
+    pub latency_ms: Option<f64>,
+    pub metrics: Option<LatencyMetrics>,
+    pub age_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LiveGatewayAssessmentEvidence {
+    pub attempts: u64,
+    pub successful_attempts: u64,
+    pub required_attempts: u64,
+    pub maximum_attempts: u64,
+    pub metrics: Option<LatencyMetrics>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveWorkloadEvidence {
+    pub health: Health,
+    pub detail: String,
+    pub source: Option<String>,
+    pub interval_ms: u64,
+    pub processes: Vec<ProcessTraffic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LivePathDwellEvidence {
+    pub observed_span_ms: u64,
+    pub interface_samples: u64,
+    pub interface_valid_intervals: u64,
+    pub wifi_samples: u64,
+    pub workload_windows: u64,
+    pub workload_observed_ms: u64,
+    pub neighbors: PeerDwellSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LivePathChangeEvidence {
+    pub observed_at_ms: u64,
+    pub dimensions: Vec<&'static str>,
+    pub previous: String,
+    pub current: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveEvidence {
+    pub path: LinkSnapshot,
+    pub interface_counters: Option<InterfaceCounters>,
+    pub interface_rate: Option<InterfaceRate>,
+    pub probes: Vec<LiveProbeEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway_assessment: Option<LiveGatewayAssessmentEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub neighbors: Option<PeerSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload: Option<LiveWorkloadEvidence>,
+    pub dwell: LivePathDwellEvidence,
+    pub last_path_change: Option<LivePathChangeEvidence>,
+    pub history_context: Option<HistoryContext>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AppProjection {
+    pub generation: u64,
+    pub assessment: LiveAssessment,
+    pub progress: Vec<EvidenceProgress>,
+    pub evidence: LiveEvidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProbePolicy {
     Passive,
     Active,
@@ -1049,12 +1278,15 @@ pub struct App {
     pub gateway_samples: VecDeque<u64>,
     gateway_outcomes: VecDeque<Option<u64>>,
     pub gateway_attempts: usize,
-    pub gateway_metrics: Option<LatencyMetrics>,
+    pub gateway_history_metrics: Option<LatencyMetrics>,
     pub peers: PeerSnapshot,
     pub interface_counters: Option<InterfaceCounters>,
     pub interface_rate: Option<InterfaceRate>,
     interface_counters_at: Option<Instant>,
+    interface_counters_first_observed_at: Option<Duration>,
+    interface_counters_last_observed_at: Option<Duration>,
     pub workload: WorkloadSnapshot,
+    workload_observed_at: Option<Duration>,
     pub events: VecDeque<Event>,
     pub paused: bool,
     pub cycles: u64,
@@ -1065,10 +1297,16 @@ pub struct App {
     pub last_path_change: Option<PathChange>,
     pub history_context: Option<HistoryContext>,
     pub wifi_observation_settled: bool,
+    wifi_observed_at: Option<Duration>,
+    wifi_first_sample_at: Option<Duration>,
+    wifi_last_sample_at: Option<Duration>,
     pub path_transition_pending: bool,
     probe_policy: ProbePolicy,
     peer_dwell: BTreeMap<PeerKey, PeerDwell>,
     peer_baseline_seen: bool,
+    peer_snapshot_observations: u64,
+    peer_snapshot_first_observed_at: Option<Duration>,
+    peer_snapshot_last_observed_at: Option<Duration>,
 }
 
 impl App {
@@ -1095,12 +1333,15 @@ impl App {
             gateway_samples: VecDeque::with_capacity(MAX_GATEWAY_SAMPLES),
             gateway_outcomes: VecDeque::with_capacity(MAX_GATEWAY_SAMPLES),
             gateway_attempts: 0,
-            gateway_metrics: None,
+            gateway_history_metrics: None,
             peers: PeerSnapshot::pending(),
             interface_counters: None,
             interface_rate: None,
             interface_counters_at: None,
+            interface_counters_first_observed_at: None,
+            interface_counters_last_observed_at: None,
             workload: WorkloadSnapshot::pending(),
+            workload_observed_at: None,
             events: VecDeque::with_capacity(MAX_EVENTS),
             paused: false,
             cycles: 0,
@@ -1111,23 +1352,32 @@ impl App {
             last_path_change: None,
             history_context: None,
             wifi_observation_settled: false,
+            wifi_observed_at: None,
+            wifi_first_sample_at: None,
+            wifi_last_sample_at: None,
             path_transition_pending: false,
             probe_policy,
             peer_dwell: BTreeMap::new(),
             peer_baseline_seen: false,
+            peer_snapshot_observations: 0,
+            peer_snapshot_first_observed_at: None,
+            peer_snapshot_last_observed_at: None,
         };
         app.push_event(EventKind::Session, Health::Running, "instrument started");
         app
     }
 
-    pub fn apply(&mut self, update: MonitorUpdate) {
+    pub fn apply(&mut self, update: MonitorUpdate) -> bool {
+        if !self.accepts_update(&update) {
+            return false;
+        }
         match update {
             MonitorUpdate::Link {
                 generation,
                 snapshot: mut link,
             } => {
                 if generation < self.path_generation {
-                    return;
+                    return false;
                 }
                 if generation == self.path_generation {
                     if link.ssid_restricted
@@ -1141,7 +1391,7 @@ impl App {
                     link.wifi = self.link.wifi.clone();
                     self.link = link;
                     self.path_transition_pending = false;
-                    return;
+                    return true;
                 }
 
                 let initial = self.path_generation == 0;
@@ -1169,16 +1419,25 @@ impl App {
                 self.gateway_samples.clear();
                 self.gateway_outcomes.clear();
                 self.gateway_attempts = 0;
-                self.gateway_metrics = None;
+                self.gateway_history_metrics = None;
                 self.interface_counters = None;
                 self.interface_counters_at = None;
+                self.interface_counters_first_observed_at = None;
+                self.interface_counters_last_observed_at = None;
                 self.interface_rate = None;
                 self.workload = WorkloadSnapshot::pending();
+                self.workload_observed_at = None;
                 self.path_dwell = PathDwell::default();
                 self.peers = PeerSnapshot::pending();
                 self.wifi_observation_settled = false;
+                self.wifi_observed_at = None;
+                self.wifi_first_sample_at = None;
+                self.wifi_last_sample_at = None;
                 self.peer_dwell.clear();
                 self.peer_baseline_seen = false;
+                self.peer_snapshot_observations = 0;
+                self.peer_snapshot_first_observed_at = None;
+                self.peer_snapshot_last_observed_at = None;
                 for probe in &mut self.probes {
                     *probe = if self.probe_policy.is_active() {
                         ProbeView::queued(probe.kind)
@@ -1225,9 +1484,13 @@ impl App {
                 telemetry,
             } => {
                 if generation == self.path_generation {
+                    let observed_at = self.uptime();
                     self.wifi_observation_settled = true;
+                    self.wifi_observed_at = Some(observed_at);
                     if let Some(telemetry) = &telemetry {
                         self.path_dwell.observe_wifi(telemetry);
+                        self.wifi_first_sample_at.get_or_insert(observed_at);
+                        self.wifi_last_sample_at = Some(observed_at);
                     }
                     if let Some(ssid) = ssid
                         && (self.link.ssid.as_deref() != Some(ssid.as_str())
@@ -1255,8 +1518,13 @@ impl App {
                 snapshot,
             } => {
                 if generation != self.path_generation {
-                    return;
+                    return false;
                 }
+                let observed_at = self.uptime();
+                self.peer_snapshot_observations = self.peer_snapshot_observations.saturating_add(1);
+                self.peer_snapshot_first_observed_at
+                    .get_or_insert(observed_at);
+                self.peer_snapshot_last_observed_at = Some(observed_at);
                 self.apply_peer_snapshot(snapshot);
             }
             MonitorUpdate::Traffic {
@@ -1264,7 +1532,7 @@ impl App {
                 counters,
             } => {
                 if generation != self.path_generation {
-                    return;
+                    return false;
                 }
                 let now = Instant::now();
                 let prior = self.interface_counters.as_ref();
@@ -1285,6 +1553,12 @@ impl App {
                 self.interface_rate = interval.map(|interval| interval.rate);
                 self.interface_counters = counters;
                 self.interface_counters_at = self.interface_counters.as_ref().map(|_| now);
+                if self.interface_counters.is_some() {
+                    let observed_at = self.uptime();
+                    self.interface_counters_first_observed_at
+                        .get_or_insert(observed_at);
+                    self.interface_counters_last_observed_at = Some(observed_at);
+                }
             }
             MonitorUpdate::Workload {
                 generation,
@@ -1293,11 +1567,12 @@ impl App {
                 if generation == self.path_generation {
                     self.path_dwell.observe_workload(&snapshot);
                     self.workload = snapshot;
+                    self.workload_observed_at = Some(self.uptime());
                 }
             }
             MonitorUpdate::ProbeStarted { generation, kind } => {
                 if generation != self.path_generation || !self.probe_policy.is_active() {
-                    return;
+                    return false;
                 }
                 let probe = self.probe_mut(kind);
                 // Preserve the last settled result while a periodic refresh is
@@ -1315,7 +1590,7 @@ impl App {
                 result,
             } => {
                 if generation != self.path_generation || !self.probe_policy.is_active() {
-                    return;
+                    return false;
                 }
                 self.cycles += u64::from(kind == ProbeKind::Gateway);
                 let previous = self.probe(kind).health;
@@ -1337,7 +1612,7 @@ impl App {
                         .flatten()
                         .map(|sample| *sample as f64)
                         .collect();
-                    self.gateway_metrics = Some(LatencyMetrics::from_samples(
+                    self.gateway_history_metrics = Some(LatencyMetrics::from_samples(
                         &samples,
                         self.gateway_attempts,
                     ));
@@ -1369,6 +1644,7 @@ impl App {
                 self.push_event(EventKind::Notice, Health::Running, message)
             }
         }
+        true
     }
 
     pub fn set_paused(&mut self, paused: bool) {
@@ -1392,7 +1668,7 @@ impl App {
         self.gateway_samples.clear();
         self.gateway_outcomes.clear();
         self.gateway_attempts = 0;
-        self.gateway_metrics = None;
+        self.gateway_history_metrics = None;
         self.link.public_ip = None;
         for probe in &mut self.probes {
             *probe = if probe_policy.is_active() {
@@ -1450,6 +1726,23 @@ impl App {
             return Situation {
                 health: Health::Degraded,
                 kind: SituationKind::InterfaceLoss,
+            };
+        }
+
+        if !self.probe_policy.is_active()
+            && self.path_generation == 0
+            && self.link.interface.is_none()
+        {
+            return Situation {
+                health: Health::Running,
+                kind: SituationKind::Collecting,
+            };
+        }
+
+        if !self.probe_policy.is_active() && self.link.interface.is_none() {
+            return Situation {
+                health: Health::Unavailable,
+                kind: SituationKind::EvidenceGap,
             };
         }
 
@@ -1557,14 +1850,6 @@ impl App {
             };
         }
 
-        let gateway = self.probe(ProbeKind::Gateway);
-        if gateway.health == Health::Ok && self.gateway_attempts < MIN_GATEWAY_ASSESSMENT_SAMPLES {
-            return Situation {
-                health: Health::Running,
-                kind: SituationKind::WarmingBaseline,
-            };
-        }
-
         if ProbeKind::PATH
             .iter()
             .all(|kind| self.probe(*kind).health == Health::Unavailable)
@@ -1601,10 +1886,7 @@ impl App {
             return EvidenceCoverage::Collecting;
         }
 
-        let link_available = self.link.interface.is_some()
-            || self.link.gateway.is_some()
-            || !self.link.resolvers.is_empty()
-            || !self.link.addresses.is_empty();
+        let link_available = self.link.interface.is_some();
         let link_incomplete = self.link.interface.is_none()
             || self.link.resolvers.is_empty()
             || self.link.addresses.is_empty()
@@ -1642,24 +1924,518 @@ impl App {
         }
     }
 
+    pub fn projection(&self, mode: MonitorMode) -> AppProjection {
+        let situation = self.situation();
+        let progress = self.evidence_progress(mode);
+        let path_status = if !self.probe_policy.is_active() {
+            PathStatus::Untested
+        } else {
+            match situation.health {
+                Health::Ok => PathStatus::Ok,
+                Health::Degraded => PathStatus::Degraded,
+                Health::Failed => PathStatus::Failed,
+                Health::Queued | Health::Running | Health::Unavailable => PathStatus::Unavailable,
+            }
+        };
+        let observed_span = self.uptime().saturating_sub(self.path_observed_since);
+        let gateway_outcomes = self.gateway_assessment_outcomes();
+        let gateway_successes = gateway_outcomes.iter().flatten().count() as u64;
+        AppProjection {
+            generation: self.path_generation,
+            assessment: LiveAssessment {
+                situation,
+                path_status,
+                evidence_coverage: self.evidence_coverage_for(mode, &progress),
+            },
+            progress,
+            evidence: LiveEvidence {
+                path: self.link.clone(),
+                interface_counters: self.interface_counters.clone(),
+                interface_rate: self.interface_rate.clone(),
+                probes: if mode == MonitorMode::Overview {
+                    self.probes
+                        .iter()
+                        .map(|probe| LiveProbeEvidence {
+                            kind: probe.kind,
+                            health: probe.health,
+                            detail: probe.detail.clone(),
+                            latency_ms: probe.latency_ms,
+                            metrics: probe.metrics.clone(),
+                            age_ms: self.probe_age(probe.kind).map(duration_ms),
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+                gateway_assessment: (mode == MonitorMode::Overview).then(|| {
+                    LiveGatewayAssessmentEvidence {
+                        attempts: gateway_outcomes.len() as u64,
+                        successful_attempts: gateway_successes,
+                        required_attempts: MIN_GATEWAY_ASSESSMENT_SAMPLES as u64,
+                        maximum_attempts: GATEWAY_ASSESSMENT_WINDOW as u64,
+                        metrics: self.gateway_assessment_metrics(),
+                    }
+                }),
+                neighbors: mode
+                    .dwell_collector_scope()
+                    .peers
+                    .then(|| self.peers.clone()),
+                workload: mode
+                    .dwell_collector_scope()
+                    .workload
+                    .then(|| LiveWorkloadEvidence {
+                        health: self.workload.health,
+                        detail: self.workload.detail.clone(),
+                        source: self.workload.source.clone(),
+                        interval_ms: duration_ms(self.workload.interval),
+                        processes: self.workload.processes.clone(),
+                    }),
+                dwell: LivePathDwellEvidence {
+                    observed_span_ms: duration_ms(observed_span),
+                    interface_samples: self.path_dwell.interface.samples,
+                    interface_valid_intervals: self.path_dwell.interface.valid_intervals,
+                    wifi_samples: self.path_dwell.wifi.samples,
+                    workload_windows: self.path_dwell.workload.sampled_windows,
+                    workload_observed_ms: duration_ms(self.path_dwell.workload.observed),
+                    neighbors: self.peer_dwell_summary(),
+                },
+                last_path_change: self.last_path_change.as_ref().map(|change| {
+                    LivePathChangeEvidence {
+                        observed_at_ms: duration_ms(change.elapsed),
+                        dimensions: change.dimensions.clone(),
+                        previous: change.previous.clone(),
+                        current: change.current.clone(),
+                    }
+                }),
+                history_context: self.history_context.clone(),
+            },
+        }
+    }
+
+    pub fn final_projection(&self, mode: MonitorMode) -> AppProjection {
+        let mut projection = self.projection(mode);
+        for progress in &mut projection.progress {
+            if progress.state != EvidenceProgressState::Collecting {
+                continue;
+            }
+            progress.state = if progress.observations.unwrap_or_default() > 0 {
+                EvidenceProgressState::Insufficient
+            } else {
+                EvidenceProgressState::Unavailable
+            };
+            progress
+                .limitations
+                .push(EvidenceLimitation::BoundedAcquisitionEndedBeforeAvailability);
+        }
+        if projection.assessment.evidence_coverage == EvidenceCoverage::Collecting {
+            projection.assessment.evidence_coverage = if projection
+                .progress
+                .iter()
+                .any(|progress| progress.state == EvidenceProgressState::Available)
+            {
+                EvidenceCoverage::Partial
+            } else {
+                EvidenceCoverage::Unavailable
+            };
+        }
+        if projection.assessment.situation.kind == SituationKind::Collecting {
+            projection.assessment.situation = Situation {
+                health: Health::Unavailable,
+                kind: SituationKind::EvidenceGap,
+            };
+            projection.assessment.path_status = PathStatus::Unavailable;
+        }
+        projection
+    }
+
+    fn evidence_coverage_for(
+        &self,
+        mode: MonitorMode,
+        progress: &[EvidenceProgress],
+    ) -> EvidenceCoverage {
+        if mode == MonitorMode::Overview {
+            return self.evidence_coverage();
+        }
+
+        let relevant = progress.iter().filter(|item| {
+            !matches!(
+                item.state,
+                EvidenceProgressState::NotCollected | EvidenceProgressState::Unsupported
+            )
+        });
+        let states = relevant.map(|item| item.state).collect::<Vec<_>>();
+        if states.contains(&EvidenceProgressState::Collecting) {
+            return EvidenceCoverage::Collecting;
+        }
+        if states.iter().all(|state| {
+            matches!(
+                state,
+                EvidenceProgressState::Unavailable | EvidenceProgressState::Stale
+            )
+        }) {
+            return EvidenceCoverage::Unavailable;
+        }
+        if states
+            .iter()
+            .any(|state| *state != EvidenceProgressState::Available)
+        {
+            EvidenceCoverage::Partial
+        } else {
+            EvidenceCoverage::Complete
+        }
+    }
+
+    pub fn evidence_progress(&self, mode: MonitorMode) -> Vec<EvidenceProgress> {
+        let scope = mode.dwell_collector_scope();
+        let generation = self.path_generation;
+        let interface = self.link.observation_interface().unwrap_or("unavailable");
+        let uptime = self.uptime();
+        let path_span = duration_ms(uptime.saturating_sub(self.path_observed_since));
+        let mut progress = Vec::with_capacity(11);
+
+        let path_available = self.link.interface.is_some();
+        let mut path = EvidenceProgress::new(
+            EvidenceClaim::PathContext,
+            if self.path_transition_pending || !path_available {
+                EvidenceProgressState::Collecting
+            } else {
+                EvidenceProgressState::Available
+            },
+            EvidenceBasis::Observed,
+            EvidenceScope::CurrentPathGeneration {
+                generation,
+                subject: "effective default route and corroborated physical underlay".into(),
+            },
+        );
+        path.observations = path_available.then_some(1);
+        path.observed_span_ms = path_available.then_some(path_span);
+        if self.path_transition_pending {
+            path.limitations
+                .push(EvidenceLimitation::RouteSettlingLastConfirmed);
+        }
+        progress.push(path);
+
+        let mut totals = EvidenceProgress::new(
+            EvidenceClaim::InterfaceTotals,
+            collector_state(
+                scope.interface,
+                self.interface_counters.is_some(),
+                EvidenceProgressState::Collecting,
+            ),
+            EvidenceBasis::Observed,
+            EvidenceScope::CurrentSample {
+                generation,
+                subject: format!("interface {interface} cumulative counters"),
+            },
+        );
+        if scope.interface && self.interface_counters.is_some() {
+            totals.observations = Some(self.path_dwell.interface.samples.max(1));
+            totals.observed_span_ms = observation_span_ms(
+                self.interface_counters_first_observed_at,
+                self.interface_counters_last_observed_at,
+            );
+            totals.source_age_ms = self
+                .interface_counters_last_observed_at
+                .map(|observed_at| duration_ms(uptime.saturating_sub(observed_at)));
+            totals
+                .limitations
+                .push(EvidenceLimitation::CumulativeCountersNoAttribution);
+        }
+        progress.push(totals);
+
+        let mut rate = EvidenceProgress::new(
+            EvidenceClaim::InterfaceRate,
+            if !scope.interface {
+                EvidenceProgressState::NotCollected
+            } else if self.interface_rate.is_some() {
+                EvidenceProgressState::Available
+            } else if self.interface_counters.is_some() {
+                EvidenceProgressState::Insufficient
+            } else {
+                EvidenceProgressState::Collecting
+            },
+            EvidenceBasis::Derived,
+            EvidenceScope::CurrentPathGeneration {
+                generation,
+                subject: format!("compatible counter deltas for interface {interface}"),
+            },
+        );
+        if scope.interface {
+            rate.observations = Some(self.path_dwell.interface.samples);
+            rate.required_observations = Some(2);
+            rate.valid_intervals = Some(self.path_dwell.interface.valid_intervals);
+            rate.observed_span_ms = observation_span_ms(
+                self.interface_counters_first_observed_at,
+                self.interface_counters_last_observed_at,
+            );
+            rate.source_age_ms = self
+                .interface_counters_last_observed_at
+                .map(|observed_at| duration_ms(uptime.saturating_sub(observed_at)));
+            if rate.state == EvidenceProgressState::Insufficient {
+                rate.limitations
+                    .push(EvidenceLimitation::MinimumCompatibleCounterObservations { required: 2 });
+            }
+            if self.path_dwell.interface.counter_resets > 0 {
+                rate.limitations
+                    .push(EvidenceLimitation::CounterResetsExcluded {
+                        count: self.path_dwell.interface.counter_resets,
+                    });
+            }
+        }
+        progress.push(rate);
+
+        let mut radio = EvidenceProgress::new(
+            EvidenceClaim::RadioLink,
+            if !scope.wifi {
+                EvidenceProgressState::NotCollected
+            } else if self.link.observation_link_type().is_none() {
+                EvidenceProgressState::Collecting
+            } else if !self.link.requires_radio_evidence() {
+                EvidenceProgressState::Unsupported
+            } else if self.link.wifi.is_some() {
+                EvidenceProgressState::Available
+            } else if self.wifi_observation_settled {
+                EvidenceProgressState::Unavailable
+            } else {
+                EvidenceProgressState::Collecting
+            },
+            EvidenceBasis::Observed,
+            EvidenceScope::CurrentPathGeneration {
+                generation,
+                subject: format!("associated interface {interface} radio link"),
+            },
+        );
+        if scope.wifi {
+            radio.observations = Some(
+                self.path_dwell
+                    .wifi
+                    .samples
+                    .max(u64::from(self.link.wifi.is_some())),
+            );
+            radio.observed_span_ms =
+                observation_span_ms(self.wifi_first_sample_at, self.wifi_last_sample_at);
+            radio.source_age_ms = self
+                .wifi_observed_at
+                .map(|observed_at| duration_ms(uptime.saturating_sub(observed_at)));
+            if radio.state == EvidenceProgressState::Unavailable {
+                radio
+                    .limitations
+                    .push(EvidenceLimitation::PlatformRadioTelemetryUnavailable);
+            }
+        }
+        progress.push(radio);
+
+        let mut neighbors = EvidenceProgress::new(
+            EvidenceClaim::NeighborCache,
+            if !scope.peers {
+                EvidenceProgressState::NotCollected
+            } else {
+                match self.peers.health {
+                    Health::Queued | Health::Running => EvidenceProgressState::Collecting,
+                    Health::Unavailable | Health::Failed => EvidenceProgressState::Unavailable,
+                    Health::Ok | Health::Degraded => EvidenceProgressState::Available,
+                }
+            },
+            EvidenceBasis::Observed,
+            EvidenceScope::CurrentPathGeneration {
+                generation,
+                subject: format!(
+                    "native cache rows filtered to interface {interface} and current path prefixes"
+                ),
+            },
+        );
+        if scope.peers {
+            neighbors.observations = self
+                .peer_baseline_seen
+                .then_some(self.peer_snapshot_observations);
+            neighbors.observed_span_ms = observation_span_ms(
+                self.peer_snapshot_first_observed_at,
+                self.peer_snapshot_last_observed_at,
+            );
+            neighbors.source_age_ms = self
+                .peer_snapshot_last_observed_at
+                .map(|observed_at| duration_ms(uptime.saturating_sub(observed_at)));
+            if !self.peers.failed_sources.is_empty() {
+                neighbors
+                    .limitations
+                    .push(EvidenceLimitation::NativeSourcesUnavailable {
+                        sources: self.peers.failed_sources.clone(),
+                    });
+            }
+            neighbors
+                .limitations
+                .push(EvidenceLimitation::CacheNotLivenessIdentityActivityOrTraffic);
+        }
+        progress.push(neighbors);
+
+        let mut workload = EvidenceProgress::new(
+            EvidenceClaim::WorkloadAttribution,
+            if !scope.workload {
+                EvidenceProgressState::NotCollected
+            } else {
+                match self.workload.health {
+                    Health::Queued | Health::Running => EvidenceProgressState::Collecting,
+                    Health::Unavailable | Health::Failed => EvidenceProgressState::Unavailable,
+                    Health::Ok | Health::Degraded => EvidenceProgressState::Available,
+                }
+            },
+            EvidenceBasis::Observed,
+            EvidenceScope::CurrentPathGeneration {
+                generation,
+                subject: "sampled host process-accounting windows on external interfaces".into(),
+            },
+        );
+        if scope.workload {
+            workload.observations = Some(self.path_dwell.workload.sampled_windows);
+            workload.observed_span_ms = Some(duration_ms(self.path_dwell.workload.observed));
+            workload.source_age_ms = self
+                .workload_observed_at
+                .map(|observed_at| duration_ms(uptime.saturating_sub(observed_at)));
+            workload.limitations.push(
+                EvidenceLimitation::SampledHostAccountingNoEndpointProtocolPeerPersonOrIntent,
+            );
+        }
+        progress.push(workload);
+
+        for (claim, kind) in [
+            (EvidenceClaim::GatewayRtt, ProbeKind::Gateway),
+            (EvidenceClaim::DnsReachability, ProbeKind::Dns),
+            (EvidenceClaim::HttpsReachability, ProbeKind::Https),
+            (EvidenceClaim::PublicEgress, ProbeKind::PublicIp),
+        ] {
+            let probe = self.probe(kind);
+            let mut item = EvidenceProgress::new(
+                claim,
+                if !self.probe_policy.is_active() {
+                    EvidenceProgressState::NotCollected
+                } else if self.probe_is_stale(kind) {
+                    EvidenceProgressState::Stale
+                } else {
+                    match probe.health {
+                        Health::Queued | Health::Running => EvidenceProgressState::Collecting,
+                        Health::Unavailable => EvidenceProgressState::Unavailable,
+                        Health::Ok | Health::Degraded | Health::Failed => {
+                            EvidenceProgressState::Available
+                        }
+                    }
+                },
+                EvidenceBasis::Observed,
+                probe_scope(generation, kind, self.link.observation_gateway()),
+            );
+            if self.probe_policy.is_active() {
+                item.observations = probe.updated_at.map(|_| 1);
+                item.source_age_ms = self.probe_age(kind).map(duration_ms);
+                if self.probe_is_stale(kind) {
+                    item.limitations
+                        .push(EvidenceLimitation::OlderThanAssessmentFreshnessWindow);
+                }
+                if kind == ProbeKind::PublicIp {
+                    item.limitations
+                        .push(EvidenceLimitation::PublicEgressNotReachabilityDependency);
+                }
+            }
+            progress.push(item);
+        }
+
+        let gateway_outcomes = self.gateway_assessment_outcomes();
+        let gateway_attempts = gateway_outcomes.len();
+        let gateway_successes = gateway_outcomes.iter().flatten().count();
+        let mut variation = EvidenceProgress::new(
+            EvidenceClaim::GatewayVariation,
+            if !self.probe_policy.is_active() {
+                EvidenceProgressState::NotCollected
+            } else if gateway_attempts == 0 {
+                EvidenceProgressState::Collecting
+            } else if gateway_attempts < MIN_GATEWAY_ASSESSMENT_SAMPLES {
+                EvidenceProgressState::Insufficient
+            } else {
+                EvidenceProgressState::Available
+            },
+            EvidenceBasis::Derived,
+            EvidenceScope::AssessmentWindow {
+                generation,
+                subject: "next-hop RTT variation".into(),
+                maximum_observations: GATEWAY_ASSESSMENT_WINDOW as u64,
+            },
+        );
+        if self.probe_policy.is_active() {
+            variation.observations = Some(gateway_attempts as u64);
+            variation.required_observations = Some(MIN_GATEWAY_ASSESSMENT_SAMPLES as u64);
+            if variation.state == EvidenceProgressState::Insufficient {
+                variation
+                    .limitations
+                    .push(EvidenceLimitation::MinimumCurrentGenerationAttempts {
+                        required: MIN_GATEWAY_ASSESSMENT_SAMPLES as u64,
+                    });
+            }
+            variation.successful_observations = Some(gateway_successes as u64);
+            if gateway_attempts >= MIN_GATEWAY_ASSESSMENT_SAMPLES && gateway_successes < 2 {
+                variation.state = EvidenceProgressState::Insufficient;
+                variation
+                    .limitations
+                    .push(EvidenceLimitation::MinimumSuccessfulRttObservations { required: 2 });
+            }
+        }
+        progress.push(variation);
+
+        progress
+    }
+
+    pub fn progress_for(&self, mode: MonitorMode, claim: EvidenceClaim) -> EvidenceProgress {
+        self.evidence_progress(mode)
+            .into_iter()
+            .find(|progress| progress.claim == claim)
+            .expect("every live projection contains every progress claim")
+    }
+
+    pub fn accepts_update(&self, update: &MonitorUpdate) -> bool {
+        match update {
+            MonitorUpdate::Link { generation, .. } => *generation >= self.path_generation,
+            MonitorUpdate::PathSettling { generation }
+            | MonitorUpdate::Wifi { generation, .. }
+            | MonitorUpdate::Peers { generation, .. }
+            | MonitorUpdate::Traffic { generation, .. }
+            | MonitorUpdate::Workload { generation, .. } => *generation == self.path_generation,
+            MonitorUpdate::ProbeStarted { generation, .. }
+            | MonitorUpdate::ProbeFinished { generation, .. } => {
+                *generation == self.path_generation && self.probe_policy.is_active()
+            }
+            MonitorUpdate::Notice(_) => true,
+        }
+    }
+
     pub fn gateway_assessment_metrics(&self) -> Option<LatencyMetrics> {
-        if self.gateway_attempts < MIN_GATEWAY_ASSESSMENT_SAMPLES {
+        let outcomes = self.gateway_assessment_outcomes();
+        if outcomes.len() < MIN_GATEWAY_ASSESSMENT_SAMPLES {
             return None;
         }
-        let outcomes: Vec<_> = self
-            .gateway_outcomes
-            .iter()
-            .rev()
-            .take(GATEWAY_ASSESSMENT_WINDOW)
-            .rev()
-            .copied()
-            .collect();
         let samples: Vec<_> = outcomes
             .iter()
             .flatten()
             .map(|sample| *sample as f64)
             .collect();
         Some(LatencyMetrics::from_samples(&samples, outcomes.len()))
+    }
+
+    /// Return the outcome of the most recent next-hop probe attempt.
+    ///
+    /// The outer `Option` distinguishes no attempt from an attempt, while the
+    /// inner `Option` distinguishes a reply from a timeout or other no-reply
+    /// outcome. `gateway_samples` intentionally retains successful replies for
+    /// charting, so it cannot answer this operator-facing "latest attempt"
+    /// question on its own.
+    pub fn latest_gateway_outcome(&self) -> Option<Option<u64>> {
+        self.gateway_outcomes.back().copied()
+    }
+
+    fn gateway_assessment_outcomes(&self) -> Vec<Option<u64>> {
+        self.gateway_outcomes
+            .iter()
+            .rev()
+            .take(GATEWAY_ASSESSMENT_WINDOW)
+            .rev()
+            .copied()
+            .collect()
     }
 
     pub fn probe_age(&self, kind: ProbeKind) -> Option<Duration> {
@@ -1860,6 +2636,43 @@ impl App {
     }
 }
 
+fn collector_state(
+    collected: bool,
+    available: bool,
+    pending: EvidenceProgressState,
+) -> EvidenceProgressState {
+    if !collected {
+        EvidenceProgressState::NotCollected
+    } else if available {
+        EvidenceProgressState::Available
+    } else {
+        pending
+    }
+}
+
+fn probe_scope(generation: u64, kind: ProbeKind, gateway: Option<&str>) -> EvidenceScope {
+    let subject = match kind {
+        ProbeKind::Gateway => format!("configured next hop {}", gateway.unwrap_or("unavailable")),
+        ProbeKind::Dns => "configured resolver path resolving example.com".into(),
+        ProbeKind::Https => "HTTPS GET to example.com".into(),
+        ProbeKind::PublicIp => "bounded public-egress address provider lookup".into(),
+    };
+    EvidenceScope::CurrentSample {
+        generation,
+        subject,
+    }
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
+}
+
+fn observation_span_ms(first: Option<Duration>, last: Option<Duration>) -> Option<u64> {
+    first
+        .zip(last)
+        .map(|(first, last)| duration_ms(last.saturating_sub(first)))
+}
+
 #[derive(Debug, Serialize)]
 pub struct SnapshotReport {
     pub link: LinkSnapshot,
@@ -2057,10 +2870,7 @@ fn passive_link_coverage(
     link: &LinkSnapshot,
     interface_counters: Option<&InterfaceCounters>,
 ) -> EvidenceCoverage {
-    let link_available = link.interface.is_some()
-        || link.gateway.is_some()
-        || !link.resolvers.is_empty()
-        || !link.addresses.is_empty();
+    let link_available = link.interface.is_some();
     if !link_available && link.wifi.is_none() {
         return EvidenceCoverage::Unavailable;
     }
@@ -2166,7 +2976,7 @@ mod tests {
     fn passive_policy_is_default_and_rejects_late_probe_results() {
         let mut app = App::new();
         assert_eq!(app.probe_policy(), ProbePolicy::Passive);
-        assert_eq!(app.situation().kind, SituationKind::PassiveObservation);
+        assert_eq!(app.situation().kind, SituationKind::Collecting);
         assert!(
             app.probes
                 .iter()
@@ -2176,7 +2986,95 @@ mod tests {
         finish_probe(&mut app, ProbeKind::Gateway, Health::Ok, Some(4.0));
         assert!(app.gateway_samples.is_empty());
         assert_eq!(app.cycles, 0);
+        assert_eq!(app.situation().kind, SituationKind::Collecting);
+    }
+
+    #[test]
+    fn passive_situation_requires_an_observed_path_fact() {
+        let mut app = App::new();
+        assert_eq!(app.situation().kind, SituationKind::Collecting);
+
+        assert!(app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: LinkSnapshot::empty(),
+        }));
+        assert_eq!(app.situation().kind, SituationKind::EvidenceGap);
+        assert_eq!(app.situation().health, Health::Unavailable);
+
+        let mut link = LinkSnapshot::empty();
+        link.interface = Some("en0".into());
+        link.gateway = Some("192.0.2.1".into());
+        assert!(app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: link,
+        }));
         assert_eq!(app.situation().kind, SituationKind::PassiveObservation);
+    }
+
+    #[test]
+    fn resolver_or_address_without_a_default_route_is_not_path_context() {
+        let mut app = App::new();
+        app.link.resolvers.push("192.0.2.53".into());
+        app.link.addresses.push(Address {
+            interface: "en0".into(),
+            address: "192.0.2.10".into(),
+            family: 4,
+            is_default: false,
+            is_temporary: false,
+        });
+
+        assert_eq!(app.situation().kind, SituationKind::Collecting);
+        assert_eq!(
+            app.progress_for(MonitorMode::Overview, EvidenceClaim::PathContext)
+                .state,
+            EvidenceProgressState::Collecting
+        );
+    }
+
+    #[test]
+    fn focused_link_projection_ignores_collectors_outside_its_scope() {
+        let mut app = App::new();
+        app.link.interface = Some("en0".into());
+        app.link.link_type = Some("ethernet".into());
+        app.link.resolvers.push("192.0.2.53".into());
+        app.link.addresses.push(Address {
+            interface: "en0".into(),
+            address: "192.0.2.10".into(),
+            family: 4,
+            is_default: true,
+            is_temporary: false,
+        });
+        let counters = |bytes| InterfaceCounters {
+            interface: "en0".into(),
+            received_bytes: bytes,
+            transmitted_bytes: bytes,
+            received_packets: bytes / 100,
+            transmitted_packets: bytes / 100,
+            receive_errors: 0,
+            transmit_errors: 0,
+            drops: 0,
+        };
+        assert!(app.apply(MonitorUpdate::Traffic {
+            generation: 0,
+            counters: Some(counters(1_000)),
+        }));
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(app.apply(MonitorUpdate::Traffic {
+            generation: 0,
+            counters: Some(counters(2_000)),
+        }));
+
+        let projection = app.projection(MonitorMode::Link);
+        assert_eq!(
+            projection.assessment.evidence_coverage,
+            EvidenceCoverage::Complete
+        );
+        assert!(projection.evidence.neighbors.is_none());
+        assert!(projection.evidence.workload.is_none());
+        assert!(projection.evidence.probes.is_empty());
+        assert!(projection.evidence.gateway_assessment.is_none());
+        assert_eq!(app.peers.health, Health::Queued);
+        assert_eq!(app.workload.health, Health::Queued);
     }
 
     #[test]
@@ -2197,7 +3095,7 @@ mod tests {
         app.set_probe_policy(ProbePolicy::Passive);
         assert!(app.gateway_samples.is_empty());
         assert!(app.link.public_ip.is_none());
-        assert_eq!(app.situation().kind, SituationKind::PassiveObservation);
+        assert_eq!(app.situation().kind, SituationKind::Collecting);
     }
 
     #[test]
@@ -2217,6 +3115,16 @@ mod tests {
         }
         assert_eq!(app.gateway_samples.len(), MAX_GATEWAY_SAMPLES);
         assert_eq!(app.gateway_samples.front(), Some(&6));
+    }
+
+    #[test]
+    fn latest_gateway_outcome_preserves_a_no_reply_attempt() {
+        let mut app = App::with_probe_policy(ProbePolicy::Active);
+        finish_probe(&mut app, ProbeKind::Gateway, Health::Ok, Some(4.0));
+        finish_probe(&mut app, ProbeKind::Gateway, Health::Failed, None);
+
+        assert_eq!(app.gateway_samples.back(), Some(&4));
+        assert_eq!(app.latest_gateway_outcome(), Some(None));
     }
 
     #[test]
@@ -2262,7 +3170,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_distribution_warms_before_it_controls_health() {
+    fn gateway_distribution_is_claim_specific_instead_of_gating_path_status() {
         let mut app = App::with_probe_policy(ProbePolicy::Active);
         for _ in 0..MIN_GATEWAY_ASSESSMENT_SAMPLES - 1 {
             finish_probe(&mut app, ProbeKind::Gateway, Health::Ok, Some(4.0));
@@ -2273,13 +3181,50 @@ mod tests {
         assert_eq!(
             app.situation(),
             Situation {
-                health: Health::Running,
-                kind: SituationKind::WarmingBaseline,
+                health: Health::Ok,
+                kind: SituationKind::EvidenceGap,
             }
         );
+        let variation = app.progress_for(MonitorMode::Overview, EvidenceClaim::GatewayVariation);
+        assert_eq!(variation.state, EvidenceProgressState::Insufficient);
+        assert_eq!(variation.observations, Some(4));
+        assert_eq!(variation.required_observations, Some(5));
 
         finish_probe(&mut app, ProbeKind::Gateway, Health::Ok, Some(4.0));
         assert_eq!(app.overall_health(), Health::Ok);
+        assert_eq!(
+            app.progress_for(MonitorMode::Overview, EvidenceClaim::GatewayVariation)
+                .state,
+            EvidenceProgressState::Available
+        );
+    }
+
+    #[test]
+    fn variation_progress_requires_attempts_and_an_adjacent_rtt_pair() {
+        let mut all_loss = App::with_probe_policy(ProbePolicy::Active);
+        for _ in 0..MIN_GATEWAY_ASSESSMENT_SAMPLES {
+            finish_probe(&mut all_loss, ProbeKind::Gateway, Health::Failed, None);
+        }
+        let progress =
+            all_loss.progress_for(MonitorMode::Overview, EvidenceClaim::GatewayVariation);
+        assert_eq!(progress.state, EvidenceProgressState::Insufficient);
+        assert_eq!(progress.observations, Some(5));
+        assert_eq!(progress.successful_observations, Some(0));
+        assert!(progress.limitations.iter().any(|limitation| matches!(
+            limitation,
+            EvidenceLimitation::MinimumSuccessfulRttObservations { required: 2 }
+        )));
+
+        let mut one_success = App::with_probe_policy(ProbePolicy::Active);
+        finish_probe(&mut one_success, ProbeKind::Gateway, Health::Ok, Some(4.0));
+        for _ in 1..MIN_GATEWAY_ASSESSMENT_SAMPLES {
+            finish_probe(&mut one_success, ProbeKind::Gateway, Health::Failed, None);
+        }
+        let progress =
+            one_success.progress_for(MonitorMode::Overview, EvidenceClaim::GatewayVariation);
+        assert_eq!(progress.state, EvidenceProgressState::Insufficient);
+        assert_eq!(progress.observations, Some(5));
+        assert_eq!(progress.successful_observations, Some(1));
     }
 
     #[test]
@@ -2667,6 +3612,124 @@ mod tests {
     }
 
     #[test]
+    fn progress_exposes_totals_on_first_counter_sample_and_rates_on_second() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Traffic {
+            generation: 0,
+            counters: Some(test_counters("en0", 1_000, 2_000, 30, 40, 2, 3, 4)),
+        });
+
+        let totals = app.progress_for(MonitorMode::Overview, EvidenceClaim::InterfaceTotals);
+        let rate = app.progress_for(MonitorMode::Overview, EvidenceClaim::InterfaceRate);
+        assert_eq!(totals.state, EvidenceProgressState::Available);
+        assert_eq!(totals.observations, Some(1));
+        assert_eq!(rate.state, EvidenceProgressState::Insufficient);
+        assert_eq!(rate.observations, Some(1));
+        assert_eq!(rate.required_observations, Some(2));
+        assert_eq!(rate.valid_intervals, Some(0));
+
+        app.interface_counters_at = Some(Instant::now() - Duration::from_secs(1));
+        app.apply(MonitorUpdate::Traffic {
+            generation: 0,
+            counters: Some(test_counters("en0", 2_000, 4_000, 60, 80, 2, 3, 4)),
+        });
+        let rate = app.progress_for(MonitorMode::Overview, EvidenceClaim::InterfaceRate);
+        assert_eq!(rate.state, EvidenceProgressState::Available);
+        assert_eq!(rate.observations, Some(2));
+        assert_eq!(rate.valid_intervals, Some(1));
+        assert!(app.interface_rate.is_some());
+    }
+
+    #[test]
+    fn progress_order_and_collector_scope_are_stable() {
+        let app = App::new();
+        let overview = app.evidence_progress(MonitorMode::Overview);
+        assert_eq!(
+            overview
+                .iter()
+                .map(|progress| progress.claim)
+                .collect::<Vec<_>>(),
+            vec![
+                EvidenceClaim::PathContext,
+                EvidenceClaim::InterfaceTotals,
+                EvidenceClaim::InterfaceRate,
+                EvidenceClaim::RadioLink,
+                EvidenceClaim::NeighborCache,
+                EvidenceClaim::WorkloadAttribution,
+                EvidenceClaim::GatewayRtt,
+                EvidenceClaim::DnsReachability,
+                EvidenceClaim::HttpsReachability,
+                EvidenceClaim::PublicEgress,
+                EvidenceClaim::GatewayVariation,
+            ]
+        );
+        assert_eq!(
+            app.progress_for(MonitorMode::Peers, EvidenceClaim::InterfaceTotals)
+                .state,
+            EvidenceProgressState::NotCollected
+        );
+        assert_eq!(
+            app.progress_for(MonitorMode::Peers, EvidenceClaim::NeighborCache)
+                .state,
+            EvidenceProgressState::Collecting
+        );
+        assert_eq!(
+            app.progress_for(MonitorMode::Link, EvidenceClaim::WorkloadAttribution)
+                .state,
+            EvidenceProgressState::NotCollected
+        );
+    }
+
+    #[test]
+    fn empty_neighbor_cache_observations_count_collector_snapshots_not_rows() {
+        let mut app = App::new();
+        let empty = PeerSnapshot {
+            health: Health::Ok,
+            detail: "0 cached peers; no liveness scan".into(),
+            path_filter: PeerPathFilter::Applied,
+            sources: vec!["arp -an".into()],
+            failed_sources: Vec::new(),
+            oui_source: None,
+            peers: Vec::new(),
+        };
+        app.apply(MonitorUpdate::Peers {
+            generation: 0,
+            snapshot: empty.clone(),
+        });
+        let first = app.progress_for(MonitorMode::Overview, EvidenceClaim::NeighborCache);
+        assert_eq!(first.state, EvidenceProgressState::Available);
+        assert_eq!(first.observations, Some(1));
+
+        app.apply(MonitorUpdate::Peers {
+            generation: 0,
+            snapshot: empty,
+        });
+        assert_eq!(
+            app.progress_for(MonitorMode::Overview, EvidenceClaim::NeighborCache)
+                .observations,
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn stale_generation_updates_are_rejected_before_projection() {
+        let mut app = App::new();
+        assert!(app.apply(MonitorUpdate::Link {
+            generation: 1,
+            snapshot: test_link("en0", "house", "192.168.1.1"),
+        }));
+        assert!(!app.apply(MonitorUpdate::Traffic {
+            generation: 0,
+            counters: Some(test_counters("en0", 1_000, 2_000, 30, 40, 2, 3, 4)),
+        }));
+        assert_eq!(
+            app.progress_for(MonitorMode::Overview, EvidenceClaim::InterfaceTotals)
+                .state,
+            EvidenceProgressState::Collecting
+        );
+    }
+
+    #[test]
     fn counter_wrap_and_interface_replacement_start_new_baselines_without_fake_deltas() {
         let mut app = App::new();
         app.apply(MonitorUpdate::Traffic {
@@ -2750,7 +3813,7 @@ mod tests {
     }
 
     #[test]
-    fn rolling_gateway_metrics_count_failed_attempts() {
+    fn rolling_gateway_history_metrics_count_failed_attempts() {
         let mut app = App::with_probe_policy(ProbePolicy::Active);
         for latency in [Some(10.0), None, Some(12.0)] {
             app.apply(MonitorUpdate::ProbeFinished {
@@ -2764,7 +3827,7 @@ mod tests {
                 },
             });
         }
-        let metrics = app.gateway_metrics.unwrap();
+        let metrics = app.gateway_history_metrics.unwrap();
         assert_eq!(metrics.sent, 3);
         assert_eq!(metrics.received, 2);
         assert_eq!(metrics.lost, 1);
@@ -2783,7 +3846,7 @@ mod tests {
         assert_eq!(metrics.sent, GATEWAY_ASSESSMENT_WINDOW);
         assert_eq!(metrics.lost, 0);
         assert_eq!(metrics.health(), Health::Ok);
-        assert_eq!(app.gateway_metrics.as_ref().unwrap().lost, 1);
+        assert_eq!(app.gateway_history_metrics.as_ref().unwrap().lost, 1);
     }
 
     #[test]
