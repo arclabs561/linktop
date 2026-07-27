@@ -135,8 +135,10 @@ separate link snapshot when that read failed or raced. An additive optional
 `path_context.link_evidence` object preserves the
 network-name and BSSID visibility state, association, host addresses, derived
 default-path prefixes, and effective resolvers supplied by that observation.
-It is host-visible link evidence, not a physical-place assertion or a settled
-attachment/overlay decomposition.
+The path context also carries an optional typed physical underlay when passive
+platform evidence corroborates it separately from the effective default-route
+interface. It is host-visible topology and link evidence, not a physical-place
+or attachment-identity assertion.
 `linktop.speed_experiment.v1`
 separately identifies the explicit bounded active load experiment because it is
 not a passive host-path assessment.
@@ -224,16 +226,17 @@ and peers receive the remainder.
 
 ### Network transitions
 
-Treat the active path as a generation, identified by the default interface,
-link type, SSID, macOS Wi-Fi connection ID, gateway, effective resolver set,
-IPv4 addresses, and IPv6 /64 prefixes on the default interface. The connection
-ID detects reassociation even when macOS privacy policy hides the SSID. DHCP
-lease timestamps remain context rather than identity so renewal does not create
-a false transition. Using a prefix instead of the full IPv6 address makes
+Treat the active path as a generation, identified by the effective default
+interface and link type, optional physical underlay interface/link/gateway,
+SSID, macOS Wi-Fi connection ID, effective gateway and resolver set, IPv4
+addresses, and IPv6 /64 prefixes on the default interface. The connection ID
+detects reassociation even when macOS privacy policy hides the SSID. DHCP lease
+timestamps remain context rather than identity so renewal does not create a
+false transition. Using a prefix instead of the full IPv6 address makes
 privacy-address rotation stable on every supported platform while still
 detecting an IPv6 network change. On macOS, use `scutil --dns` rather than the
-explicitly non-authoritative `/etc/resolv.conf`, and mark addresses reported as
-`temporary` in the operator view.
+explicitly non-authoritative `/etc/resolv.conf`, and mark addresses reported
+as `temporary` in the operator view.
 Re-evaluate that
 fingerprint on every link refresh so a switch between house Wi-Fi, a phone hotspot,
 Ethernet, or a VPN path becomes an explicit transition rather than a collection of

@@ -114,10 +114,14 @@ These states can change independently:
 - a session with only one restricted macOS association may know the current
   route but have insufficient evidence for any place claim.
 
-Until attachment, effective route, and overlay are represented as separate
-typed evidence, a non-default addressed interface is labelled conservatively as
-an `other addressed interface`. Default-route selection alone does not prove
-that another interface is a tunnel, overlay, physical underlay, or attachment.
+Linktop now represents the effective route and a corroborated physical
+underlay as separate typed evidence on macOS. A tunnel route can therefore
+retain Wi-Fi association, radio, DHCP, counter, gateway, and cache evidence
+from its hardware carrier. The underlay requires active-interface ordering,
+hardware-port classification, and a scoped default route; a merely addressed
+non-default interface remains labelled conservatively as an
+`other addressed interface`. The underlay is topology evidence, not an
+attachment identity or place assertion.
 
 The ordinary passive host view may observe only the current association,
 platform configuration, and native cache. Ambient AP scans, packet/RF capture,

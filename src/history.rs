@@ -281,11 +281,7 @@ fn coverage_sources(link: &LinkSnapshot) -> (Vec<String>, Vec<String>) {
         &mut observed,
         &mut missing,
     );
-    if link
-        .link_type
-        .as_deref()
-        .is_some_and(|kind| kind.eq_ignore_ascii_case("wifi"))
-    {
+    if link.requires_radio_evidence() {
         source(
             link.ssid.is_some(),
             "associated_ssid",
@@ -593,6 +589,7 @@ mod tests {
             host: "workstation".into(),
             interface: Some("en0".into()),
             link_type: Some("wifi".into()),
+            underlay: None,
             ssid: Some(ssid.into()),
             ssid_restricted: false,
             wifi: None,

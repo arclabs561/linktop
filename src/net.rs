@@ -17,8 +17,8 @@ use serde_json::Value;
 use crate::metrics::LatencyMetrics;
 use crate::model::{
     Address, Health, InterfaceCounters, LinkSnapshot, MonitorControl, MonitorMode, MonitorUpdate,
-    NetworkConfiguration, ProbeKind, ProbePolicy, ProbeResult, ProcessTraffic, SnapshotReport,
-    WifiTelemetry, WorkloadSnapshot,
+    NetworkConfiguration, PathUnderlay, ProbeKind, ProbePolicy, ProbeResult, ProcessTraffic,
+    SnapshotReport, WifiTelemetry, WorkloadSnapshot,
 };
 use crate::{peers, process};
 
@@ -80,10 +80,10 @@ fn monitor_loop(
     let mut current_link = None;
     let mut tick = 0_u64;
     let mut gateway = None;
-    let mut interface = None;
     let mut path_generation = 0_u64;
     let mut path_fingerprint = None;
     let mut incomplete_route_since = None;
+    let mut incomplete_underlay_since = None;
     let probe_in_flight = Arc::new(std::array::from_fn::<_, 4, _>(|_| AtomicBool::new(false)));
     let probe_epoch = Arc::new(AtomicU64::new(0));
     let traffic_in_flight = Arc::new(AtomicBool::new(false));
@@ -156,6 +156,23 @@ fn monitor_loop(
                     .clone()
                     .expect("route settling requires a previous confirmed path");
             }
+            if path_settling {
+                incomplete_underlay_since = None;
+            } else if should_hold_incomplete_underlay(
+                current_link.as_ref(),
+                &link,
+                &mut incomplete_underlay_since,
+                now,
+            ) {
+                let previous = current_link
+                    .as_ref()
+                    .expect("underlay settling requires a previous confirmed path");
+                link.underlay.clone_from(&previous.underlay);
+                link.ssid.clone_from(&previous.ssid);
+                link.ssid_restricted = previous.ssid_restricted;
+                link.network_configuration
+                    .clone_from(&previous.network_configuration);
+            }
             current_link = Some(link.clone());
             let fingerprint = link.path_fingerprint();
             if path_fingerprint.as_ref() != Some(&fingerprint) {
@@ -169,7 +186,7 @@ fn monitor_loop(
                 wifi_refresh_pending = true;
             }
             gateway.clone_from(&link.gateway);
-            interface.clone_from(&link.interface);
+            let interface = link.observation_interface().map(str::to_string);
             if path_settling {
                 let _ = update_tx.send(MonitorUpdate::PathSettling {
                     generation: path_generation,
@@ -631,7 +648,7 @@ fn parse_nettop_process_traffic(output: &str) -> Vec<ProcessTraffic> {
 
 pub fn collect_snapshot(timeout: Duration) -> SnapshotReport {
     let mut link = collect_link();
-    let wifi_interface = link.interface.clone();
+    let wifi_interface = link.observation_interface().map(str::to_string);
     let wifi = thread::spawn(move || collect_wifi(wifi_interface.as_deref()));
     let neighbor_link = link.clone();
     let neighbors = thread::spawn(move || peers::collect(&neighbor_link));
@@ -696,21 +713,19 @@ pub fn collect_snapshot(timeout: Duration) -> SnapshotReport {
             peers: Vec::new(),
         });
     let interface_counters = link
-        .interface
-        .as_deref()
+        .observation_interface()
         .and_then(collect_interface_counters);
     SnapshotReport::from_results(link, interface_counters, neighbors, results)
 }
 
 pub fn collect_passive_snapshot() -> SnapshotReport {
     let mut link = collect_link();
-    let wifi_interface = link.interface.clone();
+    let wifi_interface = link.observation_interface().map(str::to_string);
     let wifi = thread::spawn(move || collect_wifi(wifi_interface.as_deref()));
     let neighbor_link = link.clone();
     let neighbors = thread::spawn(move || peers::collect(&neighbor_link));
     let interface_counters = link
-        .interface
-        .as_deref()
+        .observation_interface()
         .and_then(collect_interface_counters);
     apply_wifi_observation(&mut link, wifi.join().unwrap_or_default());
     let neighbors = neighbors
@@ -787,12 +802,18 @@ pub fn collect_link() -> LinkSnapshot {
     let route = default_route();
     let interface = route.as_ref().and_then(|value| value.0.clone());
     let gateway = route.and_then(|value| value.1);
+    let underlay = physical_underlay(interface.as_deref(), None);
+    let observation_interface = underlay
+        .as_ref()
+        .map(|value| value.interface.as_str())
+        .or(interface.as_deref());
     let addresses = local_addresses(interface.as_deref());
     let (ssid, ssid_restricted, network_configuration) =
-        network_configuration(interface.as_deref());
+        network_configuration(observation_interface);
     LinkSnapshot {
         host: short_hostname(),
         link_type: interface.as_deref().map(link_type),
+        underlay,
         ssid,
         ssid_restricted,
         wifi: None,
@@ -809,11 +830,17 @@ fn collect_light_link(previous: &LinkSnapshot) -> LinkSnapshot {
     let route = default_route();
     let interface = route.as_ref().and_then(|value| value.0.clone());
     let gateway = route.and_then(|value| value.1);
+    let underlay = physical_underlay(interface.as_deref(), previous.underlay.as_ref());
+    let observation_interface = underlay
+        .as_ref()
+        .map(|value| value.interface.as_str())
+        .or(interface.as_deref());
     let addresses = local_addresses(interface.as_deref());
     let (ssid, ssid_restricted, network_configuration) =
-        network_configuration(interface.as_deref());
+        network_configuration(observation_interface);
     let mut link = previous.clone();
     link.link_type = interface.as_deref().map(link_type);
+    link.underlay = underlay;
     link.interface = interface;
     link.ssid = ssid;
     link.ssid_restricted = ssid_restricted;
@@ -841,9 +868,28 @@ fn should_hold_incomplete_route(
     observed_at.saturating_duration_since(first_incomplete) < PATH_TRANSITION_GRACE
 }
 
+fn should_hold_incomplete_underlay(
+    previous: Option<&LinkSnapshot>,
+    candidate: &LinkSnapshot,
+    incomplete_since: &mut Option<Instant>,
+    observed_at: Instant,
+) -> bool {
+    let underlay_became_incomplete = previous.is_some_and(|link| {
+        link.interface == candidate.interface
+            && link.underlay.is_some()
+            && candidate.underlay.is_none()
+    });
+    if !underlay_became_incomplete {
+        *incomplete_since = None;
+        return false;
+    }
+    let first_incomplete = *incomplete_since.get_or_insert(observed_at);
+    observed_at.saturating_duration_since(first_incomplete) < PATH_TRANSITION_GRACE
+}
+
 pub fn collect_link_snapshot() -> LinkSnapshot {
     let mut link = collect_link();
-    let observation = collect_wifi(link.interface.as_deref());
+    let observation = collect_wifi(link.observation_interface());
     apply_wifi_observation(&mut link, observation);
     link
 }
@@ -1106,6 +1152,98 @@ fn default_route() -> Option<(Option<String>, Option<String>)> {
     }
 }
 
+fn physical_underlay(
+    effective_interface: Option<&str>,
+    known_underlay: Option<&PathUnderlay>,
+) -> Option<PathUnderlay> {
+    let effective_interface = effective_interface?;
+    if !cfg!(target_os = "macos") || !is_tunnel_interface(effective_interface) {
+        return None;
+    }
+
+    let nwi = command_output("scutil", &["--nwi"])?;
+    let interfaces = parse_macos_nwi_interfaces(&nwi);
+    let mut hardware = BTreeMap::new();
+    if let Some(known) = known_underlay
+        && interfaces
+            .iter()
+            .find(|interface| interface.as_str() != effective_interface)
+            == Some(&known.interface)
+    {
+        hardware.insert(known.interface.clone(), known.link_type.clone());
+    }
+    if hardware.is_empty() {
+        let hardware_ports = command_output("networksetup", &["-listallhardwareports"])?;
+        hardware = parse_macos_hardware_interfaces(&hardware_ports);
+    }
+    for (candidate, link_type) in macos_underlay_candidates(effective_interface, &nwi, &hardware) {
+        let Some(scoped_route) =
+            command_output("route", &["-n", "get", "-ifscope", &candidate, "default"])
+        else {
+            continue;
+        };
+        let (interface, gateway) = parse_macos_route(&scoped_route);
+        if interface.as_deref() == Some(candidate.as_str()) {
+            return Some(PathUnderlay {
+                interface: candidate,
+                link_type,
+                gateway,
+            });
+        }
+    }
+    None
+}
+
+fn macos_underlay_candidates(
+    effective_interface: &str,
+    nwi: &str,
+    hardware: &BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    parse_macos_nwi_interfaces(nwi)
+        .into_iter()
+        .filter(|candidate| candidate != effective_interface)
+        .filter_map(|candidate| {
+            hardware
+                .get(&candidate)
+                .cloned()
+                .map(|link_type| (candidate, link_type))
+        })
+        .collect()
+}
+
+fn parse_macos_nwi_interfaces(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Network interfaces:"))
+        .map(|interfaces| interfaces.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+fn parse_macos_hardware_interfaces(output: &str) -> BTreeMap<String, String> {
+    let mut hardware = BTreeMap::new();
+    let mut hardware_port: Option<String> = None;
+    for line in output.lines() {
+        if let Some(value) = line.strip_prefix("Hardware Port:") {
+            let label = value.trim().to_lowercase();
+            hardware_port = Some(if label.contains("wi-fi") || label.contains("airport") {
+                "wifi".into()
+            } else if label.contains("ethernet")
+                || label.contains("thunderbolt")
+                || label.contains("usb")
+            {
+                "ethernet".into()
+            } else {
+                label
+            });
+        } else if let Some(value) = line.strip_prefix("Device:") {
+            if let Some(link_type) = hardware_port.take() {
+                hardware.insert(value.trim().to_string(), link_type);
+            }
+        }
+    }
+    hardware
+}
+
 fn parse_macos_route(output: &str) -> (Option<String>, Option<String>) {
     let mut interface = None;
     let mut gateway = None;
@@ -1313,8 +1451,7 @@ fn parse_macos_network_configuration(output: &str) -> Option<NetworkConfiguratio
 }
 
 fn link_type(interface: &str) -> String {
-    if interface.starts_with("utun") || interface.starts_with("tun") || interface.starts_with("wg")
-    {
+    if is_tunnel_interface(interface) {
         "vpn".into()
     } else if interface.starts_with("wl") {
         "wifi".into()
@@ -1329,30 +1466,15 @@ fn link_type(interface: &str) -> String {
     }
 }
 
+fn is_tunnel_interface(interface: &str) -> bool {
+    interface.starts_with("utun") || interface.starts_with("tun") || interface.starts_with("wg")
+}
+
 fn macos_link_type(interface: &str) -> Option<String> {
     let output = command_output("networksetup", &["-listallhardwareports"])?;
-    let mut hardware_port: Option<String> = None;
-    for line in output.lines() {
-        if let Some(value) = line.strip_prefix("Hardware Port:") {
-            hardware_port = Some(value.trim().to_lowercase());
-        } else if let Some(value) = line.strip_prefix("Device:") {
-            if value.trim() == interface {
-                let label = hardware_port.as_deref().unwrap_or("network");
-                return Some(if label.contains("wi-fi") || label.contains("airport") {
-                    "wifi".into()
-                } else if label.contains("ethernet")
-                    || label.contains("thunderbolt")
-                    || label.contains("usb")
-                {
-                    "ethernet".into()
-                } else {
-                    label.into()
-                });
-            }
-            hardware_port = None;
-        }
-    }
-    None
+    parse_macos_hardware_interfaces(&output)
+        .get(interface)
+        .cloned()
 }
 
 fn collect_wifi(interface: Option<&str>) -> WifiObservation {
@@ -1631,6 +1753,78 @@ mod tests {
             parse_windows_route("0.0.0.0  0.0.0.0  192.0.2.1  192.0.2.2  25"),
             (Some("192.0.2.2".into()), Some("192.0.2.1".into()))
         );
+    }
+
+    #[test]
+    fn macos_underlay_candidates_require_active_nwi_and_hardware_evidence() {
+        let nwi = "IPv4 network interface information\n\
+                     utun4 : flags : 0x7\n\
+                     en0 : flags : 0x7\n\
+                   Network interfaces: utun4 en0 bridge0\n";
+        let hardware = parse_macos_hardware_interfaces(
+            "Hardware Port: Wi-Fi\n\
+             Device: en0\n\
+             Ethernet Address: 00:11:22:33:44:55\n\
+             Hardware Port: Thunderbolt Bridge\n\
+             Device: bridge0\n",
+        );
+
+        assert_eq!(
+            macos_underlay_candidates("utun4", nwi, &hardware),
+            vec![
+                ("en0".into(), "wifi".into()),
+                ("bridge0".into(), "ethernet".into())
+            ]
+        );
+        assert!(
+            macos_underlay_candidates("en0", nwi, &hardware)
+                .iter()
+                .all(|(interface, _)| interface != "en0")
+        );
+    }
+
+    #[test]
+    fn transient_underlay_gap_is_held_before_sustained_evidence_loss() {
+        let mut previous = LinkSnapshot::empty();
+        previous.interface = Some("utun4".into());
+        previous.link_type = Some("vpn".into());
+        previous.underlay = Some(PathUnderlay {
+            interface: "en0".into(),
+            link_type: "wifi".into(),
+            gateway: Some("192.168.1.1".into()),
+        });
+        let mut candidate = previous.clone();
+        candidate.underlay = None;
+        let started = Instant::now();
+        let mut incomplete_since = None;
+
+        assert!(should_hold_incomplete_underlay(
+            Some(&previous),
+            &candidate,
+            &mut incomplete_since,
+            started,
+        ));
+        assert!(should_hold_incomplete_underlay(
+            Some(&previous),
+            &candidate,
+            &mut incomplete_since,
+            started + PATH_TRANSITION_GRACE - Duration::from_millis(1),
+        ));
+        assert!(!should_hold_incomplete_underlay(
+            Some(&previous),
+            &candidate,
+            &mut incomplete_since,
+            started + PATH_TRANSITION_GRACE,
+        ));
+
+        candidate.interface = Some("utun5".into());
+        assert!(!should_hold_incomplete_underlay(
+            Some(&previous),
+            &candidate,
+            &mut incomplete_since,
+            started + Duration::from_secs(1),
+        ));
+        assert!(incomplete_since.is_none());
     }
 
     #[test]

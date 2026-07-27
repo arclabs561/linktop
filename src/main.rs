@@ -528,15 +528,7 @@ fn snapshot(json: bool) -> Result<()> {
             "LINKTOP  PASSIVE SNAPSHOT / PATH UNTESTED / COVERAGE {}",
             report.summary.evidence_coverage.label()
         );
-        println!(
-            "route    default via {} dev {}",
-            report.link.gateway.as_deref().unwrap_or("unknown next hop"),
-            report
-                .link
-                .interface
-                .as_deref()
-                .unwrap_or("unknown interface")
-        );
+        println!("path     {}", report.link.operator_path());
         if let Some(configuration) = network_configuration_text(&report.link) {
             println!("config   {configuration}");
         }
@@ -611,15 +603,7 @@ fn probe(json: bool) -> Result<()> {
             report.summary.path_status.label(),
             report.summary.evidence_coverage.label()
         );
-        println!(
-            "route    default via {} dev {}",
-            report.link.gateway.as_deref().unwrap_or("unknown next hop"),
-            report
-                .link
-                .interface
-                .as_deref()
-                .unwrap_or("unknown interface")
-        );
+        println!("path     {}", report.link.operator_path());
         println!(
             "egress   {}",
             report
@@ -676,8 +660,7 @@ fn link(json: bool) -> Result<()> {
     let window = output::AcquisitionWindow::start();
     let link = net::collect_link_snapshot();
     let counters = link
-        .interface
-        .as_deref()
+        .observation_interface()
         .and_then(net::collect_interface_counters);
     if json {
         let assessment = model::passive_link_summary(&link, counters.as_ref());
@@ -700,12 +683,7 @@ fn link(json: bool) -> Result<()> {
         assessment.path_status.label(),
         assessment.evidence_coverage.label()
     );
-    println!(
-        "path     {} [{}] → {}",
-        link.interface.as_deref().unwrap_or("unknown interface"),
-        link.link_type.as_deref().unwrap_or("unknown link"),
-        link.gateway.as_deref().unwrap_or("unknown gateway")
-    );
+    println!("path     {}", link.operator_path());
     if let Some(configuration) = network_configuration_text(&link) {
         println!("config   {configuration}");
     }
@@ -764,17 +742,15 @@ fn peers(json: bool) -> Result<()> {
         );
         output::print_json(&document)?;
     } else {
-        let gateway = link.gateway.as_deref();
+        let gateway = link.observation_gateway();
         println!(
             "LINKTOP  NEIGHBOR CACHE / PASSIVE / PATH {} / COVERAGE {}",
             assessment.path_status.label(),
             assessment.evidence_coverage.label()
         );
         println!(
-            "path     {} [{}] via {}  /  path filter {}",
-            link.interface.as_deref().unwrap_or("unknown interface"),
-            link.link_type.as_deref().unwrap_or("unknown link"),
-            link.gateway.as_deref().unwrap_or("unknown next hop"),
+            "path     {}  /  path filter {}",
+            link.operator_path(),
             match report.path_filter {
                 model::PeerPathFilter::Applied => "applied",
                 model::PeerPathFilter::Pending => "pending",
