@@ -50,6 +50,9 @@ struct Cli {
     /// Read, compare, and append private host-path evidence at PATH (or LINKTOP_HISTORY).
     #[arg(long, value_name = "PATH")]
     history: Option<PathBuf>,
+
+    #[arg(long, hide = true)]
+    internal_screenshot_child: bool,
 }
 
 #[derive(Debug, Args, Default)]
@@ -252,6 +255,7 @@ fn main() -> Result<()> {
         live: root_live,
         active,
         history: explicit_history,
+        internal_screenshot_child,
     } = Cli::parse();
     let probe_policy = if active {
         ProbePolicy::Active
@@ -260,6 +264,16 @@ fn main() -> Result<()> {
     };
     let terminal_stdin = io::stdin().is_terminal();
     let terminal_stdout = io::stdout().is_terminal();
+    let history_environment = std::env::var_os("LINKTOP_HISTORY");
+    validate_internal_screenshot_child(
+        &command,
+        &root_live,
+        active,
+        explicit_history.as_ref(),
+        history_environment.as_deref(),
+        internal_screenshot_child,
+        terminal_stdin && terminal_stdout,
+    )?;
     match command {
         Some(Command::Snapshot { json }) => {
             reject_live_options("snapshot", &root_live)?;
@@ -297,6 +311,7 @@ fn main() -> Result<()> {
                         dwell,
                         ProbePolicy::Passive,
                         None,
+                        internal_screenshot_child,
                     ),
                     LiveOutput::Plain => run_plain(
                         interval,
@@ -340,6 +355,7 @@ fn main() -> Result<()> {
                         dwell,
                         ProbePolicy::Passive,
                         None,
+                        internal_screenshot_child,
                     ),
                     LiveOutput::Plain => run_plain(
                         interval,
@@ -459,7 +475,7 @@ fn main() -> Result<()> {
             );
             let default_history = resolve_default_history(
                 explicit_history,
-                std::env::var_os("LINKTOP_HISTORY"),
+                history_environment,
                 live_output != LiveOutput::Once,
             );
             match live_output {
@@ -469,6 +485,7 @@ fn main() -> Result<()> {
                     dwell,
                     probe_policy,
                     default_history,
+                    internal_screenshot_child,
                 ),
                 LiveOutput::Plain => run_plain(
                     interval,
@@ -585,6 +602,49 @@ fn reject_history(subject: &str, history: Option<&PathBuf>) -> Result<()> {
     anyhow::ensure!(
         history.is_none(),
         "--history applies to the live overview (not {subject})"
+    );
+    Ok(())
+}
+
+fn validate_internal_screenshot_child(
+    command: &Option<Command>,
+    root_live: &LiveOptions,
+    active: bool,
+    history: Option<&PathBuf>,
+    history_environment: Option<&std::ffi::OsStr>,
+    enabled: bool,
+    terminal: bool,
+) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    anyhow::ensure!(terminal, "internal screenshot child requires a terminal");
+    anyhow::ensure!(
+        !active,
+        "internal screenshot scene cannot enable active probes"
+    );
+    anyhow::ensure!(
+        history.is_none(),
+        "internal screenshot scene cannot use history"
+    );
+    anyhow::ensure!(
+        history_environment.is_none_or(std::ffi::OsStr::is_empty),
+        "internal screenshot scene cannot inherit LINKTOP_HISTORY"
+    );
+    anyhow::ensure!(
+        !root_live.plain && !root_live.jsonl,
+        "internal screenshot child requires the TUI"
+    );
+    let child_tui = match command {
+        None => true,
+        Some(Command::Link { json, live }) | Some(Command::Peers { json, live }) => {
+            !json && !live.plain && !live.jsonl
+        }
+        _ => false,
+    };
+    anyhow::ensure!(
+        child_tui,
+        "internal screenshot child is only valid for a live TUI"
     );
     Ok(())
 }
@@ -1034,8 +1094,9 @@ fn run_tui(
     dwell: Option<Duration>,
     probe_policy: ProbePolicy,
     history_path: Option<PathBuf>,
+    internal_screenshot_child: bool,
 ) -> Result<()> {
-    let mut screenshot_scene = capture::child_scene_from_environment()?;
+    let mut screenshot_scene = capture::child_scene_from_environment(internal_screenshot_child)?;
     enable_raw_mode().context("enable terminal raw mode")?;
     let _guard = TerminalGuard;
     let mut stdout = io::stdout();
@@ -1482,6 +1543,7 @@ mod cli_tests {
         command.write_long_help(&mut root_help).unwrap();
         let root_help = String::from_utf8(root_help).unwrap();
         assert!(root_help.contains("default: 2"));
+        assert!(!root_help.contains("--internal-screenshot-child"));
 
         let mut command = Cli::command();
         let snapshot = command
@@ -1540,6 +1602,64 @@ mod cli_tests {
         assert!(!screenshot_help.contains("--jsonl"));
         assert!(!screenshot_help.contains("--dwell"));
         assert!(!screenshot_help.contains("--history"));
+    }
+
+    #[test]
+    fn internal_screenshot_child_is_hidden_and_tui_scoped() {
+        let cli = Cli::try_parse_from(["linktop", "--internal-screenshot-child", "--dwell", "5"])
+            .unwrap();
+        assert!(cli.internal_screenshot_child);
+        assert!(
+            validate_internal_screenshot_child(
+                &cli.command,
+                &cli.live,
+                cli.active,
+                cli.history.as_ref(),
+                None,
+                cli.internal_screenshot_child,
+                true,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_internal_screenshot_child(
+                &cli.command,
+                &cli.live,
+                cli.active,
+                cli.history.as_ref(),
+                None,
+                cli.internal_screenshot_child,
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_internal_screenshot_child(
+                &cli.command,
+                &cli.live,
+                cli.active,
+                cli.history.as_ref(),
+                Some(std::ffi::OsStr::new("ambient-history.jsonl")),
+                cli.internal_screenshot_child,
+                true,
+            )
+            .is_err()
+        );
+
+        let snapshot =
+            Cli::try_parse_from(["linktop", "--internal-screenshot-child", "snapshot"]).unwrap();
+        assert!(
+            validate_internal_screenshot_child(
+                &snapshot.command,
+                &snapshot.live,
+                snapshot.active,
+                snapshot.history.as_ref(),
+                None,
+                snapshot.internal_screenshot_child,
+                true,
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::fs::OpenOptions;
@@ -889,6 +890,9 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
         .arg(&working_directory)
         .args(["env", "-u", "NO_COLOR", "COLORTERM=truecolor"])
         .arg(&binary);
+    if scene.is_some() {
+        start.arg("--internal-screenshot-child");
+    }
     if probe_policy.is_active() {
         start.arg("--active");
     }
@@ -933,6 +937,9 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
         peer_selection: None,
         can_navigate: mode == MonitorMode::Overview,
     };
+    let native_scene_runtime = scene
+        .map(|scene| SceneRuntime::new(scene, None))
+        .transpose()?;
     let (projected_controls, _projected_controls_rx) = mpsc::channel();
     let mut manifest_frames = Vec::with_capacity(plan.frames.len());
     for target in plan.timestamps.iter().copied() {
@@ -980,12 +987,14 @@ pub fn run_native(request: CaptureRequest) -> Result<()> {
             continue;
         }
         frame_index += 1;
-        if let Some(scene) = scene {
+        if let Some(expectation) = native_scene_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.native_expectation_at(target))
+        {
             wait_for_native_scene_stage(
                 &server,
                 session,
-                scene,
-                target,
+                &expectation,
                 NATIVE_READY_TIMEOUT,
                 &interrupt,
             )?;
@@ -1254,39 +1263,34 @@ fn wait_for_native_ready(
 fn wait_for_native_scene_stage(
     server: &str,
     session: &str,
-    scene: CaptureScene,
-    elapsed: Duration,
+    expectation: &NativeSceneExpectation,
     timeout: Duration,
     interrupt: &CaptureInterrupt,
 ) -> Result<()> {
-    if scene == CaptureScene::DensePeers {
-        return Ok(());
-    }
-    let (network, generation) = match scene.stage_at(elapsed) {
-        "wifi-initial" => ("Northstar Lab", 1),
-        "hotspot-attached" => ("Field Kit", 2),
-        "wifi-returned" => ("Northstar Lab", 3),
-        stage => anyhow::bail!("unsupported native scene stage {stage}"),
-    };
     let started_at = Instant::now();
     loop {
         interrupt.check()?;
-        let ready = capture_pane_raw(server, session, false).is_ok_and(|frame| {
-            let generation = format!("GEN {generation}");
-            frame.contains(network) && frame.contains(&generation)
-        });
+        let ready = capture_pane_raw(server, session, false)
+            .is_ok_and(|frame| native_scene_stage_visible(&frame, expectation));
         if ready {
             return Ok(());
         }
         anyhow::ensure!(
             started_at.elapsed() < timeout,
             "native scene {} did not render stage {} within {:.1}s",
-            scene.label(),
-            scene.stage_at(elapsed),
+            expectation.scene.label(),
+            expectation.stage,
             timeout.as_secs_f64()
         );
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn native_scene_stage_visible(frame: &str, expectation: &NativeSceneExpectation) -> bool {
+    let generation = format!("GEN {}", expectation.generation);
+    frame.contains(&generation)
+        && (frame.contains("resize to inspect evidence")
+            || frame.contains(&expectation.path_marker))
 }
 
 struct CaptureInterrupt {
@@ -1413,9 +1417,22 @@ impl Drop for SceneGate {
     }
 }
 
-pub(crate) fn child_scene_from_environment() -> Result<Option<SceneRuntime>> {
-    let Some(value) = std::env::var_os(SCREENSHOT_CHILD_SCENE) else {
+pub(crate) fn child_scene_from_environment(authorized: bool) -> Result<Option<SceneRuntime>> {
+    if !authorized {
         return Ok(None);
+    }
+    child_scene_from_values(
+        std::env::var_os(SCREENSHOT_CHILD_SCENE),
+        std::env::var_os(SCREENSHOT_CHILD_SCENE_GATE).map(PathBuf::from),
+    )
+}
+
+fn child_scene_from_values(
+    value: Option<OsString>,
+    gate: Option<PathBuf>,
+) -> Result<Option<SceneRuntime>> {
+    let Some(value) = value else {
+        anyhow::bail!("{SCREENSHOT_CHILD_SCENE} is required for an internal screenshot child");
     };
     let value = value
         .into_string()
@@ -1425,7 +1442,6 @@ pub(crate) fn child_scene_from_environment() -> Result<Option<SceneRuntime>> {
         "wifi-hotspot-wifi" => CaptureScene::WifiHotspotWifi,
         _ => anyhow::bail!("{SCREENSHOT_CHILD_SCENE} has unsupported internal scene {value:?}"),
     };
-    let gate = std::env::var_os(SCREENSHOT_CHILD_SCENE_GATE).map(PathBuf::from);
     anyhow::ensure!(
         !scene.is_timed() || gate.is_some(),
         "{SCREENSHOT_CHILD_SCENE_GATE} is required for timed internal scene {}",
@@ -1470,6 +1486,14 @@ pub(crate) fn ensure_scene(app: &mut App, scene: CaptureScene) {
 struct SceneStage {
     at: Duration,
     records: Vec<HostPathObservationV0>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeSceneExpectation {
+    scene: CaptureScene,
+    stage: &'static str,
+    generation: u64,
+    path_marker: String,
 }
 
 pub(crate) struct SceneRuntime {
@@ -1522,6 +1546,29 @@ impl SceneRuntime {
             self.applied_stages += 1;
         }
         Ok(())
+    }
+
+    fn native_expectation_at(&self, elapsed: Duration) -> Option<NativeSceneExpectation> {
+        let (index, stage) = self
+            .stages
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, stage)| stage.at <= elapsed)?;
+        let current = stage.records.last()?;
+        let path_marker = current
+            .path
+            .network_name
+            .value
+            .clone()
+            .or_else(|| current.path.next_hop.clone())
+            .or_else(|| current.path.interface.clone())?;
+        Some(NativeSceneExpectation {
+            scene: self.scene,
+            stage: self.scene.stage_at(elapsed),
+            generation: (index + 1) as u64,
+            path_marker,
+        })
     }
 }
 
@@ -2594,6 +2641,17 @@ mod tests {
     }
 
     #[test]
+    fn scene_environment_requires_explicit_internal_child_authority() {
+        assert!(child_scene_from_environment(false).unwrap().is_none());
+        assert!(
+            child_scene_from_values(Some(OsString::from("dense-peers")), None)
+                .unwrap()
+                .is_some()
+        );
+        assert!(child_scene_from_values(None, None).is_err());
+    }
+
+    #[test]
     fn native_scene_gate_is_private_and_removed_with_its_guard() {
         let directory = TestDirectory::new("native-scene-gate");
         let path;
@@ -2664,6 +2722,33 @@ mod tests {
     fn wifi_hotspot_return_scene_uses_typed_history_and_path_generations() {
         let mut app = App::with_probe_policy(ProbePolicy::Passive);
         let mut runtime = SceneRuntime::new(CaptureScene::WifiHotspotWifi, None).unwrap();
+        assert_eq!(
+            runtime.native_expectation_at(Duration::from_secs(1)),
+            Some(NativeSceneExpectation {
+                scene: CaptureScene::WifiHotspotWifi,
+                stage: "wifi-initial",
+                generation: 1,
+                path_marker: "Northstar Lab".into(),
+            })
+        );
+        assert_eq!(
+            runtime.native_expectation_at(Duration::from_secs(3)),
+            Some(NativeSceneExpectation {
+                scene: CaptureScene::WifiHotspotWifi,
+                stage: "hotspot-attached",
+                generation: 2,
+                path_marker: "Field Kit".into(),
+            })
+        );
+        assert_eq!(
+            runtime.native_expectation_at(Duration::from_secs(5)),
+            Some(NativeSceneExpectation {
+                scene: CaptureScene::WifiHotspotWifi,
+                stage: "wifi-returned",
+                generation: 3,
+                path_marker: "Northstar Lab".into(),
+            })
+        );
 
         runtime
             .advance_to(&mut app, Duration::from_secs(1))
@@ -2874,6 +2959,33 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn native_scene_readiness_accepts_generation_only_in_the_size_fallback() {
+        let expectation = NativeSceneExpectation {
+            scene: CaptureScene::WifiHotspotWifi,
+            stage: "hotspot-attached",
+            generation: 2,
+            path_marker: "Field Kit".into(),
+        };
+
+        assert!(native_scene_stage_visible(
+            "OVERVIEW · PASSIVE · LIVE\nPATH GEN 2\nresize to inspect evidence",
+            &expectation,
+        ));
+        assert!(native_scene_stage_visible(
+            "LINKTOP NETWORK CONTEXT PATH GEN 2\npath en0 / Field Kit",
+            &expectation,
+        ));
+        assert!(!native_scene_stage_visible(
+            "OVERVIEW · PASSIVE · LIVE\nPATH GEN 1\nresize to inspect evidence",
+            &expectation,
+        ));
+        assert!(!native_scene_stage_visible(
+            "LINKTOP NETWORK CONTEXT PATH GEN 2\npath en0 / another network",
+            &expectation,
+        ));
     }
 
     #[test]

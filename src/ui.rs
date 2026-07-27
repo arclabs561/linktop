@@ -85,6 +85,7 @@ fn render_terminal_too_small(frame: &mut Frame<'_>, area: Rect, app: &App, mode:
         Line::from(format!(
             "minimum   {MIN_EVIDENCE_COLUMNS}×{MIN_EVIDENCE_ROWS}"
         )),
+        Line::from(format!("PATH GEN {}", app.path_generation)),
         Line::from("resize to inspect evidence"),
     ];
     if area.height >= 7 {
@@ -959,6 +960,11 @@ fn render_diagnosis(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         &diagnosis.context
     };
+    let coverage = if area.width < 120 {
+        compact_coverage_summary(app, area.width.saturating_sub(1))
+    } else {
+        diagnosis.coverage.clone()
+    };
     let lines = vec![
         Line::from(vec![
             Span::styled(
@@ -985,10 +991,7 @@ fn render_diagnosis(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Line::from(Span::styled(
             format!(
                 " {}",
-                fit(
-                    &diagnosis.coverage,
-                    usize::from(area.width.saturating_sub(3))
-                )
+                fit(&coverage, usize::from(area.width.saturating_sub(3)))
             ),
             Style::default().fg(MUTED),
         )),
@@ -3045,7 +3048,7 @@ fn compact_local_path_line<'a>(app: &'a App, width: u16, ssid: &str) -> Line<'a>
     ])
 }
 
-fn compact_coverage_line(app: &App, width: u16) -> Line<'static> {
+fn compact_coverage_summary(app: &App, width: u16) -> String {
     let peer_summary = app.peer_dwell_summary();
     let cache = if app.peers.health == Health::Queued {
         "cache pending".into()
@@ -3083,17 +3086,59 @@ fn compact_coverage_line(app: &App, width: u16) -> Line<'static> {
             "history"
         }
     });
-    let rate = app.progress_for(MonitorMode::Overview, EvidenceClaim::InterfaceRate);
-    let rate = if rate.state == EvidenceProgressState::Insufficient {
+    let rate_progress = app.progress_for(MonitorMode::Overview, EvidenceClaim::InterfaceRate);
+    let rate = if rate_progress.state == EvidenceProgressState::Insufficient {
         format!(
             "rate {}/{} insufficient",
-            rate.observations.unwrap_or_default(),
-            rate.required_observations.unwrap_or_default()
+            rate_progress.observations.unwrap_or_default(),
+            rate_progress.required_observations.unwrap_or_default()
         )
     } else {
-        format!("rate {}", rate.state.label())
+        format!("rate {}", rate_progress.state.label())
     };
-    let mut summary = if app.probe_policy().is_active() {
+    let mut summary = if width < 120 {
+        let short_rate = rate_support_label(app);
+        if app.probe_policy().is_active() {
+            let settled = ProbeKind::PATH
+                .iter()
+                .map(|kind| app.probe_view(*kind))
+                .filter(|probe| !matches!(probe.health, Health::Queued | Health::Running))
+                .count();
+            let variation =
+                app.progress_for(MonitorMode::Overview, EvidenceClaim::GatewayVariation);
+            if variation.state == EvidenceProgressState::Insufficient {
+                if width < 76 {
+                    format!(
+                        "coverage {} · core {settled}/{} · variation {}/{} insufficient",
+                        app.evidence_coverage().label(),
+                        ProbeKind::PATH.len(),
+                        variation.observations.unwrap_or_default(),
+                        variation.required_observations.unwrap_or_default()
+                    )
+                } else {
+                    format!(
+                        "coverage core {settled}/{} · variation {}/{} insufficient · {short_rate} · {cache}",
+                        ProbeKind::PATH.len(),
+                        variation.observations.unwrap_or_default(),
+                        variation.required_observations.unwrap_or_default()
+                    )
+                }
+            } else {
+                format!(
+                    "coverage {} · core {settled}/{} · {short_rate} · {cache}",
+                    app.evidence_coverage().label(),
+                    ProbeKind::PATH.len()
+                )
+            }
+        } else if width < 76 && rate_progress.state == EvidenceProgressState::Insufficient {
+            format!("coverage  {short_rate} · {cache}")
+        } else {
+            format!(
+                "coverage {} · {short_rate} · {cache}",
+                app.evidence_coverage().label()
+            )
+        }
+    } else if app.probe_policy().is_active() {
         format!(
             "coverage {} · {probes} · {rate} · {cache}",
             app.evidence_coverage().label()
@@ -3105,12 +3150,32 @@ fn compact_coverage_line(app: &App, width: u16) -> Line<'static> {
         )
     };
     if let Some(history) = history {
-        summary.push_str(&format!(" · {history}"));
+        let with_history = format!("{summary} · {history}");
+        if width >= 76 || with_history.chars().count() <= usize::from(width.saturating_sub(2)) {
+            summary = with_history;
+        }
     }
+    fit(&summary, usize::from(width.saturating_sub(2)))
+}
+
+fn compact_coverage_line(app: &App, width: u16) -> Line<'static> {
     Line::from(Span::styled(
-        fit(&summary, usize::from(width.saturating_sub(2))),
+        compact_coverage_summary(app, width),
         Style::default().fg(MUTED),
     ))
+}
+
+fn rate_support_label(app: &App) -> String {
+    let rate = app.progress_for(MonitorMode::Overview, EvidenceClaim::InterfaceRate);
+    match (rate.observations, rate.required_observations) {
+        (Some(observations), Some(required))
+            if rate.state == EvidenceProgressState::Insufficient =>
+        {
+            format!("rate {observations}/{required} insufficient")
+        }
+        (Some(observations), Some(required)) => format!("rate {observations}/{required}"),
+        _ => format!("rate {}", rate.state.label()),
+    }
 }
 
 fn gateway_summary_line(app: &App, width: u16) -> Line<'_> {
@@ -3710,6 +3775,7 @@ mod tests {
             let rendered = buffer_text(terminal.backend());
             assert!(rendered.contains("terminal  40×8"));
             assert!(rendered.contains("minimum   60×10"));
+            assert!(rendered.contains("PATH GEN 0"));
             assert!(rendered.contains("resize to inspect evidence"));
             assert!(rendered.contains("PASSIVE"));
             assert!(rendered.contains("q quit"));
@@ -4025,6 +4091,60 @@ mod tests {
     }
 
     #[test]
+    fn minimum_passive_overview_keeps_coverage_facts_complete() {
+        let mut app = App::new();
+        app.apply(MonitorUpdate::Link {
+            generation: 2,
+            snapshot: LinkSnapshot {
+                host: "fixture-host".into(),
+                interface: Some("en0".into()),
+                link_type: Some("wifi".into()),
+                ssid: Some("Field Kit".into()),
+                gateway: Some("198.51.100.1".into()),
+                ..LinkSnapshot::empty()
+            },
+        });
+        app.history_context = Some(HistoryContext {
+            kind: crate::model::HistoryContextKind::Changed,
+            summary: "new network context relative to prior".into(),
+            compact_summary: "new context · place unknown".into(),
+            context_anchor: "gateway link binding observed".into(),
+            place_authority: "unknown · assertion source not configured".into(),
+            evidence: "typed history evidence".into(),
+        });
+
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+        let coverage = rendered
+            .lines()
+            .find(|line| line.contains("coverage"))
+            .expect("minimum overview has a coverage line");
+
+        assert!(coverage.contains("rate 0/2"), "{rendered}");
+        assert!(coverage.contains("cache pending"), "{rendered}");
+        assert!(!coverage.contains('…'), "{rendered}");
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Overview, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+        let coverage = rendered
+            .lines()
+            .find(|line| line.contains("coverage"))
+            .expect("boundary overview has a coverage line");
+
+        assert!(coverage.contains("cache pending"), "{rendered}");
+        assert!(coverage.contains("history"), "{rendered}");
+        assert!(!coverage.contains('…'), "{rendered}");
+    }
+
+    #[test]
     fn minimum_overview_keeps_active_failure_ahead_of_history_context() {
         let mut app = App::with_probe_policy(ProbePolicy::Active);
         app.apply(MonitorUpdate::ProbeFinished {
@@ -4092,6 +4212,7 @@ mod tests {
         let rendered = buffer_text(terminal.backend());
 
         assert!(rendered.contains("rate 1/2 insufficient"), "{rendered}");
+        assert!(rendered.contains("cache pending"), "{rendered}");
         assert!(rendered.contains("default route observed"), "{rendered}");
         assert!(rendered.contains("next: [a]"), "{rendered}");
     }
@@ -4156,6 +4277,8 @@ mod tests {
             rendered.contains("variation 1/5 insufficient"),
             "{rendered}"
         );
+        assert!(rendered.contains("rate 0/2"), "{rendered}");
+        assert!(rendered.contains("cache pending"), "{rendered}");
         assert!(rendered.contains("next:"), "{rendered}");
     }
 
