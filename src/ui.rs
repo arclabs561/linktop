@@ -47,7 +47,13 @@ fn render_terminal_too_small(frame: &mut Frame<'_>, area: Rect, app: &App, mode:
         MonitorMode::Link => "LOCAL LINK",
         MonitorMode::Peers => "NEIGHBORS",
     };
-    let policy = if app.probe_policy().is_active() {
+    let policy = if mode == MonitorMode::Peers {
+        if app.probe_policy().is_active() {
+            "PASSIVE CACHE / PATH PROBES ON"
+        } else {
+            "PASSIVE CACHE"
+        }
+    } else if app.probe_policy().is_active() {
         "ACTIVE"
     } else {
         "PASSIVE"
@@ -59,7 +65,11 @@ fn render_terminal_too_small(frame: &mut Frame<'_>, area: Rect, app: &App, mode:
             Span::raw(" · "),
             Span::styled(
                 policy,
-                Style::default().fg(if policy == "ACTIVE" { WARN } else { MUTED }),
+                Style::default().fg(if app.probe_policy().is_active() {
+                    WARN
+                } else {
+                    MUTED
+                }),
             ),
             Span::raw(" · "),
             Span::styled(
@@ -343,15 +353,11 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, mode: MonitorMode
         ),
         MonitorMode::Peers => (
             if narrow {
-                if app.probe_policy().is_active() {
-                    "NEIGHBORS / ACTIVE"
-                } else {
-                    "NEIGHBORS / PASSIVE"
-                }
+                "NEIGHBORS / PASSIVE"
             } else if app.probe_policy().is_active() {
-                "NEIGHBOR CACHE / ACTIVE PATH CONTEXT"
+                "PASSIVE NEIGHBOR CACHE / PATH PROBES ON"
             } else {
-                "NEIGHBOR CACHE / PASSIVE OBSERVATION"
+                "PASSIVE NEIGHBOR CACHE"
             },
             app.peers.health,
             if narrow {
@@ -2117,7 +2123,7 @@ fn render_peers_focus(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Length(7),
+            Constraint::Length(5),
             Constraint::Min(5),
             Constraint::Length(1),
         ])
@@ -2153,17 +2159,18 @@ fn render_peers_focus(
         ssid,
         app.link.gateway.as_deref().unwrap_or("no gateway")
     );
-    let evidence = format!(
-        "{sources}{failed_sources}  /  OUI {}",
+    let cache = format!(
+        "{} / {sources}{failed_sources} / OUI {}",
+        peer_session_summary(app),
         app.peers
             .oui_source
             .as_deref()
             .and_then(|source| source.rsplit('/').next())
             .unwrap_or("unavailable")
     );
-    let session = format!(
-        "{} / current path generation only",
-        peer_session_summary(app)
+    let limits = format!(
+        "g{} only / cache ≠ liveness or departure / no traffic/application vantage",
+        app.path_generation
     );
     frame.render_widget(
         Paragraph::new(vec![
@@ -2172,35 +2179,15 @@ fn render_peers_focus(
                 Span::styled(fit(&path, content_width), Style::default().fg(INK)),
             ]),
             Line::from(vec![
-                Span::styled(" evidence  ", Style::default().fg(MUTED)),
-                Span::styled(fit(&evidence, content_width), Style::default().fg(INK)),
+                Span::styled(" cache     ", Style::default().fg(MUTED)),
+                Span::styled(fit(&cache, content_width), Style::default().fg(INK)),
             ]),
             Line::from(vec![
-                Span::styled(" session   ", Style::default().fg(MUTED)),
-                Span::styled(fit(&session, content_width), Style::default().fg(INK)),
-            ]),
-            Line::from(vec![
-                Span::styled(" semantics ", Style::default().fg(MUTED)),
-                Span::styled(
-                    fit(
-                        "cache presence is not liveness; disappearance is not departure",
-                        content_width,
-                    ),
-                    Style::default().fg(INK),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(" activity  ", Style::default().fg(MUTED)),
-                Span::styled(
-                    fit(
-                        "unknown; native cache has no traffic or application vantage",
-                        content_width,
-                    ),
-                    Style::default().fg(INK),
-                ),
+                Span::styled(" limits    ", Style::default().fg(MUTED)),
+                Span::styled(fit(&limits, content_width), Style::default().fg(INK)),
             ]),
         ])
-        .block(instrument_block(" OBSERVATION CONTEXT ")),
+        .block(instrument_block(" PASSIVE OBSERVATION CONTEXT ")),
         chunks[1],
     );
 
@@ -3598,15 +3585,32 @@ mod tests {
             .draw(|frame| render(frame, &app, MonitorMode::Peers, 0, false))
             .unwrap();
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("NEIGHBOR CACHE / PASSIVE OBSERVATION"));
+        assert!(rendered.contains("PASSIVE NEIGHBOR CACHE"));
         assert!(rendered.contains("operator-net"));
-        assert!(rendered.contains("cache presence is not liveness"));
-        assert!(rendered.contains("activity  unknown; native cache has no traffic"));
+        assert!(rendered.contains("cache ≠ liveness or departure"));
+        assert!(rendered.contains("no traffic/application vantage"));
         assert!(rendered.contains("192.168.1.1"));
         assert!(rendered.contains("gateway"));
         assert!(rendered.contains("neighbor STALE"));
         assert!(!rendered.contains("neighborSTALE"));
         assert!(!rendered.contains("GATEWAY RTT"));
+    }
+
+    #[test]
+    fn active_path_probes_do_not_relabel_passive_peer_acquisition() {
+        let mut app = App::with_probe_policy(ProbePolicy::Active);
+        app.peers = peer_fixture(2);
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, MonitorMode::Peers, 0, true))
+            .unwrap();
+        let rendered = buffer_text(terminal.backend());
+
+        assert!(rendered.contains("PASSIVE NEIGHBOR CACHE / PATH PROBES ON"));
+        assert!(rendered.contains("PASSIVE NEIGHBORS"));
+        assert!(!rendered.contains("NEIGHBORS / ACTIVE"));
+        assert!(!rendered.contains("NEIGHBOR CACHE / ACTIVE"));
     }
 
     #[test]
@@ -3683,7 +3687,7 @@ mod tests {
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("PASSIVE NEIGHBORS"));
         assert!(rendered.contains("192.168.1.1"));
-        assert!(!rendered.contains("OBSERVATION CONTEXT"));
+        assert!(!rendered.contains("PASSIVE OBSERVATION CONTEXT"));
     }
 
     #[test]
