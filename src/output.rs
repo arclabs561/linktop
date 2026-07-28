@@ -1002,6 +1002,28 @@ mod tests {
     }
 
     #[test]
+    fn readiness_document_matches_an_https_failure_to_the_https_purpose() {
+        let report = SnapshotReport::from_results(
+            test_link(),
+            Some(test_counters()),
+            test_peers(),
+            vec![
+                (ProbeKind::Gateway, test_probe_result("gateway", 8.0)),
+                (ProbeKind::Dns, test_probe_result("dns", 12.0)),
+                (ProbeKind::Https, ProbeResult::failed("https failed")),
+                (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
+            ],
+        );
+        let document = readiness_document_with_workload(&report, &[], &AcquisitionWindow::start());
+
+        assert_eq!(document.assessments[0].status, ReadinessStatusV0::Degraded);
+        assert_eq!(
+            document.assessments[0].reasons,
+            vec!["one or more path measurements failed"]
+        );
+    }
+
+    #[test]
     fn readiness_document_does_not_treat_unavailable_path_evidence_as_ready() {
         let report = SnapshotReport::from_results(
             test_link(),
@@ -1011,6 +1033,76 @@ mod tests {
                 (ProbeKind::Gateway, test_probe_result("gateway", 8.0)),
                 (ProbeKind::Dns, ProbeResult::unavailable("dns unavailable")),
                 (ProbeKind::Https, test_probe_result("https", 35.0)),
+                (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
+            ],
+        );
+        let document = readiness_document_with_workload(&report, &[], &AcquisitionWindow::start());
+
+        assert_eq!(
+            document.assessments[0].status,
+            ReadinessStatusV0::Insufficient
+        );
+    }
+
+    #[test]
+    fn readiness_document_requires_each_path_context_component() {
+        let mut cases = Vec::new();
+        let mut missing_interface = test_link();
+        missing_interface.interface = None;
+        cases.push(("interface", missing_interface));
+        let mut missing_gateway = test_link();
+        missing_gateway.gateway = None;
+        cases.push(("gateway", missing_gateway));
+        let mut missing_resolver = test_link();
+        missing_resolver.resolvers.clear();
+        cases.push(("resolver", missing_resolver));
+        let mut missing_default_address = test_link();
+        missing_default_address
+            .addresses
+            .first_mut()
+            .unwrap()
+            .is_default = false;
+        cases.push(("default address", missing_default_address));
+
+        for (missing, link) in cases {
+            let report = SnapshotReport::from_results(
+                link,
+                Some(test_counters()),
+                test_peers(),
+                vec![
+                    (ProbeKind::Gateway, test_probe_result("gateway", 8.0)),
+                    (ProbeKind::Dns, test_probe_result("dns", 12.0)),
+                    (ProbeKind::Https, test_probe_result("https", 35.0)),
+                    (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
+                ],
+            );
+            let document =
+                readiness_document_with_workload(&report, &[], &AcquisitionWindow::start());
+
+            assert_eq!(
+                document.assessments[0].status,
+                ReadinessStatusV0::Insufficient,
+                "missing {missing} must not produce interactive readiness"
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_document_requires_all_path_probes_to_be_healthy() {
+        let degraded = |detail: &str| ProbeResult {
+            health: Health::Degraded,
+            detail: detail.into(),
+            latency_ms: Some(12.0),
+            metrics: Some(test_metrics()),
+        };
+        let report = SnapshotReport::from_results(
+            test_link(),
+            Some(test_counters()),
+            test_peers(),
+            vec![
+                (ProbeKind::Gateway, degraded("gateway degraded")),
+                (ProbeKind::Dns, degraded("dns degraded")),
+                (ProbeKind::Https, degraded("https degraded")),
                 (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
             ],
         );
@@ -1145,6 +1237,33 @@ mod tests {
             document.assessments[3].status,
             ReadinessStatusV0::Insufficient
         );
+    }
+
+    #[test]
+    fn readiness_document_requires_the_full_bounded_workload_window() {
+        let report = SnapshotReport::from_results(
+            test_link(),
+            Some(test_counters()),
+            test_peers(),
+            vec![
+                (ProbeKind::Gateway, test_probe_result("gateway", 8.0)),
+                (ProbeKind::Dns, test_probe_result("dns", 12.0)),
+                (ProbeKind::Https, test_probe_result("https", 35.0)),
+                (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
+            ],
+        );
+        let workloads = vec![
+            test_workload(Health::Ok, Vec::new()),
+            test_workload(Health::Ok, Vec::new()),
+        ];
+        let document =
+            readiness_document_with_workload(&report, &workloads, &AcquisitionWindow::start());
+
+        assert_eq!(
+            document.assessments[3].status,
+            ReadinessStatusV0::Insufficient
+        );
+        assert_eq!(document.workload.unwrap().completed_samples, 2);
     }
 
     #[test]
