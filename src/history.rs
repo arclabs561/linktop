@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use netbraid_evidence::{
+use netbraid::evidence::{
     CollectionPolicyV0, CoverageStateV0, CoverageV0, HOST_PATH_SCHEMA_V0, HostPathObservationV0,
     HostPathV0, NetworkNameV0, NetworkNameVisibilityV0, ObservationOrderV0, SourceRefV0,
 };
-use netbraid_replay::{
+use netbraid::replay::{
     AttachmentCorroborationV0, ContextRecurrenceV0, ContextRelationV0, ExactContextMatchV0,
     JsonlReadWarningV0, append_jsonl, compare_contexts, read_jsonl_recovering_tail,
     summarize_context_recurrence,
@@ -657,10 +657,10 @@ mod tests {
     }
 
     fn scenario_inputs(scenario_id: &str, checkpoint: &str) -> Vec<HostPathObservationV0> {
-        let bundle = netbraid_replay::builtin_scenario_v0(scenario_id)
+        let bundle = netbraid::replay::builtin_scenario_v0(scenario_id)
             .expect("load public synthetic scenario");
         let receipt =
-            netbraid_replay::replay_scenario_v0(&bundle, checkpoint).expect("replay checkpoint");
+            netbraid::replay::replay_scenario_v0(&bundle, checkpoint).expect("replay checkpoint");
         bundle
             .checkpoint_inputs_v0(&receipt)
             .expect("resolve receipt-bound checkpoint inputs")

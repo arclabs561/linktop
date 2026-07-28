@@ -130,3 +130,17 @@ Extends ADR-0001's standalone host-instrument boundary, ADR-0002's explicit
 lifetime contracts, ADR-0006's acquisition separation, ADR-0008's library
 integration without CLI coupling, and ADR-0010's rule that a new replay/input
 contract must not reinterpret live-v1 output.
+
+## Update (2026-07-27): consume the published replay contract
+
+Netbraid 0.3.0 now publishes the saved-capture triage types, reader, and reducer
+through `netbraid::replay`. Linktop therefore replaces the temporary exact-Git
+`netbraid-replay` dependency with the verified registry package under
+ADR-0008's adoption gate.
+
+The exact source revision is no longer the compatibility boundary. The
+versioned registry dependency and Netbraid's serialized `netmon.*` schemas are.
+Linktop reruns the exact human and JSON goldens, the read-only input
+preservation tests, and the extracted-package test when that dependency
+changes. The finite review boundary, no-subprocess contract, and Netbraid
+ownership of normalization remain unchanged.
