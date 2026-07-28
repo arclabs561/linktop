@@ -5,7 +5,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use netbraid_replay::{
+use netbraid::replay::{
     SavedPcapClaimScopeV0, SavedPcapConversationDirectionV0, SavedPcapConversationExclusionCountV0,
     SavedPcapConversationTriageV0, SavedPcapEventWindowV0,
     SavedPcapNegativeClaimAbstentionReasonV1, SavedPcapNegativeClaimQualificationV1,
@@ -191,7 +191,7 @@ fn render_human(triage: &SavedPcapTriageV1) -> String {
     output
 }
 
-fn render_acquisition(output: &mut String, manifest: &netbraid_evidence::CaptureManifestV0) {
+fn render_acquisition(output: &mut String, manifest: &netbraid::evidence::CaptureManifestV0) {
     let Some(policy) = &manifest.acquisition_policy else {
         writeln!(output, "acquire   policy unknown").expect("writing to a String cannot fail");
         return;
@@ -205,7 +205,7 @@ fn render_acquisition(output: &mut String, manifest: &netbraid_evidence::Capture
     output.push('\n');
 }
 
-fn render_receipt(output: &mut String, receipt: Option<&netbraid_evidence::CaptureRunReceiptV0>) {
+fn render_receipt(output: &mut String, receipt: Option<&netbraid::evidence::CaptureRunReceiptV0>) {
     let Some(receipt) = receipt else {
         writeln!(
             output,

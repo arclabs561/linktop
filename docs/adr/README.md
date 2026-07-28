@@ -19,3 +19,4 @@ network addresses, SSIDs, and other private observations out of these records.
 | [0010](0010-project-live-evidence-once-across-human-and-machine-outputs.md) | Project live evidence once across human and machine outputs | Accepted |
 | [0011](0011-review-normalized-saved-evidence-read-only.md) | Review normalized saved evidence as a finite read-only projection | Accepted |
 | [0012](0012-own-private-incident-capsules-as-explicit-transactions.md) | Own private incident capsules as explicit transactions | Accepted |
+| [0013](0013-publish-one-linktop-binary-package.md) | Publish one Linktop binary package | Accepted |

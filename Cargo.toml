@@ -5,7 +5,12 @@ edition = "2024"
 rust-version = "1.88"
 description = "A terminal instrument for the host's current network context"
 license = "MIT"
-publish = false
+repository = "https://github.com/arclabs561/linktop"
+readme = "README.md"
+publish = ["crates-io"]
+keywords = ["diagnostics", "network", "observability", "tui", "wifi"]
+categories = ["command-line-utilities", "network-programming"]
+include = ["/src/**", "/README.md", "/LICENSE", "/CHANGELOG.md"]
 
 [dependencies]
 ansi-to-html = "0.2"
@@ -14,8 +19,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.6", features = ["derive"] }
 crossterm = "0.29"
 if-addrs = "0.15"
-netbraid-evidence = { git = "https://github.com/arclabs561/netbraid.git", rev = "ab553a5e7c22b6344d4b60f632075691f4a966b6" }
-netbraid-replay = { git = "https://github.com/arclabs561/netbraid.git", rev = "ab553a5e7c22b6344d4b60f632075691f4a966b6", features = ["scenario-fixtures"] }
+netbraid = { version = "0.3.0", default-features = false, features = ["scenario-fixtures"] }
 ratatui = "0.30"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 serde = { version = "1.0", features = ["derive"] }

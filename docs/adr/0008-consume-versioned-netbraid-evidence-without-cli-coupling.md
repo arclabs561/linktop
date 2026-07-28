@@ -266,3 +266,23 @@ deliberate same-user process. The private gate remains a synchronization
 primitive for timed scenes, not a credential. A stronger capability-file or
 inherited-descriptor protocol is deferred until native screenshot children cross
 a user, privilege, or process-trust boundary.
+
+## Update (2026-07-27): adopt the verified Netbraid registry package
+
+Netbraid 0.3.0 is now present and unyanked on crates.io. Its package metadata
+names the public Netbraid repository, and the downloaded package records the
+expected source commit
+`08c3a6bddc859432bd761d1795396107c4a37bb6`. The temporary exact-Git boundary
+has therefore served its purpose.
+
+Linktop replaces the two Git packages with one semver dependency on
+`netbraid = 0.3.0`. Default features remain disabled and Linktop enables only
+`scenario-fixtures`; production code imports the policy-neutral
+`netbraid::evidence` and `netbraid::replay` modules. This does not add the
+Netbraid executable, TShark adapter, collection features, service, credentials,
+or sibling-checkout requirement.
+
+The package consolidation changes Rust dependency topology, not the evidence
+protocol. Established serialized identifiers remain `netmon.*`, stored history
+remains compatible, and Linktop continues to own live host collection,
+diagnosis, interaction, and presentation.
