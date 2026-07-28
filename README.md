@@ -30,18 +30,18 @@ Status: experimental.
 Cargo installation requires Rust 1.88 or newer:
 
 ```sh
-cargo install linktop --version 0.1.1 --locked
+cargo install linktop --version 0.1.2 --locked
 ```
 
 Checksummed native archives for x86-64 Linux, Intel macOS, and Apple-silicon
 macOS are attached to the
-[`linktop-v0.1.1` release](https://github.com/arclabs561/linktop/releases/tag/linktop-v0.1.1):
+[`linktop-v0.1.2` release](https://github.com/arclabs561/linktop/releases/tag/linktop-v0.1.2):
 
 ```sh
-gh release download linktop-v0.1.1 \
+gh release download linktop-v0.1.2 \
   --repo arclabs561/linktop \
-  --dir linktop-v0.1.1
-(cd linktop-v0.1.1 && shasum -a 256 --check SHA256SUMS)
+  --dir linktop-v0.1.2
+(cd linktop-v0.1.2 && shasum -a 256 --check SHA256SUMS)
 ```
 
 The macOS archives are not code-signed or notarized. Cargo installation is the

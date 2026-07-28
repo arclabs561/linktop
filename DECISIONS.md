@@ -78,3 +78,8 @@ The public package and executable are both named `linktop`. `pinglet` and
 `pingl` remain local compatibility aliases, not separate packages or products.
 Releases publish one Cargo package plus native Linux and macOS archives with
 checksums and provenance.
+
+The Cargo package includes a documentation-only library target because docs.rs
+builds package documentation with `cargo rustdoc --lib`. It exposes no
+supported embedding API; reusable evidence and replay primitives belong in
+Netbraid.

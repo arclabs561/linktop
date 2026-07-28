@@ -9,6 +9,14 @@ one version.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-28
+
+### Fixed
+
+- Added a documentation-only library target so docs.rs can render the package
+  overview, and changed the documentation gate to reproduce docs.rs's
+  `cargo rustdoc --lib` target selection.
+
 ## [0.1.1] - 2026-07-28
 
 ### Changed
@@ -50,6 +58,7 @@ one version.
   evidence, replay, and public scenario-fixture surfaces; Netbraid's CLI and
   TShark adapter features remain disabled.
 
-[Unreleased]: https://github.com/arclabs561/linktop/compare/linktop-v0.1.1...HEAD
+[Unreleased]: https://github.com/arclabs561/linktop/compare/linktop-v0.1.2...HEAD
+[0.1.2]: https://github.com/arclabs561/linktop/compare/linktop-v0.1.1...linktop-v0.1.2
 [0.1.1]: https://github.com/arclabs561/linktop/compare/linktop-v0.1.0...linktop-v0.1.1
 [0.1.0]: https://github.com/arclabs561/linktop/releases/tag/linktop-v0.1.0
