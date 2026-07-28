@@ -943,6 +943,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn readiness_document_serializes_the_versioned_wire_shape() {
+        let report = SnapshotReport::from_results(
+            test_link(),
+            Some(test_counters()),
+            test_peers(),
+            vec![
+                (ProbeKind::Gateway, test_probe_result("gateway", 8.0)),
+                (ProbeKind::Dns, test_probe_result("dns", 12.0)),
+                (ProbeKind::Https, test_probe_result("https", 35.0)),
+                (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
+            ],
+        );
+        let value =
+            serde_json::to_value(readiness_document(&report, &AcquisitionWindow::start())).unwrap();
+
+        assert_eq!(value["schema"], READINESS_SCHEMA_V0);
+        assert_eq!(value["acquisition"]["policy"], "active");
+        assert_eq!(
+            value["acquisition"]["lifetime"],
+            "bounded_readiness_snapshot"
+        );
+        assert_eq!(value["assessments"].as_array().unwrap().len(), 4);
+        assert_eq!(value["assessments"][0]["purpose"], "interactive_use");
+        assert_eq!(value["assessments"][0]["status"], "ready");
+        assert_eq!(value["assessments"][1]["status"], "not_tested");
+    }
+
     fn test_peers() -> PeerSnapshot {
         PeerSnapshot {
             health: Health::Ok,

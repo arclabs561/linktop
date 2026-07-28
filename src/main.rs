@@ -1718,6 +1718,20 @@ mod cli_tests {
         assert!(!history_help.contains("--active"));
 
         let mut command = Cli::command();
+        let readiness = command
+            .find_subcommand_mut("readiness")
+            .expect("readiness subcommand");
+        let mut readiness_help = Vec::new();
+        readiness.write_long_help(&mut readiness_help).unwrap();
+        let readiness_help = String::from_utf8(readiness_help).unwrap();
+        assert!(readiness_help.contains("--json"));
+        assert!(!readiness_help.contains("--interval"));
+        assert!(!readiness_help.contains("--plain"));
+        assert!(!readiness_help.contains("--jsonl"));
+        assert!(!readiness_help.contains("--dwell"));
+        assert!(!readiness_help.contains("--active"));
+
+        let mut command = Cli::command();
         let screenshot = command
             .find_subcommand_mut("screenshot")
             .expect("screenshot subcommand");
