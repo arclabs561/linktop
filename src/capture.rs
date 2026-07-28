@@ -25,7 +25,7 @@ use ratatui::style::{Color, Modifier};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use netbraid_replay::{
+use netbraid::replay::{
     HostPathObservationV0, NetworkNameVisibilityV0, ScenarioPrivacyV0, builtin_scenario_v0,
     replay_scenario_v0,
 };
