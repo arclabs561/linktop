@@ -1,17 +1,238 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::{Context, ensure};
 use netbraid::evidence::{
-    CollectionPolicyV0, CoverageStateV0, CoverageV0, HOST_PATH_SCHEMA_V0, HostPathObservationV0,
-    HostPathV0, NetworkNameV0, NetworkNameVisibilityV0, ObservationOrderV0, SourceRefV0,
+    CollectionPolicyV0, ContextKeyV0, CoverageStateV0, CoverageV0, HOST_PATH_SCHEMA_V0,
+    HostPathObservationV0, HostPathV0, NetworkNameV0, NetworkNameVisibilityV0, ObservationOrderV0,
+    SourceRefV0,
 };
 use netbraid::replay::{
     AttachmentCorroborationV0, ContextRecurrenceV0, ContextRelationV0, ExactContextMatchV0,
-    JsonlReadWarningV0, append_jsonl, compare_contexts, read_jsonl_recovering_tail,
-    summarize_context_recurrence,
+    JsonlReadWarningV0, append_jsonl, compare_contexts, parse_host_path_jsonl,
+    read_jsonl_recovering_tail, summarize_context_recurrence,
 };
+use serde::Serialize;
 
 use crate::model::{App, HistoryContext, HistoryContextKind, LinkSnapshot, MonitorUpdate};
+
+pub const EPISODE_REPORT_SCHEMA_V0: &str = "linktop.host_path_episodes.v0";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HistoryEpisodeKindV0 {
+    Initial,
+    Changed,
+    Returned,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct HistoryEpisodeSummaryV0 {
+    observer_id: String,
+    kind: HistoryEpisodeKindV0,
+    onset_event_time_unix_ms: i64,
+    latest_event_time_unix_ms: i64,
+    recovery_event_time_unix_ms: Option<i64>,
+    observations: u64,
+    prior_exact_episodes: u64,
+    changed_dimensions: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveHistoryEpisode {
+    observer_id: String,
+    context_key: ContextKeyV0,
+    kind: HistoryEpisodeKindV0,
+    onset_event_time_unix_ms: i64,
+    latest_event_time_unix_ms: i64,
+    recovery_event_time_unix_ms: Option<i64>,
+    observations: u64,
+    prior_exact_episodes: u64,
+    changed_dimensions: BTreeSet<String>,
+}
+
+impl ActiveHistoryEpisode {
+    fn finish(self) -> HistoryEpisodeSummaryV0 {
+        HistoryEpisodeSummaryV0 {
+            observer_id: self.observer_id,
+            kind: self.kind,
+            onset_event_time_unix_ms: self.onset_event_time_unix_ms,
+            latest_event_time_unix_ms: self.latest_event_time_unix_ms,
+            recovery_event_time_unix_ms: self.recovery_event_time_unix_ms,
+            observations: self.observations,
+            prior_exact_episodes: self.prior_exact_episodes,
+            changed_dimensions: self.changed_dimensions.into_iter().collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct EpisodeReportV0 {
+    schema: &'static str,
+    source_records: u64,
+    episodes: Vec<HistoryEpisodeSummaryV0>,
+}
+
+/// Summarize a strict, finite Netbraid host-path history without collecting or
+/// modifying it.
+pub fn run_episodes(path: &Path, max_input_mib: u64, json: bool) -> anyhow::Result<()> {
+    let max_bytes = max_input_mib
+        .checked_mul(1024 * 1024)
+        .context("--max-input-mib is too large")?;
+    let replay = read_bounded_host_path(path, max_bytes)?;
+    let source_records = replay.records.len().try_into().unwrap_or(u64::MAX);
+    let episodes = summarize_episodes(replay.records).context("summarize host-path episodes")?;
+    let report = EpisodeReportV0 {
+        schema: EPISODE_REPORT_SCHEMA_V0,
+        source_records,
+        episodes,
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).context("serialize episode report")?
+        );
+    } else {
+        println!(
+            "episode report · {} source record(s) · {} episode(s)",
+            report.source_records,
+            report.episodes.len()
+        );
+        for (index, episode) in report.episodes.iter().enumerate() {
+            let kind = match episode.kind {
+                HistoryEpisodeKindV0::Initial => "initial",
+                HistoryEpisodeKindV0::Changed => "changed",
+                HistoryEpisodeKindV0::Returned => "returned",
+            };
+            let recovery = episode
+                .recovery_event_time_unix_ms
+                .map_or_else(|| "none".into(), |time| time.to_string());
+            let changed = if episode.changed_dimensions.is_empty() {
+                "none".into()
+            } else {
+                episode.changed_dimensions.join(",")
+            };
+            println!(
+                "{} · {} · observer={} · onset={} · latest={} · recovery={} · observations={} · prior_exact_episodes={} · changed={}",
+                index + 1,
+                kind,
+                episode.observer_id,
+                episode.onset_event_time_unix_ms,
+                episode.latest_event_time_unix_ms,
+                recovery,
+                episode.observations,
+                episode.prior_exact_episodes,
+                changed,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn read_bounded_host_path(
+    path: &Path,
+    max_bytes: u64,
+) -> anyhow::Result<netbraid::replay::ReplayStateV0> {
+    let mut file =
+        File::open(path).with_context(|| format!("open host-path history {}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read host-path history {}", path.display()))?;
+    ensure!(
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX) <= max_bytes,
+        "host-path history exceeds --max-input-mib"
+    );
+    parse_host_path_jsonl(&bytes)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("parse host-path history {}", path.display()))
+}
+
+fn summarize_episodes(
+    records: Vec<HostPathObservationV0>,
+) -> anyhow::Result<Vec<HistoryEpisodeSummaryV0>> {
+    let replay = netbraid::replay::replay(records).map_err(anyhow::Error::from)?;
+    let mut active = BTreeMap::<String, ActiveHistoryEpisode>::new();
+    let mut previous = BTreeMap::<String, HostPathObservationV0>::new();
+    let mut prior_exact_episodes = BTreeMap::<(String, ContextKeyV0), u64>::new();
+    let mut episodes = Vec::new();
+
+    for record in replay.records {
+        let observer_id = record.source.observer_id.clone();
+        let context_key = record.context_key();
+        let prior_count = prior_exact_episodes
+            .get(&(observer_id.clone(), context_key.clone()))
+            .copied()
+            .unwrap_or_default();
+        let previous_record = previous.get(&observer_id);
+        let episode_changed = active
+            .get(&observer_id)
+            .is_some_and(|episode| episode.context_key != context_key);
+
+        if episode_changed {
+            let finished = active
+                .remove(&observer_id)
+                .expect("episode_changed implies an active episode");
+            let finished_key = finished.context_key.clone();
+            episodes.push(finished.finish());
+            *prior_exact_episodes
+                .entry((observer_id.clone(), finished_key))
+                .or_default() += 1;
+        }
+
+        if let Some(episode) = active.get_mut(&observer_id) {
+            for dimension in compare_contexts(previous_record, &record).changed_dimensions {
+                episode.changed_dimensions.insert(dimension.into());
+            }
+            episode.latest_event_time_unix_ms = record.order.event_time_unix_ms;
+            episode.observations += 1;
+        } else {
+            let kind = if previous_record.is_none() {
+                HistoryEpisodeKindV0::Initial
+            } else if prior_count > 0 {
+                HistoryEpisodeKindV0::Returned
+            } else {
+                HistoryEpisodeKindV0::Changed
+            };
+            let recovery_event_time_unix_ms =
+                (kind == HistoryEpisodeKindV0::Returned).then_some(record.order.event_time_unix_ms);
+            let mut changed_dimensions = BTreeSet::new();
+            if previous_record.is_some() {
+                for dimension in compare_contexts(previous_record, &record).changed_dimensions {
+                    changed_dimensions.insert(dimension.into());
+                }
+            }
+            active.insert(
+                observer_id.clone(),
+                ActiveHistoryEpisode {
+                    observer_id: observer_id.clone(),
+                    context_key,
+                    kind,
+                    onset_event_time_unix_ms: record.order.event_time_unix_ms,
+                    latest_event_time_unix_ms: record.order.event_time_unix_ms,
+                    recovery_event_time_unix_ms,
+                    observations: 1,
+                    prior_exact_episodes: prior_count,
+                    changed_dimensions,
+                },
+            );
+        }
+        previous.insert(observer_id, record);
+    }
+
+    episodes.extend(active.into_values().map(ActiveHistoryEpisode::finish));
+    episodes.sort_by(|left, right| {
+        left.onset_event_time_unix_ms
+            .cmp(&right.onset_event_time_unix_ms)
+            .then_with(|| left.observer_id.cmp(&right.observer_id))
+    });
+    Ok(episodes)
+}
 
 pub struct HistorySession {
     path: PathBuf,
@@ -829,6 +1050,75 @@ mod tests {
         assert!(summary.summary.contains("new BSSID attachment"));
         assert!(summary.compact_summary.contains("new BSSID"));
         assert!(summary.evidence.contains("place unknown"));
+    }
+
+    #[test]
+    fn episode_reduction_tracks_onset_recovery_and_changed_dimensions() {
+        let first = with_order(
+            observation_from_app(&app("house", "192.0.2.1", "02:00:00:00:00:01")),
+            "first",
+            1_000,
+        );
+        let steady = with_order(
+            observation_from_app(&app("house", "192.0.2.1", "02:00:00:00:00:02")),
+            "steady",
+            2_000,
+        );
+        let changed = with_order(
+            observation_from_app(&app("hotspot", "198.51.100.1", "02:00:00:00:00:03")),
+            "changed",
+            3_000,
+        );
+        let returned = with_order(
+            observation_from_app(&app("house", "192.0.2.1", "02:00:00:00:00:04")),
+            "returned",
+            4_000,
+        );
+
+        let episodes = summarize_episodes(vec![returned, changed, first, steady]).unwrap();
+
+        assert_eq!(episodes.len(), 3);
+        assert_eq!(episodes[0].kind, HistoryEpisodeKindV0::Initial);
+        assert_eq!(episodes[0].observations, 2);
+        assert_eq!(episodes[0].onset_event_time_unix_ms, 1_000);
+        assert_eq!(episodes[0].latest_event_time_unix_ms, 2_000);
+        assert_eq!(episodes[0].recovery_event_time_unix_ms, None);
+        assert_eq!(episodes[1].kind, HistoryEpisodeKindV0::Changed);
+        assert_eq!(
+            episodes[1].changed_dimensions,
+            vec!["associated_bssid", "network_name", "next_hop", "resolvers",]
+        );
+        assert_eq!(episodes[2].kind, HistoryEpisodeKindV0::Returned);
+        assert_eq!(episodes[2].prior_exact_episodes, 1);
+        assert_eq!(episodes[2].recovery_event_time_unix_ms, Some(4_000));
+    }
+
+    #[test]
+    fn episode_reduction_keeps_interleaved_observers_separate() {
+        let first = with_order(
+            observation_from_app(&app("house", "192.0.2.1", "02:00:00:00:00:01")),
+            "first",
+            1_000,
+        );
+        let mut other = first.clone();
+        other.record_id = "other".into();
+        other.source.observer_id = "other-host".into();
+        other.order.event_time_unix_ms = 2_000;
+        other.order.acquired_time_unix_ms = 2_000;
+        other.order.source_sequence = 2_000;
+        let third = with_order(
+            observation_from_app(&app("house", "192.0.2.1", "02:00:00:00:00:03")),
+            "third",
+            3_000,
+        );
+
+        let episodes = summarize_episodes(vec![third, other, first]).unwrap();
+
+        assert_eq!(episodes.len(), 2);
+        assert_eq!(episodes[0].observer_id, "workstation");
+        assert_eq!(episodes[0].observations, 2);
+        assert_eq!(episodes[1].observer_id, "other-host");
+        assert_eq!(episodes[1].observations, 1);
     }
 
     #[test]

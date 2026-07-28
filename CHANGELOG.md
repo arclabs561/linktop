@@ -14,6 +14,8 @@ one version.
 - Added private, bounded incident-capsule packaging and verification for
   canonical Netbraid host-path history. Version 0 is lossless and does not
   collect, capture packets, or infer identity.
+- Added finite observer-scoped episode summaries for canonical host-path
+  history, with JSON output and no source mutation.
 
 ## [0.1.2] - 2026-07-28
 

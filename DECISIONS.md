@@ -65,6 +65,9 @@ Incident capsules are explicit private transactions: v0 packages an existing
 canonical host-path log only, publishes atomically into a new directory, and
 does not become an automatic record-every-session side effect. Sanitized export
 and multi-observer capsules require separate contracts.
+The `history` command is also finite and read-only: it reduces canonical
+host-path records into observer-scoped context-key episodes without inferring
+timeouts, place, identity, traffic shape, or intent.
 
 ## Reproducible visual QA
 

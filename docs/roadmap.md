@@ -12,13 +12,12 @@ support.
 - Focused link and peer-cache views.
 - Explicit next-hop, DNS, HTTPS, public-egress, and load experiments.
 - Finite text, TUI, JSON, JSONL, opt-in history, and saved-evidence review.
+- Deterministic observer-scoped episode summaries for canonical host-path history.
 - Private, bounded, lossless incident-capsule packaging with verification.
 - Reproducible headless and native terminal capture.
 
 ## Next
 
-- Better session-local episode summaries: onset, recovery, recurrence, and
-  changed fingerprint dimensions.
 - Purpose-specific readiness views such as interactive use, calls, bulk
   transfer, and idle background health, backed by explicit measurements.
 - Advisory traffic-shape fingerprints where the host platform exposes

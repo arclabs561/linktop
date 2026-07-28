@@ -120,6 +120,17 @@ enum Command {
         #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u64).range(1..=4096))]
         max_input_mib: u64,
     },
+    /// Summarize a finite canonical host-path history into observer-scoped episodes.
+    History {
+        /// Canonical Netbraid host-path JSONL history.
+        input: PathBuf,
+        /// Emit the versioned machine-readable episode report.
+        #[arg(long)]
+        json: bool,
+        /// Maximum host-path JSONL input accepted, in MiB.
+        #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u64).range(1..=4096))]
+        max_input_mib: u64,
+    },
     /// Package or verify a bounded private incident capsule.
     Capsule {
         #[command(subcommand)]
@@ -391,6 +402,16 @@ fn main() -> Result<()> {
             reject_root_active("review", active)?;
             reject_history("review", explicit_history.as_ref())?;
             review::run(&input, max_input_mib, json, tail_seconds)
+        }
+        Some(Command::History {
+            input,
+            json,
+            max_input_mib,
+        }) => {
+            reject_live_options("history", &root_live)?;
+            reject_root_active("history", active)?;
+            reject_history("history", explicit_history.as_ref())?;
+            history::run_episodes(&input, max_input_mib, json)
         }
         Some(Command::Capsule { command }) => {
             reject_live_options("capsule", &root_live)?;
@@ -1547,6 +1568,32 @@ mod cli_tests {
     }
 
     #[test]
+    fn history_parses_as_a_finite_episode_transaction() {
+        let cli = Cli::try_parse_from([
+            "linktop",
+            "history",
+            "host-path.jsonl",
+            "--json",
+            "--max-input-mib",
+            "64",
+        ])
+        .unwrap();
+        let Some(Command::History {
+            input,
+            json,
+            max_input_mib,
+        }) = cli.command
+        else {
+            panic!("history command was not parsed");
+        };
+        assert_eq!(input, PathBuf::from("host-path.jsonl"));
+        assert!(json);
+        assert_eq!(max_input_mib, 64);
+        assert!(!cli.active);
+        assert!(cli.history.is_none());
+    }
+
+    #[test]
     fn subcommand_help_only_advertises_options_the_subject_accepts() {
         use clap::CommandFactory;
 
@@ -1600,6 +1647,19 @@ mod cli_tests {
         assert!(!review_help.contains("--dwell"));
         assert!(!review_help.contains("--history"));
         assert!(!review_help.contains("--active"));
+
+        let mut command = Cli::command();
+        let history = command
+            .find_subcommand_mut("history")
+            .expect("history subcommand");
+        let mut history_help = Vec::new();
+        history.write_long_help(&mut history_help).unwrap();
+        let history_help = String::from_utf8(history_help).unwrap();
+        assert!(history_help.contains("--json"));
+        assert!(history_help.contains("--max-input-mib"));
+        assert!(!history_help.contains("--interval"));
+        assert!(!history_help.contains("--history"));
+        assert!(!history_help.contains("--active"));
 
         let mut command = Cli::command();
         let screenshot = command

@@ -67,6 +67,7 @@ linktop peers                   # native ARP/NDP cache, never an active scan
 linktop probe                   # bounded active path diagnosis
 linktop speed 192.0.2.10        # explicit iperf3 load experiment
 linktop review records.jsonl    # finite saved-evidence projection
+linktop history host-path.jsonl  # finite episode summary
 linktop capsule pack history.jsonl --output incident-capsule
 linktop capsule verify incident-capsule
 ```
@@ -169,6 +170,17 @@ provenance, coverage, event bounds, normalization and quarantine counts,
 conversation evidence, exclusions, limitations, and candidate TShark display
 filters. Endpoints and filters remain drill-down pivots, not claims about a
 device, person, service, application, or intent.
+
+`history` reads a canonical private Netbraid host-path JSONL stream and emits a
+finite observer-scoped episode report. Episodes are contiguous context-key
+runs with onset, latest observation, recurrence/return evidence, observation
+counts, and changed dimensions. The report does not infer timeouts, place,
+identity, traffic shape, or intent, and it never modifies the source.
+
+```sh
+linktop history host-path.jsonl
+linktop history host-path.jsonl --json
+```
 
 An incident capsule is an explicit private handoff of canonical Netbraid
 host-path history. `capsule pack` validates the complete source before
