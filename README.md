@@ -109,6 +109,12 @@ observations use `linktop.observation.v1`; load experiments use
 `linktop.speed_experiment.v1`; live records use
 `linktop.live_observation.v1`.
 
+Bounded live windows expose a `linktop.traffic_shape_candidate.v0` feature
+summary when valid kernel interface-counter intervals exist. It reports
+aggregate direction, byte and packet deltas, mean and peak rates, and
+aggregate bytes per packet. It is a comparison candidate only—not endpoint,
+protocol, application, person, place, or intent evidence.
+
 ## What passive mode observes
 
 - Effective default route, interface, next hop, resolvers, and local addresses.

@@ -431,6 +431,56 @@ fn process_rate(process: &ProcessTraffic) -> u64 {
         .saturating_add(process.transmitted_bytes_per_second)
 }
 
+fn traffic_shape_candidate_from_dwell(
+    dwell: &InterfaceDwell,
+    observed_span_ms: u64,
+) -> Option<TrafficShapeCandidateV0> {
+    if dwell.valid_intervals == 0 {
+        return None;
+    }
+    let direction = match (dwell.received_bytes_delta, dwell.transmitted_bytes_delta) {
+        (0, 0) => TrafficShapeDirectionV0::NoObservedTraffic,
+        (received, transmitted)
+            if transmitted == 0 || received >= transmitted.saturating_mul(3) =>
+        {
+            TrafficShapeDirectionV0::ReceiveDominant
+        }
+        (received, transmitted) if received == 0 || transmitted >= received.saturating_mul(3) => {
+            TrafficShapeDirectionV0::TransmitDominant
+        }
+        _ => TrafficShapeDirectionV0::Bidirectional,
+    };
+    let mean_rate =
+        |bytes| (observed_span_ms > 0).then(|| bytes as f64 * 8_000.0 / observed_span_ms as f64);
+    let mean_packet_bytes = |bytes, packets| (packets > 0).then(|| bytes as f64 / packets as f64);
+    Some(TrafficShapeCandidateV0 {
+        schema: TRAFFIC_SHAPE_CANDIDATE_SCHEMA_V0,
+        observed_span_ms,
+        valid_intervals: dwell.valid_intervals,
+        direction,
+        received_bytes_delta: dwell.received_bytes_delta,
+        transmitted_bytes_delta: dwell.transmitted_bytes_delta,
+        received_packets_delta: dwell.received_packets_delta,
+        transmitted_packets_delta: dwell.transmitted_packets_delta,
+        mean_received_bits_per_second: mean_rate(dwell.received_bytes_delta),
+        mean_transmitted_bits_per_second: mean_rate(dwell.transmitted_bytes_delta),
+        peak_received_bits_per_second: dwell.peak_received_bits_per_second,
+        peak_transmitted_bits_per_second: dwell.peak_transmitted_bits_per_second,
+        mean_received_packet_bytes: mean_packet_bytes(
+            dwell.received_bytes_delta,
+            dwell.received_packets_delta,
+        ),
+        mean_transmitted_packet_bytes: mean_packet_bytes(
+            dwell.transmitted_bytes_delta,
+            dwell.transmitted_packets_delta,
+        ),
+        caveats: vec![
+            "aggregate kernel interface counters",
+            "not endpoint, protocol, application, person, place, or intent evidence",
+        ],
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct PathChange {
     pub elapsed: Duration,
@@ -1318,6 +1368,40 @@ pub struct CompletedInterfaceWindow {
     pub limitations: Vec<CompletedPathWindowSupportLimitation>,
 }
 
+pub const TRAFFIC_SHAPE_CANDIDATE_SCHEMA_V0: &str = "linktop.traffic_shape_candidate.v0";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrafficShapeDirectionV0 {
+    NoObservedTraffic,
+    ReceiveDominant,
+    TransmitDominant,
+    Bidirectional,
+}
+
+/// Aggregate counter features that may help compare path episodes.
+///
+/// This is a candidate traffic shape only. It does not identify an endpoint,
+/// protocol, application, person, place, or intent.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TrafficShapeCandidateV0 {
+    pub schema: &'static str,
+    pub observed_span_ms: u64,
+    pub valid_intervals: u64,
+    pub direction: TrafficShapeDirectionV0,
+    pub received_bytes_delta: u64,
+    pub transmitted_bytes_delta: u64,
+    pub received_packets_delta: u64,
+    pub transmitted_packets_delta: u64,
+    pub mean_received_bits_per_second: Option<f64>,
+    pub mean_transmitted_bits_per_second: Option<f64>,
+    pub peak_received_bits_per_second: Option<f64>,
+    pub peak_transmitted_bits_per_second: Option<f64>,
+    pub mean_received_packet_bytes: Option<f64>,
+    pub mean_transmitted_packet_bytes: Option<f64>,
+    pub caveats: Vec<&'static str>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CompletedRadioWindow {
     pub state: CompletedPathWindowSupportState,
@@ -1382,6 +1466,8 @@ pub struct CompletedPathWindow {
     pub completed_by: CompletedPathWindowTransition,
     pub collector_scope: CompletedPathWindowCollectorScope,
     pub interface: CompletedInterfaceWindow,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub traffic_shape_candidate: Option<TrafficShapeCandidateV0>,
     pub radio: CompletedRadioWindow,
     pub workload: CompletedWorkloadWindow,
     pub neighbors: CompletedNeighborWindow,
@@ -2221,6 +2307,10 @@ impl App {
                 | Health::Running => CompletedPathWindowSupportState::Partial,
             }
         };
+        let traffic_shape_candidate = scope
+            .interface
+            .then(|| traffic_shape_candidate_from_dwell(interface, duration_ms(completed.observed)))
+            .flatten();
 
         Some(CompletedPathWindow {
             generation: completed.generation,
@@ -2314,6 +2404,7 @@ impl App {
                 },
                 limitations: interface_limitations,
             },
+            traffic_shape_candidate,
             radio: CompletedRadioWindow {
                 state: if !scope.wifi {
                     CompletedPathWindowSupportState::NotCollected
@@ -3470,6 +3561,39 @@ fn counters_replaced_or_reset(before: &InterfaceCounters, after: &InterfaceCount
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn traffic_shape_candidate_is_bounded_aggregate_feature_evidence() {
+        let dwell = InterfaceDwell {
+            valid_intervals: 2,
+            received_bytes_delta: 9_000,
+            transmitted_bytes_delta: 1_000,
+            received_packets_delta: 90,
+            transmitted_packets_delta: 10,
+            peak_received_bits_per_second: Some(100_000.0),
+            peak_transmitted_bits_per_second: Some(20_000.0),
+            ..InterfaceDwell::default()
+        };
+
+        let candidate = traffic_shape_candidate_from_dwell(&dwell, 1_000).unwrap();
+
+        assert_eq!(candidate.schema, TRAFFIC_SHAPE_CANDIDATE_SCHEMA_V0);
+        assert_eq!(
+            candidate.direction,
+            TrafficShapeDirectionV0::ReceiveDominant
+        );
+        assert_eq!(candidate.mean_received_bits_per_second, Some(72_000.0));
+        assert_eq!(candidate.mean_transmitted_bits_per_second, Some(8_000.0));
+        assert_eq!(candidate.mean_received_packet_bytes, Some(100.0));
+        assert_eq!(candidate.mean_transmitted_packet_bytes, Some(100.0));
+        assert!(
+            candidate
+                .caveats
+                .iter()
+                .any(|caveat| caveat.contains("not endpoint"))
+        );
+        assert!(traffic_shape_candidate_from_dwell(&InterfaceDwell::default(), 1_000).is_none());
+    }
 
     #[test]
     fn passive_policy_is_default_and_rejects_late_probe_results() {

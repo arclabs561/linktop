@@ -16,6 +16,9 @@ one version.
   collect, capture packets, or infer identity.
 - Added finite observer-scoped episode summaries for canonical host-path
   history, with JSON output and no source mutation.
+- Added bounded traffic-shape candidate features to completed path windows
+  when valid kernel interface-counter intervals exist; these remain aggregate
+  non-identity evidence.
 
 ## [0.1.2] - 2026-07-28
 

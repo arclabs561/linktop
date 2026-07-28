@@ -68,6 +68,10 @@ and multi-observer capsules require separate contracts.
 The `history` command is also finite and read-only: it reduces canonical
 host-path records into observer-scoped context-key episodes without inferring
 timeouts, place, identity, traffic shape, or intent.
+Completed bounded path windows may expose a versioned traffic-shape candidate
+from aggregate kernel interface counters. It is transparent feature evidence
+with explicit caveats, never an endpoint, protocol, application, person,
+place, or intent identity.
 
 ## Reproducible visual QA
 
