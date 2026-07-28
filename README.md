@@ -65,6 +65,7 @@ linktop snapshot                # one passive snapshot
 linktop link                    # physical-link evidence
 linktop peers                   # native ARP/NDP cache, never an active scan
 linktop probe                   # bounded active path diagnosis
+linktop readiness               # purpose-specific readiness with explicit gaps
 linktop speed 192.0.2.10        # explicit iperf3 load experiment
 linktop review records.jsonl    # finite saved-evidence projection
 linktop history host-path.jsonl  # finite episode summary
@@ -96,6 +97,7 @@ linktop snapshot --json
 linktop link --json
 linktop peers --plain --dwell 30
 linktop peers --json
+linktop readiness --json
 ```
 
 Plain mode emits timestamped records without cursor control. A bounded dwell
@@ -107,7 +109,7 @@ record or persist itself.
 Machine consumers should use JSON rather than parse screen text. Finite
 observations use `linktop.observation.v1`; load experiments use
 `linktop.speed_experiment.v1`; live records use
-`linktop.live_observation.v1`.
+`linktop.live_observation.v1`; readiness reports use `linktop.readiness.v0`.
 
 Bounded live windows expose a `linktop.traffic_shape_candidate.v0` feature
 summary when valid kernel interface-counter intervals exist. It reports
@@ -158,6 +160,14 @@ filter ICMP, so a missing echo is unavailable evidence rather than automatic
 path failure. `linktop probe` exits `1` for a tested path failure and `2` when
 no verdict is available. Live observation commands reserve non-zero status for
 process/runtime failure.
+
+`linktop readiness` takes one bounded active path snapshot and evaluates four
+purposes separately: interactive use, calls, bulk transfer, and idle background
+health. Interactive use requires current path context plus successful gateway,
+DNS, and HTTPS measurements. Calls, bulk transfer, and idle background remain
+`not_tested` until voice-specific, load-specific, or host process-accounting
+measurements are collected; the command does not infer those properties from
+ordinary path latency or aggregate counters.
 
 ## Saved evidence and history
 

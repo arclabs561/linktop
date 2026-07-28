@@ -19,6 +19,9 @@ one version.
 - Added bounded traffic-shape candidate features to completed path windows
   when valid kernel interface-counter intervals exist; these remain aggregate
   non-identity evidence.
+- Added a finite purpose-specific readiness report. Interactive-use status is
+  derived from fresh path context and gateway, DNS, and HTTPS measurements;
+  calls, bulk transfer, and idle background health abstain until measured.
 
 ## [0.1.2] - 2026-07-28
 

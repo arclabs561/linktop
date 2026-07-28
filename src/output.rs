@@ -17,6 +17,7 @@ use crate::model::{
 pub const OBSERVATION_SCHEMA_V1: &str = "linktop.observation.v1";
 pub const SPEED_EXPERIMENT_SCHEMA_V1: &str = "linktop.speed_experiment.v1";
 pub const LIVE_OBSERVATION_SCHEMA_V1: &str = "linktop.live_observation.v1";
+pub const READINESS_SCHEMA_V0: &str = "linktop.readiness.v0";
 const LIVE_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -68,6 +69,159 @@ impl Producer {
         name: "linktop",
         version: env!("CARGO_PKG_VERSION"),
     };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessPurposeV0 {
+    InteractiveUse,
+    Calls,
+    BulkTransfer,
+    IdleBackground,
+}
+
+impl ReadinessPurposeV0 {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::InteractiveUse => "interactive_use",
+            Self::Calls => "calls",
+            Self::BulkTransfer => "bulk_transfer",
+            Self::IdleBackground => "idle_background",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessStatusV0 {
+    Ready,
+    Degraded,
+    Insufficient,
+    NotTested,
+}
+
+impl ReadinessStatusV0 {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "READY",
+            Self::Degraded => "DEGRADED",
+            Self::Insufficient => "INSUFFICIENT",
+            Self::NotTested => "NOT_TESTED",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReadinessAssessmentV0 {
+    pub purpose: ReadinessPurposeV0,
+    pub status: ReadinessStatusV0,
+    pub evidence: Vec<&'static str>,
+    pub reasons: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReadinessDocumentV0 {
+    pub schema: &'static str,
+    pub producer: Producer,
+    pub completed_at: String,
+    pub acquisition: Acquisition,
+    pub path_status: PathStatus,
+    pub evidence_coverage: EvidenceCoverage,
+    pub assessments: Vec<ReadinessAssessmentV0>,
+}
+
+pub fn readiness_document(
+    report: &SnapshotReport,
+    window: &AcquisitionWindow,
+) -> ReadinessDocumentV0 {
+    let path_probes: Vec<_> = ProbeKind::PATH
+        .iter()
+        .map(|kind| report.probes.iter().find(|probe| probe.kind == *kind))
+        .collect();
+    let path_context_complete = report.link.interface.is_some()
+        && report.link.gateway.is_some()
+        && !report.link.resolvers.is_empty()
+        && report
+            .link
+            .addresses
+            .iter()
+            .any(|address| address.is_default);
+    let path_measurements_complete = path_probes
+        .iter()
+        .all(|probe| probe.is_some_and(|probe| probe.health == Health::Ok));
+    let path_evidence = vec!["next_hop_rtt", "dns", "https"];
+    let interactive = if path_probes
+        .iter()
+        .flatten()
+        .any(|probe| probe.health == Health::Failed)
+    {
+        ReadinessAssessmentV0 {
+            purpose: ReadinessPurposeV0::InteractiveUse,
+            status: ReadinessStatusV0::Degraded,
+            evidence: path_evidence,
+            reasons: vec!["one or more path measurements failed"],
+        }
+    } else if !path_context_complete || !path_measurements_complete {
+        ReadinessAssessmentV0 {
+            purpose: ReadinessPurposeV0::InteractiveUse,
+            status: ReadinessStatusV0::Insufficient,
+            evidence: path_evidence,
+            reasons: vec!["current path context or all path measurements are not complete"],
+        }
+    } else if path_probes
+        .iter()
+        .flatten()
+        .any(|probe| probe.health == Health::Degraded)
+    {
+        ReadinessAssessmentV0 {
+            purpose: ReadinessPurposeV0::InteractiveUse,
+            status: ReadinessStatusV0::Degraded,
+            evidence: path_evidence,
+            reasons: vec!["one or more path measurements are degraded"],
+        }
+    } else {
+        ReadinessAssessmentV0 {
+            purpose: ReadinessPurposeV0::InteractiveUse,
+            status: ReadinessStatusV0::Ready,
+            evidence: path_evidence,
+            reasons: vec!["fresh path context and all path measurements passed"],
+        }
+    };
+    let assessments = vec![
+        interactive,
+        ReadinessAssessmentV0 {
+            purpose: ReadinessPurposeV0::Calls,
+            status: ReadinessStatusV0::NotTested,
+            evidence: Vec::new(),
+            reasons: vec!["no voice-specific measurement was collected"],
+        },
+        ReadinessAssessmentV0 {
+            purpose: ReadinessPurposeV0::BulkTransfer,
+            status: ReadinessStatusV0::NotTested,
+            evidence: Vec::new(),
+            reasons: vec!["no bounded load experiment was collected"],
+        },
+        ReadinessAssessmentV0 {
+            purpose: ReadinessPurposeV0::IdleBackground,
+            status: ReadinessStatusV0::NotTested,
+            evidence: Vec::new(),
+            reasons: vec!["no host process-accounting window was collected"],
+        },
+    ];
+    ReadinessDocumentV0 {
+        schema: READINESS_SCHEMA_V0,
+        producer: Producer::LINKTOP,
+        completed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        acquisition: Acquisition {
+            policy: ProbePolicy::Active,
+            lifetime: "bounded_readiness_snapshot",
+            started_at: Some(window.started_at.clone()),
+            elapsed_ms: Some(window.elapsed_ms()),
+        },
+        path_status: report.summary.path_status,
+        evidence_coverage: report.summary.evidence_coverage,
+        assessments,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -714,6 +868,79 @@ mod tests {
             latency_ms: Some(latency_ms),
             metrics: Some(test_metrics()),
         }
+    }
+
+    #[test]
+    fn readiness_document_keeps_unmeasured_purposes_explicitly_untested() {
+        let report = SnapshotReport::from_results(
+            test_link(),
+            Some(test_counters()),
+            test_peers(),
+            vec![
+                (ProbeKind::Gateway, test_probe_result("gateway", 8.0)),
+                (ProbeKind::Dns, test_probe_result("dns", 12.0)),
+                (ProbeKind::Https, test_probe_result("https", 35.0)),
+                (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
+            ],
+        );
+        let document = readiness_document(&report, &AcquisitionWindow::start());
+
+        assert_eq!(document.schema, READINESS_SCHEMA_V0);
+        assert_eq!(document.path_status, PathStatus::Ok);
+        assert_eq!(document.assessments.len(), 4);
+        assert_eq!(document.assessments[0].status, ReadinessStatusV0::Ready);
+        assert_eq!(
+            document.assessments[0].purpose,
+            ReadinessPurposeV0::InteractiveUse
+        );
+        for assessment in &document.assessments[1..] {
+            assert_eq!(assessment.status, ReadinessStatusV0::NotTested);
+            assert!(assessment.evidence.is_empty());
+            assert!(!assessment.reasons.is_empty());
+        }
+    }
+
+    #[test]
+    fn readiness_document_degrades_interactive_use_on_failed_path_probe() {
+        let report = SnapshotReport::from_results(
+            test_link(),
+            Some(test_counters()),
+            test_peers(),
+            vec![
+                (ProbeKind::Gateway, test_probe_result("gateway", 8.0)),
+                (ProbeKind::Dns, ProbeResult::failed("dns failed")),
+                (ProbeKind::Https, test_probe_result("https", 35.0)),
+                (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
+            ],
+        );
+        let document = readiness_document(&report, &AcquisitionWindow::start());
+
+        assert_eq!(document.assessments[0].status, ReadinessStatusV0::Degraded);
+        assert_eq!(
+            document.assessments[0].reasons,
+            vec!["one or more path measurements failed"]
+        );
+    }
+
+    #[test]
+    fn readiness_document_does_not_treat_unavailable_path_evidence_as_ready() {
+        let report = SnapshotReport::from_results(
+            test_link(),
+            Some(test_counters()),
+            test_peers(),
+            vec![
+                (ProbeKind::Gateway, test_probe_result("gateway", 8.0)),
+                (ProbeKind::Dns, ProbeResult::unavailable("dns unavailable")),
+                (ProbeKind::Https, test_probe_result("https", 35.0)),
+                (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
+            ],
+        );
+        let document = readiness_document(&report, &AcquisitionWindow::start());
+
+        assert_eq!(
+            document.assessments[0].status,
+            ReadinessStatusV0::Insufficient
+        );
     }
 
     fn test_peers() -> PeerSnapshot {

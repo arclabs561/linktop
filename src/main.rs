@@ -90,6 +90,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Report purpose-specific readiness from one bounded active path snapshot.
+    Readiness {
+        /// Emit stable machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print interface, route, resolver, address, and radio state without internet probes.
     Link {
         /// Emit stable machine-readable JSON.
@@ -303,6 +309,12 @@ fn main() -> Result<()> {
             reject_root_active("probe", active)?;
             reject_history("probe", explicit_history.as_ref())?;
             probe(json)
+        }
+        Some(Command::Readiness { json }) => {
+            reject_live_options("readiness", &root_live)?;
+            reject_root_active("readiness", active)?;
+            reject_history("readiness", explicit_history.as_ref())?;
+            readiness(json)
         }
         Some(Command::Link { json, live }) => {
             reject_root_active("link", active)?;
@@ -831,6 +843,44 @@ fn probe(json: bool) -> Result<()> {
             "completed {}/{} bounded active probes",
             report.summary.completed_probes, report.summary.total_probes
         );
+    }
+    if report.summary.path_status.is_failed() {
+        std::process::exit(1);
+    }
+    if report.summary.path_status.is_unavailable() {
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+fn readiness(json: bool) -> Result<()> {
+    let window = output::AcquisitionWindow::start();
+    let report = net::collect_snapshot(Duration::from_secs(15));
+    let document = output::readiness_document(&report, &window);
+    if json {
+        output::print_json(&document)?;
+    } else {
+        println!(
+            "LINKTOP  READINESS / PATH {} / COVERAGE {}",
+            document.path_status.label(),
+            document.evidence_coverage.label()
+        );
+        println!("path     {}", report.link.operator_path());
+        for assessment in &document.assessments {
+            let evidence = if assessment.evidence.is_empty() {
+                "none".into()
+            } else {
+                assessment.evidence.join(",")
+            };
+            println!(
+                "{:<16} {:<11} evidence={} reason={}",
+                assessment.purpose.label(),
+                assessment.status.label(),
+                evidence,
+                assessment.reasons.join("; ")
+            );
+        }
+        println!("active    bounded path measurements only; purpose-specific gaps abstain");
     }
     if report.summary.path_status.is_failed() {
         std::process::exit(1);
@@ -1468,6 +1518,12 @@ mod cli_tests {
 
         let probe = Cli::try_parse_from(["linktop", "probe", "--json"]).unwrap();
         assert!(matches!(probe.command, Some(Command::Probe { json: true })));
+
+        let readiness = Cli::try_parse_from(["linktop", "readiness", "--json"]).unwrap();
+        assert!(matches!(
+            readiness.command,
+            Some(Command::Readiness { json: true })
+        ));
     }
 
     #[test]

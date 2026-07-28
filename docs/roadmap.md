@@ -16,12 +16,12 @@ support.
 - Advisory traffic-shape candidate features from bounded kernel counters, with
   explicit non-identity caveats.
 - Private, bounded, lossless incident-capsule packaging with verification.
+- Purpose-specific readiness reports with explicit interactive-use evidence and
+  abstention for calls, bulk transfer, and idle background health.
 - Reproducible headless and native terminal capture.
 
 ## Next
 
-- Purpose-specific readiness views such as interactive use, calls, bulk
-  transfer, and idle background health, backed by explicit measurements.
 - Clearer recurrence and place evidence without ambient scanning or automatic
   location labels.
 - More public synthetic and disclosure-reviewed replay scenarios covering
