@@ -1147,6 +1147,76 @@ mod tests {
         );
     }
 
+    #[test]
+    fn readiness_idle_status_obeys_the_exhaustive_three_sample_precedence_matrix() {
+        let report = SnapshotReport::from_results(
+            test_link(),
+            Some(test_counters()),
+            test_peers(),
+            vec![
+                (ProbeKind::Gateway, test_probe_result("gateway", 8.0)),
+                (ProbeKind::Dns, test_probe_result("dns", 12.0)),
+                (ProbeKind::Https, test_probe_result("https", 35.0)),
+                (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
+            ],
+        );
+        let cases = [
+            (Health::Ok, false),
+            (Health::Ok, true),
+            (Health::Unavailable, false),
+        ];
+
+        for (first_health, first_traffic) in cases {
+            for (second_health, second_traffic) in cases {
+                for (third_health, third_traffic) in cases {
+                    let samples = [
+                        (first_health, first_traffic),
+                        (second_health, second_traffic),
+                        (third_health, third_traffic),
+                    ]
+                    .into_iter()
+                    .map(|(health, traffic)| {
+                        let processes = traffic
+                            .then(|| ProcessTraffic {
+                                process: "redacted".into(),
+                                processes: 1,
+                                received_bytes_per_second: 1,
+                                transmitted_bytes_per_second: 1,
+                            })
+                            .into_iter()
+                            .collect();
+                        test_workload(health, processes)
+                    })
+                    .collect::<Vec<_>>();
+                    let expected = if samples.iter().any(|sample| sample.health != Health::Ok) {
+                        ReadinessStatusV0::Insufficient
+                    } else if samples.iter().any(|sample| !sample.processes.is_empty()) {
+                        ReadinessStatusV0::Degraded
+                    } else {
+                        ReadinessStatusV0::Ready
+                    };
+                    let document = readiness_document_with_workload(
+                        &report,
+                        &samples,
+                        &AcquisitionWindow::start(),
+                    );
+
+                    assert_eq!(document.assessments[3].status, expected);
+                    assert_eq!(document.workload.as_ref().unwrap().completed_samples, 3);
+                    assert!(document.workload.as_ref().unwrap().healthy_samples <= 3);
+                    assert!(
+                        document
+                            .workload
+                            .as_ref()
+                            .unwrap()
+                            .samples_with_process_traffic
+                            <= 3
+                    );
+                }
+            }
+        }
+    }
+
     fn test_peers() -> PeerSnapshot {
         PeerSnapshot {
             health: Health::Ok,
