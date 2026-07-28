@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Read `README.md` for the product boundary and `docs/adr/README.md` before a
+Read `README.md` for the product boundary and `DECISIONS.md` before a
 structural change. The canonical validation command is `just check`.
 
 Keep the default experience terminal-first and immediately visible. Every

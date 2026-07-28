@@ -9,6 +9,22 @@ one version.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-28
+
+### Changed
+
+- Reworked the README around install, representative output, command lifetimes,
+  evidence boundaries, and normal operator workflows.
+- Consolidated contributor-facing architecture and decision rationale into a
+  small public documentation set; internal design working notes remain
+  local-only.
+
+### Fixed
+
+- Added repository-local ignores for human log output, saved network evidence,
+  credential-shaped files, and private development notes so fresh clones do
+  not rely on a machine-global ignore file.
+
 ## [0.1.0] - 2026-07-27
 
 ### Added
@@ -34,5 +50,6 @@ one version.
   evidence, replay, and public scenario-fixture surfaces; Netbraid's CLI and
   TShark adapter features remain disabled.
 
-[Unreleased]: https://github.com/arclabs561/linktop/compare/linktop-v0.1.0...HEAD
+[Unreleased]: https://github.com/arclabs561/linktop/compare/linktop-v0.1.1...HEAD
+[0.1.1]: https://github.com/arclabs561/linktop/compare/linktop-v0.1.0...linktop-v0.1.1
 [0.1.0]: https://github.com/arclabs561/linktop/releases/tag/linktop-v0.1.0
