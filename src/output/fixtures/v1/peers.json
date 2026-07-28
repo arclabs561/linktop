@@ -2,7 +2,7 @@
   "schema": "linktop.observation.v1",
   "producer": {
     "name": "linktop",
-    "version": "0.1.1"
+    "version": "0.1.2"
   },
   "subject": "peers",
   "completed_at": "2026-07-26T20:00:00Z",
