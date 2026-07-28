@@ -1,3 +1,4 @@
+mod capsule;
 mod capture;
 mod history;
 mod metrics;
@@ -118,6 +119,11 @@ enum Command {
         /// Maximum normalized JSONL input accepted, in MiB.
         #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u64).range(1..=4096))]
         max_input_mib: u64,
+    },
+    /// Package or verify a bounded private incident capsule.
+    Capsule {
+        #[command(subcommand)]
+        command: capsule::Command,
     },
     /// Run an explicit bounded iperf3 TCP test with gateway latency under load.
     Speed {
@@ -385,6 +391,12 @@ fn main() -> Result<()> {
             reject_root_active("review", active)?;
             reject_history("review", explicit_history.as_ref())?;
             review::run(&input, max_input_mib, json, tail_seconds)
+        }
+        Some(Command::Capsule { command }) => {
+            reject_live_options("capsule", &root_live)?;
+            reject_root_active("capsule", active)?;
+            reject_history("capsule", explicit_history.as_ref())?;
+            capsule::run(command)
         }
         Some(Command::Speed {
             host,

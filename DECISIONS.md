@@ -61,8 +61,10 @@ or a bounded `--dwell`. Focused `link` and `peers` commands keep their narrower
 collection plans even though the overview can switch among all three views.
 
 History is opt-in and caller-owned. Saved-capture review is finite and read-only.
-Incident capsules, if implemented, must also be explicit private transactions;
-they may not become an automatic record-every-session side effect.
+Incident capsules are explicit private transactions: v0 packages an existing
+canonical host-path log only, publishes atomically into a new directory, and
+does not become an automatic record-every-session side effect. Sanitized export
+and multi-observer capsules require separate contracts.
 
 ## Reproducible visual QA
 

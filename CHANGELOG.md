@@ -9,6 +9,12 @@ one version.
 
 ## [Unreleased]
 
+### Added
+
+- Added private, bounded incident-capsule packaging and verification for
+  canonical Netbraid host-path history. Version 0 is lossless and does not
+  collect, capture packets, or infer identity.
+
 ## [0.1.2] - 2026-07-28
 
 ### Fixed

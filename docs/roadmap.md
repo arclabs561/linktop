@@ -12,6 +12,7 @@ support.
 - Focused link and peer-cache views.
 - Explicit next-hop, DNS, HTTPS, public-egress, and load experiments.
 - Finite text, TUI, JSON, JSONL, opt-in history, and saved-evidence review.
+- Private, bounded, lossless incident-capsule packaging with verification.
 - Reproducible headless and native terminal capture.
 
 ## Next
@@ -33,8 +34,8 @@ support.
 - Multi-vantage evidence supplied through versioned Netbraid records.
 - Explicit diagnostic experiments that compare before, during, and after
   bounded load or route changes.
-- Private, opt-in incident capsules with deterministic replay and sanitization
-  as a separate transaction.
+- Sanitized capsule projections and explicit source-lineage contracts for
+  multi-observer handoffs.
 
 ## Gates
 
