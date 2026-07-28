@@ -491,14 +491,14 @@ fn spawn_workload(tx: Sender<MonitorUpdate>, generation: u64, in_flight: Arc<Ato
     thread::spawn(move || {
         let _ = tx.send(MonitorUpdate::Workload {
             generation,
-            snapshot: collect_workload(),
+            snapshot: collect_workload_snapshot(),
         });
         in_flight.store(false, Ordering::Release);
     });
     true
 }
 
-fn collect_workload() -> WorkloadSnapshot {
+pub(crate) fn collect_workload_snapshot() -> WorkloadSnapshot {
     if !cfg!(target_os = "macos") {
         return WorkloadSnapshot {
             health: Health::Unavailable,

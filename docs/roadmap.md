@@ -16,8 +16,9 @@ support.
 - Advisory traffic-shape candidate features from bounded kernel counters, with
   explicit non-identity caveats.
 - Private, bounded, lossless incident-capsule packaging with verification.
-- Purpose-specific readiness reports with explicit interactive-use evidence and
-  abstention for calls, bulk transfer, and idle background health.
+- Purpose-specific readiness reports with explicit interactive-use evidence,
+  bounded idle-background accounting, and abstention for calls and bulk
+  transfer.
 - Reproducible headless and native terminal capture.
 
 ## Next

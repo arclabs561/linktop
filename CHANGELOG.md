@@ -21,7 +21,9 @@ one version.
   non-identity evidence.
 - Added a finite purpose-specific readiness report. Interactive-use status is
   derived from fresh path context and gateway, DNS, and HTTPS measurements;
-  calls, bulk transfer, and idle background health abstain until measured.
+  calls and bulk transfer abstain until measured, while idle-background status
+  uses three bounded host process-accounting windows without claiming absolute
+  idleness.
 
 ## [0.1.2] - 2026-07-28
 

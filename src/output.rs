@@ -11,13 +11,14 @@ use crate::model::{
     InterfaceCounters, LinkSnapshot, LiveAssessment, LiveEvidence, LiveGatewayAssessmentEvidence,
     MacScope, MonitorMode, MonitorUpdate, PathStatus, PathUnderlay, Peer, PeerPathFilter,
     PeerSnapshot, ProbeKind, ProbePolicy, Situation, SnapshotProbe, SnapshotReport,
-    SnapshotSummary,
+    SnapshotSummary, WorkloadSnapshot,
 };
 
 pub const OBSERVATION_SCHEMA_V1: &str = "linktop.observation.v1";
 pub const SPEED_EXPERIMENT_SCHEMA_V1: &str = "linktop.speed_experiment.v1";
 pub const LIVE_OBSERVATION_SCHEMA_V1: &str = "linktop.live_observation.v1";
 pub const READINESS_SCHEMA_V0: &str = "linktop.readiness.v0";
+pub const READINESS_WORKLOAD_SAMPLE_COUNT: usize = 3;
 const LIVE_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -120,6 +121,15 @@ pub struct ReadinessAssessmentV0 {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ReadinessWorkloadEvidenceV0 {
+    pub requested_samples: usize,
+    pub completed_samples: usize,
+    pub healthy_samples: usize,
+    pub samples_with_process_traffic: usize,
+    pub observed_span_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ReadinessDocumentV0 {
     pub schema: &'static str,
     pub producer: Producer,
@@ -128,10 +138,13 @@ pub struct ReadinessDocumentV0 {
     pub path_status: PathStatus,
     pub evidence_coverage: EvidenceCoverage,
     pub assessments: Vec<ReadinessAssessmentV0>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload: Option<ReadinessWorkloadEvidenceV0>,
 }
 
-pub fn readiness_document(
+pub fn readiness_document_with_workload(
     report: &SnapshotReport,
+    workloads: &[WorkloadSnapshot],
     window: &AcquisitionWindow,
 ) -> ReadinessDocumentV0 {
     let path_probes: Vec<_> = ProbeKind::PATH
@@ -187,6 +200,66 @@ pub fn readiness_document(
             reasons: vec!["fresh path context and all path measurements passed"],
         }
     };
+    let workload = (!workloads.is_empty()).then(|| {
+        let healthy_samples = workloads
+            .iter()
+            .filter(|sample| sample.health == Health::Ok)
+            .count();
+        let samples_with_process_traffic = workloads
+            .iter()
+            .filter(|sample| !sample.processes.is_empty())
+            .count();
+        ReadinessWorkloadEvidenceV0 {
+            requested_samples: READINESS_WORKLOAD_SAMPLE_COUNT,
+            completed_samples: workloads.len(),
+            healthy_samples,
+            samples_with_process_traffic,
+            observed_span_ms: workloads
+                .iter()
+                .map(|sample| sample.interval.as_millis().min(u64::MAX as u128) as u64)
+                .sum(),
+        }
+    });
+    let idle_background = match workload.as_ref() {
+        None => ReadinessAssessmentV0 {
+            purpose: ReadinessPurposeV0::IdleBackground,
+            status: ReadinessStatusV0::NotTested,
+            evidence: Vec::new(),
+            reasons: vec!["no host process-accounting window was collected"],
+        },
+        Some(evidence) if evidence.completed_samples < READINESS_WORKLOAD_SAMPLE_COUNT => {
+            ReadinessAssessmentV0 {
+                purpose: ReadinessPurposeV0::IdleBackground,
+                status: ReadinessStatusV0::Insufficient,
+                evidence: vec!["host_process_accounting"],
+                reasons: vec!["the bounded host process-accounting window is incomplete"],
+            }
+        }
+        Some(evidence) if evidence.healthy_samples < evidence.completed_samples => {
+            ReadinessAssessmentV0 {
+                purpose: ReadinessPurposeV0::IdleBackground,
+                status: ReadinessStatusV0::Insufficient,
+                evidence: vec!["host_process_accounting"],
+                reasons: vec![
+                    "host process-accounting was unavailable for one or more bounded samples",
+                ],
+            }
+        }
+        Some(evidence) if evidence.samples_with_process_traffic > 0 => ReadinessAssessmentV0 {
+            purpose: ReadinessPurposeV0::IdleBackground,
+            status: ReadinessStatusV0::Degraded,
+            evidence: vec!["host_process_accounting"],
+            reasons: vec!["per-process external-interface traffic was observed in bounded samples"],
+        },
+        Some(_) => ReadinessAssessmentV0 {
+            purpose: ReadinessPurposeV0::IdleBackground,
+            status: ReadinessStatusV0::Ready,
+            evidence: vec!["host_process_accounting"],
+            reasons: vec![
+                "no per-process external-interface traffic was observed across bounded samples",
+            ],
+        },
+    };
     let assessments = vec![
         interactive,
         ReadinessAssessmentV0 {
@@ -201,12 +274,7 @@ pub fn readiness_document(
             evidence: Vec::new(),
             reasons: vec!["no bounded load experiment was collected"],
         },
-        ReadinessAssessmentV0 {
-            purpose: ReadinessPurposeV0::IdleBackground,
-            status: ReadinessStatusV0::NotTested,
-            evidence: Vec::new(),
-            reasons: vec!["no host process-accounting window was collected"],
-        },
+        idle_background,
     ];
     ReadinessDocumentV0 {
         schema: READINESS_SCHEMA_V0,
@@ -221,6 +289,7 @@ pub fn readiness_document(
         path_status: report.summary.path_status,
         evidence_coverage: report.summary.evidence_coverage,
         assessments,
+        workload,
     }
 }
 
@@ -870,6 +939,16 @@ mod tests {
         }
     }
 
+    fn test_workload(health: Health, processes: Vec<ProcessTraffic>) -> WorkloadSnapshot {
+        WorkloadSnapshot {
+            health,
+            detail: "test workload sample".into(),
+            source: Some("test".into()),
+            interval: Duration::from_secs(1),
+            processes,
+        }
+    }
+
     #[test]
     fn readiness_document_keeps_unmeasured_purposes_explicitly_untested() {
         let report = SnapshotReport::from_results(
@@ -883,7 +962,7 @@ mod tests {
                 (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
             ],
         );
-        let document = readiness_document(&report, &AcquisitionWindow::start());
+        let document = readiness_document_with_workload(&report, &[], &AcquisitionWindow::start());
 
         assert_eq!(document.schema, READINESS_SCHEMA_V0);
         assert_eq!(document.path_status, PathStatus::Ok);
@@ -913,7 +992,7 @@ mod tests {
                 (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
             ],
         );
-        let document = readiness_document(&report, &AcquisitionWindow::start());
+        let document = readiness_document_with_workload(&report, &[], &AcquisitionWindow::start());
 
         assert_eq!(document.assessments[0].status, ReadinessStatusV0::Degraded);
         assert_eq!(
@@ -935,7 +1014,7 @@ mod tests {
                 (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
             ],
         );
-        let document = readiness_document(&report, &AcquisitionWindow::start());
+        let document = readiness_document_with_workload(&report, &[], &AcquisitionWindow::start());
 
         assert_eq!(
             document.assessments[0].status,
@@ -956,8 +1035,12 @@ mod tests {
                 (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
             ],
         );
-        let value =
-            serde_json::to_value(readiness_document(&report, &AcquisitionWindow::start())).unwrap();
+        let value = serde_json::to_value(readiness_document_with_workload(
+            &report,
+            &[],
+            &AcquisitionWindow::start(),
+        ))
+        .unwrap();
 
         assert_eq!(value["schema"], READINESS_SCHEMA_V0);
         assert_eq!(value["acquisition"]["policy"], "active");
@@ -969,6 +1052,99 @@ mod tests {
         assert_eq!(value["assessments"][0]["purpose"], "interactive_use");
         assert_eq!(value["assessments"][0]["status"], "ready");
         assert_eq!(value["assessments"][1]["status"], "not_tested");
+    }
+
+    #[test]
+    fn readiness_document_marks_idle_background_ready_only_after_quiet_window() {
+        let report = SnapshotReport::from_results(
+            test_link(),
+            Some(test_counters()),
+            test_peers(),
+            vec![
+                (ProbeKind::Gateway, test_probe_result("gateway", 8.0)),
+                (ProbeKind::Dns, test_probe_result("dns", 12.0)),
+                (ProbeKind::Https, test_probe_result("https", 35.0)),
+                (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
+            ],
+        );
+        let workloads = vec![
+            test_workload(Health::Ok, Vec::new()),
+            test_workload(Health::Ok, Vec::new()),
+            test_workload(Health::Ok, Vec::new()),
+        ];
+        let document =
+            readiness_document_with_workload(&report, &workloads, &AcquisitionWindow::start());
+
+        assert_eq!(document.assessments[3].status, ReadinessStatusV0::Ready);
+        let workload = document.workload.unwrap();
+        assert_eq!(workload.requested_samples, READINESS_WORKLOAD_SAMPLE_COUNT);
+        assert_eq!(workload.completed_samples, 3);
+        assert_eq!(workload.healthy_samples, 3);
+        assert_eq!(workload.samples_with_process_traffic, 0);
+        assert_eq!(workload.observed_span_ms, 3_000);
+    }
+
+    #[test]
+    fn readiness_document_degrades_idle_background_when_process_traffic_is_observed() {
+        let report = SnapshotReport::from_results(
+            test_link(),
+            Some(test_counters()),
+            test_peers(),
+            vec![
+                (ProbeKind::Gateway, test_probe_result("gateway", 8.0)),
+                (ProbeKind::Dns, test_probe_result("dns", 12.0)),
+                (ProbeKind::Https, test_probe_result("https", 35.0)),
+                (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
+            ],
+        );
+        let workloads = vec![
+            test_workload(Health::Ok, Vec::new()),
+            test_workload(
+                Health::Ok,
+                vec![ProcessTraffic {
+                    process: "redacted".into(),
+                    processes: 1,
+                    received_bytes_per_second: 10,
+                    transmitted_bytes_per_second: 20,
+                }],
+            ),
+            test_workload(Health::Ok, Vec::new()),
+        ];
+        let document =
+            readiness_document_with_workload(&report, &workloads, &AcquisitionWindow::start());
+
+        assert_eq!(document.assessments[3].status, ReadinessStatusV0::Degraded);
+        assert_eq!(
+            document.assessments[3].reasons,
+            vec!["per-process external-interface traffic was observed in bounded samples"]
+        );
+    }
+
+    #[test]
+    fn readiness_document_keeps_idle_background_insufficient_when_accounting_is_unavailable() {
+        let report = SnapshotReport::from_results(
+            test_link(),
+            Some(test_counters()),
+            test_peers(),
+            vec![
+                (ProbeKind::Gateway, test_probe_result("gateway", 8.0)),
+                (ProbeKind::Dns, test_probe_result("dns", 12.0)),
+                (ProbeKind::Https, test_probe_result("https", 35.0)),
+                (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
+            ],
+        );
+        let workloads = vec![
+            test_workload(Health::Unavailable, Vec::new()),
+            test_workload(Health::Unavailable, Vec::new()),
+            test_workload(Health::Unavailable, Vec::new()),
+        ];
+        let document =
+            readiness_document_with_workload(&report, &workloads, &AcquisitionWindow::start());
+
+        assert_eq!(
+            document.assessments[3].status,
+            ReadinessStatusV0::Insufficient
+        );
     }
 
     fn test_peers() -> PeerSnapshot {

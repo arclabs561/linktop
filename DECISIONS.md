@@ -73,10 +73,12 @@ from aggregate kernel interface counters. It is transparent feature evidence
 with explicit caveats, never an endpoint, protocol, application, person,
 place, or intent identity.
 The finite `readiness` command derives purpose-specific assessments from one
-fresh bounded active path snapshot. Interactive use requires current path
-context plus gateway, DNS, and HTTPS results. Calls, bulk transfer, and idle
-background health remain explicitly `not_tested` until their own measurements
-exist; no single readiness boolean may collapse those missing prerequisites.
+fresh bounded active path snapshot plus three bounded host process-accounting
+windows. Interactive use requires current path context plus gateway, DNS, and
+HTTPS results. Calls and bulk transfer remain explicitly `not_tested` until
+their own measurements exist. Idle background reports only observed
+per-process traffic across the accounting window and never claims absolute
+idleness; no single readiness boolean may collapse missing prerequisites.
 
 ## Reproducible visual QA
 

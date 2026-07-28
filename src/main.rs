@@ -855,8 +855,16 @@ fn probe(json: bool) -> Result<()> {
 
 fn readiness(json: bool) -> Result<()> {
     let window = output::AcquisitionWindow::start();
+    let workload = std::thread::spawn(|| {
+        (0..output::READINESS_WORKLOAD_SAMPLE_COUNT)
+            .map(|_| net::collect_workload_snapshot())
+            .collect::<Vec<_>>()
+    });
     let report = net::collect_snapshot(Duration::from_secs(15));
-    let document = output::readiness_document(&report, &window);
+    let workloads = workload
+        .join()
+        .map_err(|_| anyhow::anyhow!("readiness workload sampler panicked"))?;
+    let document = output::readiness_document_with_workload(&report, &workloads, &window);
     if json {
         output::print_json(&document)?;
     } else {

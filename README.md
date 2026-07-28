@@ -165,9 +165,10 @@ process/runtime failure.
 purposes separately: interactive use, calls, bulk transfer, and idle background
 health. Interactive use requires current path context plus successful gateway,
 DNS, and HTTPS measurements. Calls, bulk transfer, and idle background remain
-`not_tested` until voice-specific, load-specific, or host process-accounting
-measurements are collected; the command does not infer those properties from
-ordinary path latency or aggregate counters.
+`not_tested` until voice-specific or load-specific measurements are collected.
+Idle background uses three bounded host process-accounting windows and reports
+only observed per-process traffic; it does not claim absolute idleness or infer
+these properties from ordinary path latency or aggregate interface counters.
 
 ## Saved evidence and history
 
