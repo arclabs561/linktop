@@ -2,7 +2,7 @@
   "schema": "linktop.live_observation.v1",
   "producer": {
     "name": "linktop",
-    "version": "0.1.0"
+    "version": "0.1.1"
   },
   "line": "final_summary",
   "sequence": 1,
