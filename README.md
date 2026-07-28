@@ -222,8 +222,8 @@ is cumulative only within that requested interval, not a flow, session, or
 episode; its exact candidate TShark pivot includes the packet-time bounds.
 
 `--json` emits Netbraid's exact typed `netmon.saved_pcap_triage.v1` projection
-without a Linktop wrapper. Linktop reads and validates the records through its
-pinned `netbraid-replay` Rust library dependency. Review never invokes the
+without a Linktop wrapper. Linktop reads and validates the records through the
+versioned `netbraid::replay` Rust library API. Review never invokes the
 Netbraid CLI, TShark, Capinfos, a live collector, or a network request, and it
 does not append to or otherwise modify the input. Input is bounded to 128 MiB
 by default; `--max-input-mib` changes that explicit read limit.
@@ -293,7 +293,31 @@ evidence remain available.
 
 ## Install
 
-Rust 1.88 or newer is required.
+Building or installing with Cargo requires Rust 1.88 or newer.
+
+```sh
+cargo install linktop --version 0.1.0 --locked
+```
+
+Cargo installs the `linktop` command into its bin directory. The published
+package does not install the historical `pinglet` and `pingl` aliases.
+
+Checksummed native archives for x86-64 Linux, Intel macOS, and Apple-silicon
+macOS are also attached to the
+[`linktop-v0.1.0` GitHub release](https://github.com/arclabs561/linktop/releases/tag/linktop-v0.1.0).
+Download the release assets and verify all three archives with:
+
+```sh
+gh release download linktop-v0.1.0 \
+  --repo arclabs561/linktop \
+  --dir linktop-v0.1.0
+(cd linktop-v0.1.0 && shasum -a 256 --check SHA256SUMS)
+```
+
+The macOS archives are not code-signed or notarized. Cargo installation from
+source remains the most portable path.
+
+To install from this checkout and retain the compatibility aliases:
 
 ```sh
 just install
@@ -457,10 +481,10 @@ discovery, manage network controllers, retain durable history unless an
 operator supplies `--history` or `LINKTOP_HISTORY`, own credentials, publish
 telemetry, or perform identity/presence fusion. Those are separate lifecycles
 even when their evidence is useful beside a Linktop report. Linktop consumes
-Netbraid's experimental, versioned, policy-neutral Rust evidence/replay crates
-at an exact Git revision; it does not invoke the Netbraid CLI or require a
-Netbraid service. Direct local observation and diagnosis remain independently
-usable.
+Netbraid 0.3.0's policy-neutral `evidence` and `replay` modules through one
+registry package with default CLI and TShark features disabled; it does not
+invoke the Netbraid CLI or require a Netbraid service. Direct local observation
+and diagnosis remain independently usable.
 
 The longer product direction, including episode stories, purpose-specific
 readiness, explicit diagnostic experiments, multi-vantage Netbraid evidence, and

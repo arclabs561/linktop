@@ -1199,8 +1199,7 @@ dependencies = [
  "clap",
  "crossterm",
  "if-addrs",
- "netbraid-evidence",
- "netbraid-replay",
+ "netbraid",
  "pretty_assertions",
  "ratatui",
  "reqwest",
@@ -1310,20 +1309,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "netbraid-evidence"
+name = "netbraid"
 version = "0.3.0"
-source = "git+https://github.com/arclabs561/netbraid.git?rev=ab553a5e7c22b6344d4b60f632075691f4a966b6#ab553a5e7c22b6344d4b60f632075691f4a966b6"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "netbraid-replay"
-version = "0.3.0"
-source = "git+https://github.com/arclabs561/netbraid.git?rev=ab553a5e7c22b6344d4b60f632075691f4a966b6#ab553a5e7c22b6344d4b60f632075691f4a966b6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d56573fb58461060a6932d7b50d19de27c9db75a650d0dd7b51c370b8f14e11b"
 dependencies = [
  "libc",
- "netbraid-evidence",
  "serde",
  "serde_json",
  "sha2",
