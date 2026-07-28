@@ -3596,6 +3596,50 @@ mod tests {
     }
 
     #[test]
+    fn traffic_shape_direction_matrix_preserves_ambiguity_and_thresholds() {
+        let cases = [
+            (0, 0, TrafficShapeDirectionV0::NoObservedTraffic),
+            (300, 0, TrafficShapeDirectionV0::ReceiveDominant),
+            (0, 300, TrafficShapeDirectionV0::TransmitDominant),
+            (300, 100, TrafficShapeDirectionV0::ReceiveDominant),
+            (100, 300, TrafficShapeDirectionV0::TransmitDominant),
+            (301, 100, TrafficShapeDirectionV0::ReceiveDominant),
+            (100, 301, TrafficShapeDirectionV0::TransmitDominant),
+            (200, 100, TrafficShapeDirectionV0::Bidirectional),
+            (100, 200, TrafficShapeDirectionV0::Bidirectional),
+        ];
+
+        for (received, transmitted, expected) in cases {
+            let dwell = InterfaceDwell {
+                valid_intervals: 1,
+                received_bytes_delta: received,
+                transmitted_bytes_delta: transmitted,
+                ..InterfaceDwell::default()
+            };
+            let candidate = traffic_shape_candidate_from_dwell(&dwell, 1_000).unwrap();
+
+            assert_eq!(candidate.direction, expected);
+            assert_eq!(candidate.received_bytes_delta, received);
+            assert_eq!(candidate.transmitted_bytes_delta, transmitted);
+        }
+
+        let zero_span = traffic_shape_candidate_from_dwell(
+            &InterfaceDwell {
+                valid_intervals: 1,
+                received_bytes_delta: 1,
+                transmitted_bytes_delta: 1,
+                ..InterfaceDwell::default()
+            },
+            0,
+        )
+        .unwrap();
+        assert!(zero_span.mean_received_bits_per_second.is_none());
+        assert!(zero_span.mean_transmitted_bits_per_second.is_none());
+        assert!(zero_span.mean_received_packet_bytes.is_none());
+        assert!(zero_span.mean_transmitted_packet_bytes.is_none());
+    }
+
+    #[test]
     fn passive_policy_is_default_and_rejects_late_probe_results() {
         let mut app = App::new();
         assert_eq!(app.probe_policy(), ProbePolicy::Passive);
