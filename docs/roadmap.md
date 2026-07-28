@@ -42,6 +42,19 @@ support.
   version, source, and unknown/ambiguous outcomes rather than forcing identity.
 - Cross-source fusion that distinguishes host, local radio/LAN, ISP, and
   remote-service evidence without collapsing coverage gaps into confidence.
+- A heterogeneous RF lane, kept as separate feature families until a replay
+  contract proves their join: Bermuda-like BLE observations and movement
+  episodes; IEEE 802.11/radiotap frame and radio metadata; device-free Wi-Fi
+  CSI motion/presence; and bounded spectrum or sub-GHz observations from
+  sources such as HackRF and rtl_433. Radiotap signal values remain capture
+  metadata, not calibrated location or identity measurements.
+- Scoped tracking episodes that preserve observer, source, time, coverage,
+  identifier rotation, and movement/placement uncertainty. A repeated signal
+  may produce a continuity candidate or a contradiction, never an automatic
+  person/device binding or a global unknown-device index.
+- Explainable cross-modal hypotheses such as “BLE presence and CSI motion
+  co-occurred at one vantage while the host path stayed stable,” or “Wi-Fi
+  and spectrum observations disagree,” with cited evidence and abstention.
 - Explicit diagnostic experiments that compare before, during, and after
   bounded load or route changes.
 - Sanitized capsule projections and explicit source-lineage contracts for
@@ -56,3 +69,12 @@ or authority requires an explicit product decision before implementation.
 Live network and host-tool acquisition remain opt-in acceptance lanes, not
 default CI inputs. A live observation may supply a new curated case only after
 its provenance and contents have been reviewed for disclosure.
+
+The RF/fusion promotion gate is deliberately stronger than a single live
+success: curated replay must cover identifier rotation, board movement,
+missing or stale vantages, modality disagreement, partial radiotap headers,
+CSI absence, and source-specific coverage gaps; property tests must preserve
+ordering and source scope; fuzzing must cover each untrusted parser; and
+mutation tests must demonstrate that contradiction and abstention branches
+are real. Only then does a bounded live calibration lane measure room or
+movement utility against operator-approved labels.
