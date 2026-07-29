@@ -1,10 +1,9 @@
 # linktop
 
-`linktop` is a terminal instrument for the host's current network context. It
-reports the effective route, physical link, resolvers, addresses, interface
-activity, process traffic, and native neighbor cache. It opens passively and
-labels Internet reachability `UNTESTED` until an operator enables bounded
-probes.
+`linktop` shows the current network context of the host. It reports the route,
+physical link, resolvers, addresses, interface activity, process traffic, and
+native neighbor cache. It starts passively and labels Internet reachability
+`UNTESTED` until an operator enables bounded probes.
 
 ```text
 UNTESTED  default route en0 → 192.0.2.1 observed; Internet reachability is not tested
