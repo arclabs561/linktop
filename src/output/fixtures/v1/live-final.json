@@ -324,6 +324,7 @@
       },
       "fingerprint_candidate": {
         "schema": "linktop.path_fingerprint_candidate.v0",
+        "observer": "operator-host",
         "digest": "f32c1e37c59ca2d411ffa961db28b4f41786dbd626a8727389bebfc85056281f",
         "basis": [
           "interface",

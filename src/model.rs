@@ -802,6 +802,7 @@ fn path_fingerprint_candidate_from_identity(
 
     Some(PathFingerprintCandidateV0 {
         schema: PATH_FINGERPRINT_CANDIDATE_SCHEMA_V0,
+        observer: identity.host.clone(),
         digest,
         basis: fields.into_iter().map(|(name, _)| name).collect(),
         caveats: vec![
@@ -1452,6 +1453,7 @@ pub const PATH_FINGERPRINT_CANDIDATE_SCHEMA_V0: &str = "linktop.path_fingerprint
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PathFingerprintCandidateV0 {
     pub schema: &'static str,
+    pub observer: String,
     pub digest: String,
     pub basis: Vec<&'static str>,
     pub caveats: Vec<&'static str>,
@@ -3696,6 +3698,7 @@ mod tests {
         let candidate = path_fingerprint_candidate_from_identity(&identity).unwrap();
 
         assert_eq!(candidate.schema, PATH_FINGERPRINT_CANDIDATE_SCHEMA_V0);
+        assert_eq!(candidate.observer, "workstation");
         assert_eq!(candidate.digest.len(), 64);
         assert!(candidate.basis.contains(&"interface"));
         assert!(candidate.basis.contains(&"ssid"));
