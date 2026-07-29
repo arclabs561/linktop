@@ -4,6 +4,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::metrics::LatencyMetrics;
 
@@ -739,6 +740,78 @@ impl PathFingerprint {
     }
 }
 
+fn path_fingerprint_candidate_from_identity(
+    identity: &DwellPathIdentity,
+) -> Option<PathFingerprintCandidateV0> {
+    let mut fields = Vec::new();
+    let mut add = |name: &'static str, value: &str| fields.push((name, value.to_owned()));
+
+    if let Some(interface) = identity.interface.as_deref() {
+        add("interface", interface);
+    }
+    if let Some(link_type) = identity.link_type.as_deref() {
+        add("link_type", link_type);
+    }
+    if let Some(underlay) = identity.underlay.as_ref() {
+        add("underlay_interface", &underlay.interface);
+        add("underlay_link_type", &underlay.link_type);
+        if let Some(gateway) = underlay.gateway.as_deref() {
+            add("underlay_gateway", gateway);
+        }
+    }
+    if let Some(ssid) = identity.ssid.as_deref() {
+        add("ssid", ssid);
+    } else if identity.ssid_restricted {
+        add("ssid_restricted", "true");
+    }
+    if let Some(connection_id) = identity.connection_id.as_deref() {
+        add("connection_id", connection_id);
+    }
+    if let Some(gateway) = identity.gateway.as_deref() {
+        add("gateway", gateway);
+    }
+    let mut resolvers = identity.resolvers.clone();
+    resolvers.sort();
+    resolvers.dedup();
+    for resolver in &resolvers {
+        add("resolver", resolver);
+    }
+    let mut address_boundaries = identity.address_boundaries.clone();
+    address_boundaries.sort();
+    address_boundaries.dedup();
+    for (interface, address) in &address_boundaries {
+        add("address_interface", interface);
+        add("address_boundary", address);
+    }
+    if fields.is_empty() {
+        return None;
+    }
+
+    let mut digest = Sha256::new();
+    for (name, value) in &fields {
+        digest.update((name.len() as u64).to_be_bytes());
+        digest.update(name.as_bytes());
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    let digest = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+
+    Some(PathFingerprintCandidateV0 {
+        schema: PATH_FINGERPRINT_CANDIDATE_SCHEMA_V0,
+        digest,
+        basis: fields.into_iter().map(|(name, _)| name).collect(),
+        caveats: vec![
+            "comparison digest over observed host-path dimensions",
+            "not endpoint, protocol, device, person, place, or intent identity",
+            "missing dimensions are omitted and values remain observer-scoped",
+        ],
+    })
+}
+
 fn path_address_identity(value: &str) -> Option<String> {
     match value.parse::<IpAddr>().ok()? {
         IpAddr::V4(address) => Some(address.to_string()),
@@ -1369,6 +1442,20 @@ pub struct CompletedInterfaceWindow {
 }
 
 pub const TRAFFIC_SHAPE_CANDIDATE_SCHEMA_V0: &str = "linktop.traffic_shape_candidate.v0";
+pub const PATH_FINGERPRINT_CANDIDATE_SCHEMA_V0: &str = "linktop.path_fingerprint_candidate.v0";
+
+/// A deterministic comparison candidate for completed host-path episodes.
+///
+/// The digest is useful for grouping repeated observed path shapes. It is not
+/// a device, person, place, endpoint, protocol, application, or intent
+/// identity, and omitted dimensions are not evidence that they matched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PathFingerprintCandidateV0 {
+    pub schema: &'static str,
+    pub digest: String,
+    pub basis: Vec<&'static str>,
+    pub caveats: Vec<&'static str>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1462,6 +1549,8 @@ pub struct CompletedNeighborWindow {
 pub struct CompletedPathWindow {
     pub generation: u64,
     pub path_identity: DwellPathIdentity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint_candidate: Option<PathFingerprintCandidateV0>,
     pub observed_span_ms: u64,
     pub completed_by: CompletedPathWindowTransition,
     pub collector_scope: CompletedPathWindowCollectorScope,
@@ -2315,6 +2404,7 @@ impl App {
         Some(CompletedPathWindow {
             generation: completed.generation,
             path_identity: completed.identity.clone(),
+            fingerprint_candidate: path_fingerprint_candidate_from_identity(&completed.identity),
             observed_span_ms: duration_ms(completed.observed),
             completed_by: CompletedPathWindowTransition {
                 reason: "path_transition",
@@ -3593,6 +3683,66 @@ mod tests {
                 .any(|caveat| caveat.contains("not endpoint"))
         );
         assert!(traffic_shape_candidate_from_dwell(&InterfaceDwell::default(), 1_000).is_none());
+    }
+
+    #[test]
+    fn path_fingerprint_candidate_is_stable_and_explainable() {
+        let link = test_link("en0", "house", "192.168.1.1");
+        let mut identity = DwellPathIdentity::from_link(&link);
+        identity.resolvers.push("192.168.1.2".into());
+        identity
+            .address_boundaries
+            .push(("en0".into(), "192.168.2.0/24".into()));
+        let candidate = path_fingerprint_candidate_from_identity(&identity).unwrap();
+
+        assert_eq!(candidate.schema, PATH_FINGERPRINT_CANDIDATE_SCHEMA_V0);
+        assert_eq!(candidate.digest.len(), 64);
+        assert!(candidate.basis.contains(&"interface"));
+        assert!(candidate.basis.contains(&"ssid"));
+        assert!(candidate.basis.contains(&"address_boundary"));
+        assert!(
+            candidate
+                .caveats
+                .iter()
+                .any(|caveat| caveat.contains("not endpoint"))
+        );
+
+        let mut reordered = identity.clone();
+        reordered.resolvers.reverse();
+        reordered.address_boundaries.reverse();
+        assert_eq!(
+            path_fingerprint_candidate_from_identity(&reordered)
+                .unwrap()
+                .digest,
+            candidate.digest
+        );
+
+        let mut changed = identity;
+        changed.gateway = Some("192.168.1.254".into());
+        assert_ne!(
+            path_fingerprint_candidate_from_identity(&changed)
+                .unwrap()
+                .digest,
+            candidate.digest
+        );
+    }
+
+    #[test]
+    fn path_fingerprint_candidate_abstains_without_path_dimensions() {
+        let identity = DwellPathIdentity {
+            host: "test-host".into(),
+            interface: None,
+            link_type: None,
+            underlay: None,
+            ssid: None,
+            ssid_restricted: false,
+            connection_id: None,
+            gateway: None,
+            resolvers: Vec::new(),
+            address_boundaries: Vec::new(),
+        };
+
+        assert!(path_fingerprint_candidate_from_identity(&identity).is_none());
     }
 
     #[test]

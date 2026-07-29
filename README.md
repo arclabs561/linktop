@@ -117,6 +117,12 @@ aggregate direction, byte and packet deltas, mean and peak rates, and
 aggregate bytes per packet. It is a comparison candidate only—not endpoint,
 protocol, application, person, place, or intent evidence.
 
+Completed path windows also expose an optional
+`linktop.path_fingerprint_candidate.v0` comparison digest when at least one
+path dimension is observed. Its basis names the contributing host-path fields;
+it is not endpoint, protocol, device, person, place, or intent identity, and it
+does not join observations across hosts or modalities.
+
 ## What passive mode observes
 
 - Effective default route, interface, next hop, resolvers, and local addresses.

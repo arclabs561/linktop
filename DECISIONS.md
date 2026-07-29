@@ -72,6 +72,10 @@ Completed bounded path windows may expose a versioned traffic-shape candidate
 from aggregate kernel interface counters. It is transparent feature evidence
 with explicit caveats, never an endpoint, protocol, application, person,
 place, or intent identity.
+They may also expose a deterministic path-fingerprint comparison candidate
+whose basis is explicit and whose digest is observer-scoped; it is a grouping
+aid for repeated host-path episodes, not a durable identity or a cross-modal
+join.
 The finite `readiness` command derives purpose-specific assessments from one
 fresh bounded active path snapshot plus three bounded host process-accounting
 windows. Interactive use requires current path context plus gateway, DNS, and
