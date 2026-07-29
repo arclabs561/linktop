@@ -63,8 +63,11 @@ versions are the compatibility boundary.
 ## Dependency boundary
 
 Linktop depends on the published `netbraid` package with default features
-disabled and the `scenario-fixtures` feature enabled. It imports typed evidence
-and replay semantics only. Collection, deployment, credentials, retention, and
-writer authority remain outside this process.
+disabled and the `scenario-fixtures` feature enabled. It imports typed evidence,
+replay, and policy-neutral fusion semantics only. Linktop may compose those
+results with the current host context for an operator view, while preserving
+source, freshness, coverage, and disagreement. It does not own canonical
+cross-source fusion, collection, deployment, credentials, retention, private
+identity, or writer authority.
 
 See [DECISIONS.md](../DECISIONS.md) for the constraints behind this structure.
