@@ -1,26 +1,21 @@
 # linktop
 
-`linktop` shows the network context of the current host: its effective route,
-physical link, resolvers, addresses, interface activity, process traffic, and
-native neighbor cache. It opens passively and labels Internet reachability
-`UNTESTED` until an operator enables bounded probes.
+`linktop` is a terminal instrument for the host's current network context. It
+reports the effective route, physical link, resolvers, addresses, interface
+activity, process traffic, and native neighbor cache. It opens passively and
+labels Internet reachability `UNTESTED` until an operator enables bounded
+probes.
 
 ```text
-┌ LIVE STATUS ────────────────────────────────────────────────────────────────┐
-│ LINKTOP   NETWORK CONTEXT  PASSIVE   UP 00:05   PATH GEN 3                  │
-└─────────────────────────────────────────────────────────────────────────────┘
-┌ DIAGNOSIS ──────────────────────────────────────────────────────────────────┐
-│ UNTESTED  default route en0 → 192.0.2.1 observed; reachability not tested   │
-│ history  +00:04 returned · known BSSID · place unknown                     │
-│ next: [a] enables next-hop, DNS, HTTPS, and public-egress probes            │
-└─────────────────────────────────────────────────────────────────────────────┘
-┌ LOCAL PATH ─────────────────────────────────────────────────────────────────┐
-│ fixture-host ──▶ en0 [wifi / Northstar Lab] ──▶ 192.0.2.1                  │
-└─────────────────────────────────────────────────────────────────────────────┘
+UNTESTED  default route en0 → 192.0.2.1 observed; Internet reachability is not tested
+history  +00:04 returned · 1 prior · 2m · known BSSID · 1 variant(s) · place unknown
+passive coverage COLLECTING · route observed · neighbor cache pending · radio unavailable
+fixture-host ──▶ en0 [wifi / Northstar Lab] ──▶ 192.0.2.1
 ```
 
-The example is generated from Linktop's public-synthetic
-Wi-Fi→hotspot→Wi-Fi scene. Normal operator views show the identifiers the host
+This is an excerpt from the 7-second, 160-column frame produced by the
+`wifi-hotspot-wifi` public-synthetic scene. It is test output, not a capture from
+an operator's host. Normal operator views show the identifiers the host
 actually exposes; Linktop does not redact local output.
 
 Status: experimental.
