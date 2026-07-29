@@ -3749,6 +3749,59 @@ mod tests {
     }
 
     #[test]
+    fn path_fingerprint_candidate_covers_each_field_branch_exactly() {
+        let restricted = DwellPathIdentity {
+            host: "test-host".into(),
+            interface: None,
+            link_type: None,
+            underlay: None,
+            ssid: None,
+            ssid_restricted: true,
+            connection_id: None,
+            gateway: None,
+            resolvers: Vec::new(),
+            address_boundaries: Vec::new(),
+        };
+        let restricted_candidate = path_fingerprint_candidate_from_identity(&restricted).unwrap();
+        assert_eq!(restricted_candidate.basis, vec!["ssid_restricted"]);
+
+        let underlay = DwellPathIdentity {
+            underlay: Some(PathUnderlay {
+                interface: "en0".into(),
+                link_type: "wifi".into(),
+                gateway: Some("192.0.2.1".into()),
+            }),
+            ssid_restricted: false,
+            ..restricted.clone()
+        };
+        let underlay_candidate = path_fingerprint_candidate_from_identity(&underlay).unwrap();
+        assert_eq!(
+            underlay_candidate.basis,
+            vec![
+                "underlay_interface",
+                "underlay_link_type",
+                "underlay_gateway"
+            ]
+        );
+
+        let address_and_resolver = DwellPathIdentity {
+            resolvers: vec!["192.0.2.53".into(), "192.0.2.53".into()],
+            address_boundaries: vec![
+                ("en0".into(), "192.0.2.0/24".into()),
+                ("en0".into(), "192.0.2.0/24".into()),
+            ],
+            ssid_restricted: false,
+            ..restricted
+        };
+        let address_candidate =
+            path_fingerprint_candidate_from_identity(&address_and_resolver).unwrap();
+        assert_eq!(
+            address_candidate.basis,
+            vec!["resolver", "address_interface", "address_boundary"]
+        );
+    }
+
+    #[test]
     fn traffic_shape_direction_matrix_preserves_ambiguity_and_thresholds() {
         let cases = [
             (0, 0, TrafficShapeDirectionV0::NoObservedTraffic),
