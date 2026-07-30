@@ -51,6 +51,34 @@ struct IperfSummary {
     retransmits: Option<u64>,
 }
 
+fn parse_iperf_json(stdout: &[u8], stderr: &str) -> Result<IperfReport> {
+    serde_json::from_slice(stdout).with_context(|| format!("parse iperf3 JSON: {}", stderr.trim()))
+}
+
+fn summarize_iperf_report(report: IperfReport, command_succeeded: bool) -> Result<TransferSummary> {
+    if !command_succeeded || report.end.is_none() {
+        bail!(
+            "iperf3 did not complete: {}",
+            report.error.as_deref().unwrap_or("no completed report")
+        );
+    }
+    let end = report.end.expect("checked above");
+    Ok(TransferSummary {
+        sent_bits_per_second: end
+            .sum_sent
+            .as_ref()
+            .and_then(|summary| summary.bits_per_second),
+        received_bits_per_second: end
+            .sum_received
+            .as_ref()
+            .and_then(|summary| summary.bits_per_second),
+        retransmits: end
+            .sum_sent
+            .as_ref()
+            .and_then(|summary| summary.retransmits),
+    })
+}
+
 pub fn run(target: &str, port: u16, duration: Duration) -> Result<SpeedReport> {
     let gateway = net::default_gateway();
     let baseline = gateway
@@ -84,31 +112,8 @@ pub fn run(target: &str, port: u16, duration: Duration) -> Result<SpeedReport> {
     let loaded = loaded
         .join()
         .map_err(|_| anyhow::anyhow!("loaded-latency worker panicked"))?;
-    let report: IperfReport = serde_json::from_slice(&output.stdout).with_context(|| {
-        let detail = String::from_utf8_lossy(&output.stderr);
-        format!("parse iperf3 JSON: {}", detail.trim())
-    })?;
-    if !output.status.success() || report.end.is_none() {
-        bail!(
-            "iperf3 did not complete: {}",
-            report.error.as_deref().unwrap_or("no completed report")
-        );
-    }
-    let end = report.end.expect("checked above");
-    let transfer = TransferSummary {
-        sent_bits_per_second: end
-            .sum_sent
-            .as_ref()
-            .and_then(|summary| summary.bits_per_second),
-        received_bits_per_second: end
-            .sum_received
-            .as_ref()
-            .and_then(|summary| summary.bits_per_second),
-        retransmits: end
-            .sum_sent
-            .as_ref()
-            .and_then(|summary| summary.retransmits),
-    };
+    let report = parse_iperf_json(&output.stdout, &String::from_utf8_lossy(&output.stderr))?;
+    let transfer = summarize_iperf_report(report, output.status.success())?;
     Ok(SpeedReport {
         tool: "iperf3",
         mode: "tcp",
@@ -145,13 +150,33 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_bounded_iperf_fields() {
+    fn parses_the_bounded_iperf_fields_from_the_production_helper() {
+        let report = parse_iperf_json(
+            br#"{"end":{"sum_sent":{"bits_per_second":1000000,"retransmits":2},"sum_received":{"bits_per_second":900000}}}"#,
+            "",
+        )
+        .unwrap();
+        let transfer = summarize_iperf_report(report, true).unwrap();
+        assert_eq!(transfer.sent_bits_per_second, Some(1_000_000.0));
+        assert_eq!(transfer.received_bits_per_second, Some(900_000.0));
+        assert_eq!(transfer.retransmits, Some(2));
+    }
+
+    #[test]
+    fn rejects_malformed_or_incomplete_iperf_results() {
+        let malformed = parse_iperf_json(b"not json", "server said no").unwrap_err();
+        assert!(malformed.to_string().contains("parse iperf3 JSON"));
+
         let report: IperfReport = serde_json::from_str(
             r#"{"end":{"sum_sent":{"bits_per_second":1000000,"retransmits":2},"sum_received":{"bits_per_second":900000}}}"#,
         )
         .unwrap();
-        let end = report.end.unwrap();
-        assert_eq!(end.sum_sent.unwrap().retransmits, Some(2));
-        assert_eq!(end.sum_received.unwrap().bits_per_second, Some(900_000.0));
+        let failed = summarize_iperf_report(report, false).unwrap_err();
+        assert!(failed.to_string().contains("iperf3 did not complete"));
+
+        let report: IperfReport =
+            serde_json::from_str(r#"{"error":"connection refused"}"#).unwrap();
+        let incomplete = summarize_iperf_report(report, true).unwrap_err();
+        assert!(incomplete.to_string().contains("connection refused"));
     }
 }

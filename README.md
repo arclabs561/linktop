@@ -279,6 +279,16 @@ just check
 `just check` runs tests, formatting, clippy, rustdoc warnings, dependency
 feature checks, package inventory, and extracted-package tests.
 
+To test the current checkout against a local Netbraid source tree without adding
+a path dependency to the manifest:
+
+```sh
+NETBRAID_SOURCE=/path/to/netbraid/rust just check-netbraid-source
+```
+
+`just mutation-check` is an opt-in `cargo-mutants` check for the path-fingerprint
+candidate helper.
+
 ## License
 
 MIT.

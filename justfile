@@ -7,6 +7,12 @@ check:
     cargo +1.88 metadata --locked --format-version 1 | jq -e '[.resolve.nodes[] as $node | .packages[] | select(.id == $node.id and .name == "netbraid") | $node.features] == [["scenario-fixtures"]]'
     set -eu; package_list="$(mktemp)"; trap 'rm -f "$package_list"' EXIT; cargo +1.88 package --locked --allow-dirty --list >"$package_list"; grep -Fqx README.md "$package_list"; grep -Fqx LICENSE "$package_list"; grep -Fqx CHANGELOG.md "$package_list"; grep -Fqx src/lib.rs "$package_list"; grep -Fqx src/capture/fixtures/v1/qa_capture_manifest.json "$package_list"; grep -Fqx src/output/fixtures/v1/snapshot.json "$package_list"; grep -Fqx src/review/fixtures/positive-records.jsonl "$package_list"; if grep -Eq '^(\.github/|AGENTS\.md$|docs/|justfile$)' "$package_list"; then printf 'package contains repository-only files\n' >&2; exit 1; fi; cargo +1.88 package --locked --allow-dirty; version="$(cargo +1.88 metadata --no-deps --format-version 1 | jq -er '.packages[0].version')"; cargo +1.88 test --locked --manifest-path "target/package/linktop-${version}/Cargo.toml"; cargo +1.88 rustdoc --locked --manifest-path "target/package/linktop-${version}/Cargo.toml" --lib -- -D warnings
 
+check-netbraid-source:
+    @scripts/check-netbraid-source.sh
+
+mutation-check:
+    cargo mutants --package linktop --file src/model.rs --re 'path_fingerprint_candidate_from_identity' --test-package linktop --jobs 2 --timeout 180 --no-shuffle -v
+
 # Run a real live view headlessly and save private, styled frames plus a
 # completion-last integrity manifest. Comma-separated times produce several frames.
 capture-ui view="overview" columns="140" rows="30" at="5":
