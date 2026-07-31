@@ -3653,6 +3653,7 @@ fn counters_replaced_or_reset(before: &InterfaceCounters, after: &InterfaceCount
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn traffic_shape_candidate_is_bounded_aggregate_feature_evidence() {
@@ -3799,6 +3800,86 @@ mod tests {
             address_candidate.basis,
             vec!["resolver", "address_interface", "address_boundary"]
         );
+    }
+
+    proptest! {
+        #[test]
+        fn path_fingerprint_candidate_is_order_stable_and_value_scoped(
+            host_suffix in "[a-z0-9]{1,8}",
+            interface in prop::option::of("[a-z0-9]{1,8}"),
+            link_type in prop::option::of("[a-z0-9]{1,8}"),
+            ssid in prop::option::of("[a-z0-9]{1,8}"),
+            connection_id in prop::option::of("[a-z0-9]{1,8}"),
+            gateway in prop::option::of("[a-z0-9]{1,8}"),
+            resolvers in prop::collection::vec("[a-z0-9]{1,8}", 0..5),
+            address_boundaries in prop::collection::vec(
+                ("[a-z0-9]{1,8}", "[a-z0-9]{1,8}"),
+                0..5,
+            ),
+            ssid_restricted in any::<bool>(),
+        ) {
+            let identity = DwellPathIdentity {
+                host: format!("observer-{host_suffix}"),
+                interface: interface.map(|value| format!("value-{value}")),
+                link_type: link_type.map(|value| format!("value-{value}")),
+                underlay: None,
+                ssid: ssid.map(|value| format!("value-{value}")),
+                ssid_restricted,
+                connection_id: connection_id.map(|value| format!("value-{value}")),
+                gateway: gateway.map(|value| format!("value-{value}")),
+                resolvers: resolvers
+                    .into_iter()
+                    .map(|value| format!("value-{value}"))
+                    .collect(),
+                address_boundaries: address_boundaries
+                    .into_iter()
+                    .map(|(interface, address)| {
+                        (format!("value-{interface}"), format!("value-{address}"))
+                    })
+                    .collect(),
+            };
+
+            let Some(candidate) = path_fingerprint_candidate_from_identity(&identity) else {
+                prop_assert!(identity.interface.is_none());
+                prop_assert!(identity.link_type.is_none());
+                prop_assert!(identity.ssid.is_none());
+                prop_assert!(!identity.ssid_restricted);
+                prop_assert!(identity.connection_id.is_none());
+                prop_assert!(identity.gateway.is_none());
+                prop_assert!(identity.resolvers.is_empty());
+                prop_assert!(identity.address_boundaries.is_empty());
+                return Ok(());
+            };
+
+            prop_assert_eq!(&candidate.observer, &identity.host);
+            prop_assert_eq!(candidate.digest.len(), 64);
+            prop_assert!(candidate.digest.chars().all(|value| value.is_ascii_hexdigit()));
+
+            let mut reordered = identity.clone();
+            reordered.resolvers.reverse();
+            reordered.address_boundaries.reverse();
+            let reordered_candidate =
+                path_fingerprint_candidate_from_identity(&reordered).unwrap();
+            prop_assert_eq!(&candidate.digest, &reordered_candidate.digest);
+            prop_assert_eq!(&candidate.basis, &reordered_candidate.basis);
+
+            let encoded = serde_json::to_string(&candidate).unwrap();
+            for value in identity
+                .interface
+                .iter()
+                .chain(identity.link_type.iter())
+                .chain(identity.ssid.iter())
+                .chain(identity.connection_id.iter())
+                .chain(identity.gateway.iter())
+                .chain(identity.resolvers.iter())
+            {
+                prop_assert!(!encoded.contains(value));
+            }
+            for (interface, address) in &identity.address_boundaries {
+                prop_assert!(!encoded.contains(interface));
+                prop_assert!(!encoded.contains(address));
+            }
+        }
     }
 
     #[test]
