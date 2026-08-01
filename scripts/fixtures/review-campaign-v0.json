@@ -1,0 +1,27 @@
+{
+  "schema": "linktop.review_campaign.v0",
+  "cases": [
+    {
+      "input": "../../src/review/fixtures/positive-records.jsonl",
+      "sha256": "402d2d96b2bff5dfa9a43b8e915e9f683fdb3801e91128f1fbb33749da8d770e",
+      "expect": {
+        "schema": "netmon.saved_pcap_triage.v1",
+        "completeness": "complete_capture",
+        "wlan": "observed",
+        "conversation": "observed",
+        "negative_claim": "not_requested"
+      }
+    },
+    {
+      "input": "../../src/review/fixtures/partial-records.jsonl",
+      "sha256": "d21efd0fee8adccc01d313231b180ba11f4eb7470d09bc9757276e5a9dea85ff",
+      "expect": {
+        "schema": "netmon.saved_pcap_triage.v1",
+        "completeness": "partial_packet_subset",
+        "wlan": "insufficient",
+        "conversation": "observed",
+        "negative_claim": "not_requested"
+      }
+    }
+  ]
+}

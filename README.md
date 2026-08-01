@@ -274,10 +274,13 @@ and the [Roadmap](https://github.com/arclabs561/linktop/blob/main/docs/roadmap.m
 ```sh
 cargo run
 just check
+just review-campaign-eval
 ```
 
 `just check` runs tests, formatting, clippy, rustdoc warnings, dependency
-feature checks, package inventory, and extracted-package tests.
+feature checks, the bounded saved-evidence review campaign, package inventory,
+and extracted-package tests. `just review-campaign-eval /path/to/linktop` runs
+the same checked manifest against a supplied binary.
 
 To test the current checkout against a local Netbraid source tree without adding
 a path dependency to the manifest:
