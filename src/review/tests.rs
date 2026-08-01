@@ -1,10 +1,17 @@
 use std::fs;
 use std::path::Path;
 
+use netbraid::replay::{
+    SavedPcapClaimScopeV0, SavedPcapCompletenessV0, SavedPcapConversationTriageV0,
+    SavedPcapConversationUnsupportedReasonV0, SavedPcapWlanTriageV0,
+    SavedPcapWlanUnsupportedReasonV0,
+};
+
 use super::{TailSecondsArg, load, render_human, render_json};
 
 const INPUT: &str = include_str!("fixtures/positive-records.jsonl");
 const PARTIAL_INPUT: &str = include_str!("fixtures/partial-records.jsonl");
+const UNSUPPORTED_INPUT: &str = include_str!("fixtures/unsupported-records.jsonl");
 const HUMAN: &str = include_str!("fixtures/positive-human.txt");
 const PARTIAL_HUMAN: &str = include_str!("fixtures/partial-human.txt");
 const JSON: &str = include_str!("fixtures/positive.json");
@@ -88,6 +95,49 @@ fn partial_review_qualifies_absence_and_preserves_quarantine_coverage() {
 }
 
 #[test]
+fn complete_non_wlan_review_preserves_typed_unsupported() {
+    let path = unsupported_fixture_path();
+    let before = fs::read(path).unwrap();
+    let first = load(path, before.len() as u64, None).unwrap();
+    let second = load(path, UNSUPPORTED_INPUT.len() as u64, None).unwrap();
+
+    assert_eq!(fs::read(path).unwrap(), before);
+    assert_eq!(
+        first.normalization.completeness,
+        SavedPcapCompletenessV0::CompleteCapture
+    );
+    assert_eq!(render_json(&first).unwrap(), render_json(&second).unwrap());
+    assert!(matches!(
+        first.wlan,
+        SavedPcapWlanTriageV0::Unsupported {
+            scope: SavedPcapClaimScopeV0::CompleteCapture,
+            reason: SavedPcapWlanUnsupportedReasonV0::NoIeee80211FrameEvidence,
+        }
+    ));
+    assert!(matches!(
+        first.top_capture_conversation,
+        SavedPcapConversationTriageV0::Unsupported {
+            scope: SavedPcapClaimScopeV0::CompleteCapture,
+            reason: SavedPcapConversationUnsupportedReasonV0::NoEligibleIpTcpUdpPacketEnvelopes,
+            packet_envelopes_seen: 1,
+            packet_envelopes_excluded: 1,
+            ..
+        }
+    ));
+    for identity_field in [
+        "\"observer_id\"",
+        "\"ethernet\"",
+        "\"ipv4\"",
+        "\"ipv6\"",
+        "\"ieee80211\"",
+        "\"tcp\"",
+        "\"udp\"",
+    ] {
+        assert!(!UNSUPPORTED_INPUT.contains(identity_field));
+    }
+}
+
+#[test]
 fn tail_seconds_are_exact_and_bounded_to_the_projection_domain() {
     assert_eq!(
         "0.000000001"
@@ -122,5 +172,12 @@ fn partial_fixture_path() -> &'static Path {
     Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/review/fixtures/partial-records.jsonl"
+    ))
+}
+
+fn unsupported_fixture_path() -> &'static Path {
+    Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/review/fixtures/unsupported-records.jsonl"
     ))
 }

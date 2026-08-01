@@ -22,6 +22,17 @@
         "conversation": "observed",
         "negative_claim": "not_requested"
       }
+    },
+    {
+      "input": "../../src/review/fixtures/unsupported-records.jsonl",
+      "sha256": "5d69b00b35002ed6f807c220e05daf8e72a8e741676f6b28692774fb968d75f3",
+      "expect": {
+        "schema": "netmon.saved_pcap_triage.v1",
+        "completeness": "complete_capture",
+        "wlan": "unsupported",
+        "conversation": "unsupported",
+        "negative_claim": "not_requested"
+      }
     }
   ]
 }
