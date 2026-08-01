@@ -279,8 +279,8 @@ just review-campaign-eval
 
 `just check` runs tests, formatting, clippy, rustdoc warnings, dependency
 feature checks, the bounded saved-evidence review campaign, package inventory,
-and extracted-package tests. `just review-campaign-eval /path/to/linktop` runs
-the same checked manifest against a supplied binary.
+and extracted-package tests. To run the same manifest against a supplied
+binary, use `python3 scripts/evaluate-review-campaign.py --linktop /path/to/linktop`.
 
 To test the current checkout against a local Netbraid source tree without adding
 a path dependency to the manifest:

@@ -78,7 +78,12 @@ def strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def load_json_strict(data: bytes, stage: str, case: int | None = None) -> Any:
     try:
         return json.loads(data, object_pairs_hook=strict_object)
-    except (DuplicateKeyError, UnicodeDecodeError, json.JSONDecodeError):
+    except (
+        DuplicateKeyError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        RecursionError,
+    ):
         raise CampaignError("malformed", stage, case) from None
 
 
@@ -195,10 +200,10 @@ def validate_manifest(
 
 
 def terminate_process(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is None:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except OSError:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        if process.poll() is None:
             try:
                 process.kill()
             except OSError:
@@ -206,7 +211,10 @@ def terminate_process(process: subprocess.Popen[bytes]) -> None:
     try:
         process.wait(timeout=1)
     except subprocess.TimeoutExpired:
-        pass
+        try:
+            process.kill()
+        except OSError:
+            pass
 
 
 def run_review(binary: Path, input_path: Path, case: int) -> bytes:
@@ -479,6 +487,40 @@ class EvaluatorSelfTests(unittest.TestCase):
                 self.assertEqual(code, 2)
                 self.assertEqual(report["error"]["stage"], stage)
 
+    def test_timeout_kills_descendant_after_leader_exit(self) -> None:
+        global REVIEW_TIMEOUT_SECONDS
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "leader"
+            pid_file = root / "child.pid"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, subprocess, sys\n"
+                "child = subprocess.Popen([sys.executable, '-c', "
+                "'import time; time.sleep(60)'])\n"
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o700)
+            previous_timeout = REVIEW_TIMEOUT_SECONDS
+            REVIEW_TIMEOUT_SECONDS = 0.2
+            try:
+                with self.assertRaises(CampaignError) as raised:
+                    run_review(binary, root / "unused", 1)
+                self.assertEqual(raised.exception.stage, "review_timeout")
+            finally:
+                REVIEW_TIMEOUT_SECONDS = previous_timeout
+            child_pid = int(pid_file.read_text())
+            deadline = time.monotonic() + 1
+            while True:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    break
+                if time.monotonic() >= deadline:
+                    self.fail("timed-out review descendant survived")
+                time.sleep(0.01)
+
     def test_manifest_bounds_and_vocabulary_exit_two(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -497,6 +539,11 @@ class EvaluatorSelfTests(unittest.TestCase):
             code, report = execute_campaign(manifest, binary, root)
             self.assertEqual(code, 2)
             self.assertEqual(report["error"]["stage"], "expectation_vocabulary")
+
+            manifest.write_bytes(b"[" * 2000 + b"0" + b"]" * 2000)
+            code, report = execute_campaign(manifest, binary, root)
+            self.assertEqual(code, 2)
+            self.assertEqual(report["error"]["stage"], "manifest_json")
 
     def test_case_and_total_byte_bounds_exit_two(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

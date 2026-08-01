@@ -13,9 +13,9 @@ check-netbraid-source:
     @scripts/check-netbraid-source.sh
 
 # Build the current binary and evaluate the checked bounded review campaign.
-# Pass an executable path to evaluate another supplied linktop binary instead.
-review-campaign-eval binary="":
-    if [ -z "{{binary}}" ]; then cargo +1.88 build --locked --bin linktop; binary=target/debug/linktop; else binary="{{binary}}"; fi; python3 scripts/evaluate-review-campaign.py --linktop "$binary"
+review-campaign-eval:
+    cargo +1.88 build --locked --bin linktop
+    python3 scripts/evaluate-review-campaign.py --linktop target/debug/linktop
 
 review-campaign-self-test:
     python3 scripts/evaluate-review-campaign.py --self-test
