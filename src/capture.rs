@@ -1471,7 +1471,7 @@ pub(crate) fn start_scene_monitor() -> (
 #[cfg(test)]
 pub(crate) fn ensure_scene(app: &mut App, scene: CaptureScene) {
     match scene {
-        CaptureScene::DensePeers => ensure_dense_peer_scene(app),
+        CaptureScene::DensePeers => ensure_dense_peer_scene(app, Duration::ZERO),
         CaptureScene::WifiHotspotWifi => {
             let mut runtime =
                 SceneRuntime::new(scene, None).expect("built-in public scenario is valid");
@@ -1535,14 +1535,14 @@ impl SceneRuntime {
 
     fn advance_to(&mut self, app: &mut App, elapsed: Duration) -> Result<()> {
         if self.scene == CaptureScene::DensePeers {
-            ensure_dense_peer_scene(app);
+            ensure_dense_peer_scene(app, elapsed);
             return Ok(());
         }
         while let Some(stage) = self.stages.get(self.applied_stages) {
             if stage.at > elapsed {
                 break;
             }
-            apply_host_path_stage(app, &stage.records)?;
+            apply_host_path_stage(app, &stage.records, stage.at)?;
             self.applied_stages += 1;
         }
         Ok(())
@@ -1607,7 +1607,11 @@ fn wifi_hotspot_wifi_stages() -> Result<Vec<SceneStage>> {
     .collect()
 }
 
-fn apply_host_path_stage(app: &mut App, records: &[HostPathObservationV0]) -> Result<()> {
+fn apply_host_path_stage(
+    app: &mut App,
+    records: &[HostPathObservationV0],
+    observed_at: Duration,
+) -> Result<()> {
     let current = records
         .last()
         .context("synthetic scene stage has no current host-path record")?;
@@ -1630,26 +1634,29 @@ fn apply_host_path_stage(app: &mut App, records: &[HostPathObservationV0]) -> Re
             security: None,
         })
     });
-    let accepted = app.apply(MonitorUpdate::Link {
-        generation,
-        snapshot: LinkSnapshot {
-            host: current.source.observer_id.clone(),
-            interface: current.path.interface.clone(),
-            link_type: current.path.link_type.clone(),
-            underlay: None,
-            ssid: current.path.network_name.value.clone(),
-            ssid_restricted: current.path.network_name.visibility
-                == NetworkNameVisibilityV0::Restricted,
-            wifi: None,
-            gateway: current.path.next_hop.clone(),
-            public_ip: None,
-            resolvers: current.path.resolvers.clone(),
-            // Network prefixes cannot reconstruct a host address, role, or
-            // temporary-address lifetime.
-            addresses: Vec::new(),
-            network_configuration,
+    let accepted = app.apply_at(
+        MonitorUpdate::Link {
+            generation,
+            snapshot: LinkSnapshot {
+                host: current.source.observer_id.clone(),
+                interface: current.path.interface.clone(),
+                link_type: current.path.link_type.clone(),
+                underlay: None,
+                ssid: current.path.network_name.value.clone(),
+                ssid_restricted: current.path.network_name.visibility
+                    == NetworkNameVisibilityV0::Restricted,
+                wifi: None,
+                gateway: current.path.next_hop.clone(),
+                public_ip: None,
+                resolvers: current.path.resolvers.clone(),
+                // Network prefixes cannot reconstruct a host address, role, or
+                // temporary-address lifetime.
+                addresses: Vec::new(),
+                network_configuration,
+            },
         },
-    });
+        observed_at,
+    );
     anyhow::ensure!(accepted, "synthetic host-path generation was rejected");
     app.history_context = Some(history::summarize(
         &records[..records.len().saturating_sub(1)],
@@ -1673,37 +1680,40 @@ fn scene_gate_is_open(path: &Path) -> Result<bool> {
     }
 }
 
-fn ensure_dense_peer_scene(app: &mut App) {
+fn ensure_dense_peer_scene(app: &mut App, observed_at: Duration) {
     if app.link.gateway.as_deref() != Some(DENSE_SCENE_GATEWAY) {
         let generation = app.path_generation.saturating_add(1);
-        app.apply(MonitorUpdate::Link {
-            generation,
-            snapshot: LinkSnapshot {
-                host: "screenshot-fixture".into(),
-                interface: Some("en-doc0".into()),
-                link_type: Some("ethernet".into()),
-                ssid: None,
-                gateway: Some(DENSE_SCENE_GATEWAY.into()),
-                resolvers: vec!["192.0.2.53".into(), "2001:db8::53".into()],
-                addresses: vec![
-                    Address {
-                        interface: "en-doc0".into(),
-                        address: "192.0.2.200".into(),
-                        family: 4,
-                        is_default: true,
-                        is_temporary: false,
-                    },
-                    Address {
-                        interface: "en-doc0".into(),
-                        address: "2001:db8::200".into(),
-                        family: 6,
-                        is_default: true,
-                        is_temporary: false,
-                    },
-                ],
-                ..LinkSnapshot::empty()
+        app.apply_at(
+            MonitorUpdate::Link {
+                generation,
+                snapshot: LinkSnapshot {
+                    host: "screenshot-fixture".into(),
+                    interface: Some("en-doc0".into()),
+                    link_type: Some("ethernet".into()),
+                    ssid: None,
+                    gateway: Some(DENSE_SCENE_GATEWAY.into()),
+                    resolvers: vec!["192.0.2.53".into(), "2001:db8::53".into()],
+                    addresses: vec![
+                        Address {
+                            interface: "en-doc0".into(),
+                            address: "192.0.2.200".into(),
+                            family: 4,
+                            is_default: true,
+                            is_temporary: false,
+                        },
+                        Address {
+                            interface: "en-doc0".into(),
+                            address: "2001:db8::200".into(),
+                            family: 6,
+                            is_default: true,
+                            is_temporary: false,
+                        },
+                    ],
+                    ..LinkSnapshot::empty()
+                },
             },
-        });
+            observed_at,
+        );
     }
     if app.peers.detail == "27 synthetic cache entries; no liveness scan" {
         return;
@@ -1711,13 +1721,16 @@ fn ensure_dense_peer_scene(app: &mut App) {
 
     let generation = app.path_generation;
     let baseline = dense_peer_baseline();
-    app.apply(MonitorUpdate::Peers {
-        generation,
-        snapshot: PeerSnapshot {
-            detail: "28 synthetic baseline cache entries; no liveness scan".into(),
-            ..baseline.clone()
+    app.apply_at(
+        MonitorUpdate::Peers {
+            generation,
+            snapshot: PeerSnapshot {
+                detail: "28 synthetic baseline cache entries; no liveness scan".into(),
+                ..baseline.clone()
+            },
         },
-    });
+        observed_at,
+    );
 
     let mut changed = baseline;
     if let Some(peer) = changed
@@ -1755,10 +1768,13 @@ fn ensure_dense_peer_scene(app: &mut App) {
         .peers
         .retain(|peer| peer.address != "192.0.2.6" && peer.address != "2001:db8::a");
     changed.detail = "26 synthetic cache entries during transition; no liveness scan".into();
-    app.apply(MonitorUpdate::Peers {
-        generation,
-        snapshot: changed.clone(),
-    });
+    app.apply_at(
+        MonitorUpdate::Peers {
+            generation,
+            snapshot: changed.clone(),
+        },
+        observed_at,
+    );
 
     let returned = dense_peer_baseline()
         .peers
@@ -1770,10 +1786,13 @@ fn ensure_dense_peer_scene(app: &mut App) {
         ..returned
     });
     changed.detail = "27 synthetic cache entries; no liveness scan".into();
-    app.apply(MonitorUpdate::Peers {
-        generation,
-        snapshot: changed,
-    });
+    app.apply_at(
+        MonitorUpdate::Peers {
+            generation,
+            snapshot: changed,
+        },
+        observed_at,
+    );
 }
 
 fn dense_peer_baseline() -> PeerSnapshot {
@@ -2827,6 +2846,35 @@ mod tests {
             .unwrap();
         assert_eq!(app.path_generation, 3);
         assert_eq!(app.completed_path_dwells.len(), 2);
+    }
+
+    #[test]
+    fn delayed_scene_poll_uses_each_scheduled_stage_time() {
+        let mut app = App::with_probe_policy(ProbePolicy::Passive);
+        let mut runtime = SceneRuntime::new(CaptureScene::WifiHotspotWifi, None).unwrap();
+
+        runtime
+            .advance_to(&mut app, Duration::from_secs(30))
+            .unwrap();
+
+        assert_eq!(app.path_generation, 3);
+        assert_eq!(app.completed_path_dwells.len(), 2);
+        assert_eq!(
+            app.completed_path_dwells[0].observed,
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            app.completed_path_dwells[1].observed,
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            app.completed_path_dwells[0].completed_by.elapsed,
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            app.completed_path_dwells[1].completed_by.elapsed,
+            Duration::from_secs(4)
+        );
     }
 
     #[test]

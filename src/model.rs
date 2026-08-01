@@ -1004,7 +1004,7 @@ pub struct ProbeView {
     pub detail: String,
     pub latency_ms: Option<f64>,
     pub metrics: Option<LatencyMetrics>,
-    pub updated_at: Option<Instant>,
+    pub updated_at: Option<Duration>,
 }
 
 impl ProbeView {
@@ -1626,7 +1626,7 @@ pub struct App {
     pub peers: PeerSnapshot,
     pub interface_counters: Option<InterfaceCounters>,
     pub interface_rate: Option<InterfaceRate>,
-    interface_counters_at: Option<Instant>,
+    interface_counters_at: Option<Duration>,
     interface_counters_first_observed_at: Option<Duration>,
     interface_counters_last_observed_at: Option<Duration>,
     pub workload: WorkloadSnapshot,
@@ -1653,6 +1653,7 @@ pub struct App {
     peer_snapshot_last_observed_at: Option<Duration>,
     peer_window_sources: BTreeSet<String>,
     peer_window_failed_sources: BTreeSet<String>,
+    last_reduced_at: Duration,
 }
 
 impl App {
@@ -1710,15 +1711,33 @@ impl App {
             peer_snapshot_last_observed_at: None,
             peer_window_sources: BTreeSet::new(),
             peer_window_failed_sources: BTreeSet::new(),
+            last_reduced_at: Duration::ZERO,
         };
-        app.push_event(EventKind::Session, Health::Running, "instrument started");
+        app.push_event_at(
+            EventKind::Session,
+            Health::Running,
+            "instrument started",
+            Duration::ZERO,
+        );
         app
     }
 
     pub fn apply(&mut self, update: MonitorUpdate) -> bool {
+        let observed_at = self.uptime();
+        self.apply_at(update, observed_at)
+    }
+
+    /// Reduce one admitted update at its session-relative receipt time.
+    ///
+    /// Replay callers supply logical schedule time; live callers use [`Self::apply`].
+    pub(crate) fn apply_at(&mut self, update: MonitorUpdate, observed_at: Duration) -> bool {
         if !self.accepts_update(&update) {
             return false;
         }
+        if observed_at < self.last_reduced_at {
+            return false;
+        }
+        self.last_reduced_at = observed_at;
         match update {
             MonitorUpdate::Link {
                 generation,
@@ -1747,7 +1766,6 @@ impl App {
                 let current_fingerprint = link.path_fingerprint();
                 let previous = self.link.path_label();
                 let current = link.path_label();
-                let observed_at = self.uptime();
                 let path_change = (!initial).then(|| PathChange {
                     elapsed: observed_at,
                     dimensions: previous_fingerprint.changed_dimensions(&current_fingerprint),
@@ -1824,7 +1842,7 @@ impl App {
                 }
                 self.path_observed_since = observed_at;
                 self.last_path_change = path_change.clone();
-                self.push_event(
+                self.push_event_at(
                     EventKind::Path,
                     Health::Running,
                     if initial {
@@ -1837,15 +1855,17 @@ impl App {
                             .join(", ");
                         format!("path changed ({dimensions}): {previous} → {current}")
                     },
+                    observed_at,
                 );
             }
             MonitorUpdate::PathSettling { generation } => {
                 if generation == self.path_generation && !self.path_transition_pending {
                     self.path_transition_pending = true;
-                    self.push_event(
+                    self.push_event_at(
                         EventKind::Path,
                         Health::Running,
                         "default route is settling; retaining the last confirmed path",
+                        observed_at,
                     );
                 }
             }
@@ -1855,7 +1875,6 @@ impl App {
                 telemetry,
             } => {
                 if generation == self.path_generation {
-                    let observed_at = self.uptime();
                     self.wifi_observation_settled = true;
                     self.wifi_observed_at = Some(observed_at);
                     if let Some(telemetry) = &telemetry {
@@ -1870,10 +1889,11 @@ impl App {
                         self.link.ssid = Some(ssid);
                         self.link.ssid_restricted = false;
                         let current = self.link.path_label();
-                        self.push_event(
+                        self.push_event_at(
                             EventKind::Path,
                             Health::Ok,
                             format!("Wi-Fi network identity resolved: {current}"),
+                            observed_at,
                         );
                     }
                     self.link.wifi = telemetry;
@@ -1886,7 +1906,6 @@ impl App {
                 if generation != self.path_generation {
                     return false;
                 }
-                let observed_at = self.uptime();
                 self.peer_snapshot_observations = self.peer_snapshot_observations.saturating_add(1);
                 self.peer_snapshot_first_observed_at
                     .get_or_insert(observed_at);
@@ -1895,7 +1914,7 @@ impl App {
                     .extend(snapshot.sources.iter().cloned());
                 self.peer_window_failed_sources
                     .extend(snapshot.failed_sources.iter().cloned());
-                self.apply_peer_snapshot(snapshot);
+                self.apply_peer_snapshot(snapshot, observed_at);
             }
             MonitorUpdate::Traffic {
                 generation,
@@ -1904,13 +1923,14 @@ impl App {
                 if generation != self.path_generation {
                     return false;
                 }
-                let now = Instant::now();
                 let prior = self.interface_counters.as_ref();
                 let interval = prior
                     .zip(self.interface_counters_at)
                     .zip(counters.as_ref())
-                    .and_then(|((before, observed_at), after)| {
-                        interface_interval(before, after, now.duration_since(observed_at))
+                    .and_then(|((before, prior_observed_at), after)| {
+                        observed_at
+                            .checked_sub(prior_observed_at)
+                            .and_then(|elapsed| interface_interval(before, after, elapsed))
                     });
                 let counter_reset = prior
                     .zip(counters.as_ref())
@@ -1922,9 +1942,8 @@ impl App {
                 );
                 self.interface_rate = interval.map(|interval| interval.rate);
                 self.interface_counters = counters;
-                self.interface_counters_at = self.interface_counters.as_ref().map(|_| now);
+                self.interface_counters_at = self.interface_counters.as_ref().map(|_| observed_at);
                 if self.interface_counters.is_some() {
-                    let observed_at = self.uptime();
                     self.interface_counters_first_observed_at
                         .get_or_insert(observed_at);
                     self.interface_counters_last_observed_at = Some(observed_at);
@@ -1937,7 +1956,7 @@ impl App {
                 if generation == self.path_generation {
                     self.path_dwell.observe_workload(&snapshot);
                     self.workload = snapshot;
-                    self.workload_observed_at = Some(self.uptime());
+                    self.workload_observed_at = Some(observed_at);
                 }
             }
             MonitorUpdate::ProbeStarted { generation, kind } => {
@@ -2000,18 +2019,19 @@ impl App {
                 probe.detail = detail.clone();
                 probe.latency_ms = result.latency_ms;
                 probe.metrics = result.metrics;
-                probe.updated_at = Some(Instant::now());
+                probe.updated_at = Some(observed_at);
 
                 if previous != health && (previous != Health::Running || health.is_problem()) {
-                    self.push_event(
+                    self.push_event_at(
                         EventKind::Probe,
                         health,
                         format!("{}: {}", kind.label(), detail),
+                        observed_at,
                     );
                 }
             }
             MonitorUpdate::Notice(message) => {
-                self.push_event(EventKind::Notice, Health::Running, message)
+                self.push_event_at(EventKind::Notice, Health::Running, message, observed_at)
             }
         }
         true
@@ -3123,7 +3143,7 @@ impl App {
     pub fn probe_age(&self, kind: ProbeKind) -> Option<Duration> {
         self.probe(kind)
             .updated_at
-            .map(|observed_at| Instant::now().saturating_duration_since(observed_at))
+            .map(|observed_at| self.uptime().saturating_sub(observed_at))
     }
 
     pub fn probe_view(&self, kind: ProbeKind) -> &ProbeView {
@@ -3166,8 +3186,7 @@ impl App {
         }
     }
 
-    fn apply_peer_snapshot(&mut self, snapshot: PeerSnapshot) {
-        let observed_at = self.uptime();
+    fn apply_peer_snapshot(&mut self, snapshot: PeerSnapshot, observed_at: Duration) {
         let previous_count = self.peers.peers.len();
         let current_count = snapshot.peers.len();
         let baseline_seen = self.peer_baseline_seen;
@@ -3280,14 +3299,15 @@ impl App {
         self.peers = snapshot;
         self.peer_baseline_seen = true;
         if previous_count != current_count {
-            self.push_event(
+            self.push_event_at(
                 EventKind::Peer,
                 Health::Ok,
                 format!("neighbor cache: {current_count} entries"),
+                observed_at,
             );
         }
         for (health, message) in events {
-            self.push_event(EventKind::Peer, health, message);
+            self.push_event_at(EventKind::Peer, health, message, observed_at);
         }
     }
 
@@ -3306,11 +3326,22 @@ impl App {
     }
 
     fn push_event(&mut self, kind: EventKind, health: Health, message: impl Into<String>) {
+        let observed_at = self.uptime();
+        self.push_event_at(kind, health, message, observed_at);
+    }
+
+    fn push_event_at(
+        &mut self,
+        kind: EventKind,
+        health: Health,
+        message: impl Into<String>,
+        observed_at: Duration,
+    ) {
         if self.events.len() == MAX_EVENTS {
             self.events.pop_front();
         }
         self.events.push_back(Event {
-            elapsed: self.started_at.elapsed(),
+            elapsed: observed_at,
             message: message.into(),
             health,
             kind,
@@ -4268,8 +4299,8 @@ mod tests {
         finish_probe(&mut app, ProbeKind::Dns, Health::Ok, Some(12.0));
         finish_probe(&mut app, ProbeKind::Https, Health::Ok, Some(80.0));
         finish_probe(&mut app, ProbeKind::PublicIp, Health::Ok, Some(90.0));
-        app.probe_mut(ProbeKind::Dns).updated_at =
-            Some(Instant::now() - MAX_PATH_PROBE_EVIDENCE_AGE - Duration::from_secs(1));
+        app.started_at = Instant::now() - MAX_PATH_PROBE_EVIDENCE_AGE - Duration::from_secs(1);
+        app.probe_mut(ProbeKind::Dns).updated_at = Some(Duration::ZERO);
 
         assert_eq!(
             app.situation(),
@@ -4331,55 +4362,72 @@ mod tests {
     #[test]
     fn path_dwell_accumulates_valid_interface_radio_and_workload_windows() {
         let mut app = App::new();
-        app.apply(MonitorUpdate::Link {
-            generation: 1,
-            snapshot: test_link("en0", "house", "192.168.1.1"),
-        });
-        app.apply(MonitorUpdate::Traffic {
-            generation: 1,
-            counters: Some(test_counters("en0", 1_000, 2_000, 10, 20, 1, 2, 3)),
-        });
-        app.interface_counters_at = Some(Instant::now() - Duration::from_secs(2));
-        app.apply(MonitorUpdate::Traffic {
-            generation: 1,
-            counters: Some(test_counters("en0", 2_000, 4_000, 30, 60, 2, 4, 5)),
-        });
-        for (signal, channel) in [(-55.0, 36), (-72.0, 44)] {
-            app.apply(MonitorUpdate::Wifi {
+        app.apply_at(
+            MonitorUpdate::Link {
                 generation: 1,
-                ssid: None,
-                telemetry: Some(WifiTelemetry {
-                    signal_dbm: Some(signal),
-                    noise_dbm: Some(-90.0),
-                    signal_percent: None,
-                    channel: Some(channel),
-                    channel_width_mhz: Some(80),
-                    frequency_mhz: None,
-                    band: Some("5 GHz".into()),
-                    phy: Some("802.11ax".into()),
-                    tx_rate_mbps: Some(600.0),
-                    rx_rate_mbps: None,
-                    mcs: None,
-                }),
-            });
-        }
-        for (process, received, transmitted) in [("codex", 4_096, 2_048), ("browser", 8_192, 4_096)]
-        {
-            app.apply(MonitorUpdate::Workload {
+                snapshot: test_link("en0", "house", "192.168.1.1"),
+            },
+            Duration::ZERO,
+        );
+        app.apply_at(
+            MonitorUpdate::Traffic {
                 generation: 1,
-                snapshot: WorkloadSnapshot {
-                    health: Health::Ok,
-                    detail: "sampled process window".into(),
-                    source: Some("nettop".into()),
-                    interval: Duration::from_secs(1),
-                    processes: vec![ProcessTraffic {
-                        process: process.into(),
-                        processes: 1,
-                        received_bytes_per_second: received,
-                        transmitted_bytes_per_second: transmitted,
-                    }],
+                counters: Some(test_counters("en0", 1_000, 2_000, 10, 20, 1, 2, 3)),
+            },
+            Duration::from_secs(1),
+        );
+        app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 1,
+                counters: Some(test_counters("en0", 2_000, 4_000, 30, 60, 2, 4, 5)),
+            },
+            Duration::from_secs(3),
+        );
+        for (index, (signal, channel)) in [(-55.0, 36), (-72.0, 44)].into_iter().enumerate() {
+            app.apply_at(
+                MonitorUpdate::Wifi {
+                    generation: 1,
+                    ssid: None,
+                    telemetry: Some(WifiTelemetry {
+                        signal_dbm: Some(signal),
+                        noise_dbm: Some(-90.0),
+                        signal_percent: None,
+                        channel: Some(channel),
+                        channel_width_mhz: Some(80),
+                        frequency_mhz: None,
+                        band: Some("5 GHz".into()),
+                        phy: Some("802.11ax".into()),
+                        tx_rate_mbps: Some(600.0),
+                        rx_rate_mbps: None,
+                        mcs: None,
+                    }),
                 },
-            });
+                Duration::from_secs(4 + index as u64),
+            );
+        }
+        for (index, (process, received, transmitted)) in
+            [("codex", 4_096, 2_048), ("browser", 8_192, 4_096)]
+                .into_iter()
+                .enumerate()
+        {
+            app.apply_at(
+                MonitorUpdate::Workload {
+                    generation: 1,
+                    snapshot: WorkloadSnapshot {
+                        health: Health::Ok,
+                        detail: "sampled process window".into(),
+                        source: Some("nettop".into()),
+                        interval: Duration::from_secs(1),
+                        processes: vec![ProcessTraffic {
+                            process: process.into(),
+                            processes: 1,
+                            received_bytes_per_second: received,
+                            transmitted_bytes_per_second: transmitted,
+                        }],
+                    },
+                },
+                Duration::from_secs(6 + index as u64),
+            );
         }
 
         let interface = &app.path_dwell.interface;
@@ -4870,10 +4918,13 @@ mod tests {
     #[test]
     fn progress_exposes_totals_on_first_counter_sample_and_rates_on_second() {
         let mut app = App::new();
-        app.apply(MonitorUpdate::Traffic {
-            generation: 0,
-            counters: Some(test_counters("en0", 1_000, 2_000, 30, 40, 2, 3, 4)),
-        });
+        app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 0,
+                counters: Some(test_counters("en0", 1_000, 2_000, 30, 40, 2, 3, 4)),
+            },
+            Duration::ZERO,
+        );
 
         let totals = app.progress_for(MonitorMode::Overview, EvidenceClaim::InterfaceTotals);
         let rate = app.progress_for(MonitorMode::Overview, EvidenceClaim::InterfaceRate);
@@ -4884,11 +4935,13 @@ mod tests {
         assert_eq!(rate.required_observations, Some(2));
         assert_eq!(rate.valid_intervals, Some(0));
 
-        app.interface_counters_at = Some(Instant::now() - Duration::from_secs(1));
-        app.apply(MonitorUpdate::Traffic {
-            generation: 0,
-            counters: Some(test_counters("en0", 2_000, 4_000, 60, 80, 2, 3, 4)),
-        });
+        app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 0,
+                counters: Some(test_counters("en0", 2_000, 4_000, 60, 80, 2, 3, 4)),
+            },
+            Duration::from_secs(1),
+        );
         let rate = app.progress_for(MonitorMode::Overview, EvidenceClaim::InterfaceRate);
         assert_eq!(rate.state, EvidenceProgressState::Available);
         assert_eq!(rate.observations, Some(2));
@@ -4986,22 +5039,108 @@ mod tests {
     }
 
     #[test]
+    fn explicit_reducer_time_controls_path_dwell_and_rejects_reordering() {
+        let mut app = App::new();
+        assert!(app.apply_at(
+            MonitorUpdate::Link {
+                generation: 1,
+                snapshot: test_link("en0", "house", "192.168.1.1"),
+            },
+            Duration::from_secs(2),
+        ));
+        assert!(app.apply_at(
+            MonitorUpdate::Link {
+                generation: 2,
+                snapshot: test_link("en0", "field", "192.168.2.1"),
+            },
+            Duration::from_secs(9),
+        ));
+
+        let completed = app
+            .completed_path_dwells
+            .back()
+            .expect("path transition retains its completed dwell");
+        assert_eq!(completed.observed, Duration::from_secs(7));
+        assert_eq!(completed.completed_by.elapsed, Duration::from_secs(9));
+        assert_eq!(
+            app.events.back().map(|event| event.elapsed),
+            Some(Duration::from_secs(9))
+        );
+
+        let events = app.events.len();
+        assert!(!app.apply_at(
+            MonitorUpdate::Notice("reordered receipt".into()),
+            Duration::from_secs(8),
+        ));
+        assert_eq!(app.events.len(), events);
+        assert_eq!(app.last_reduced_at, Duration::from_secs(9));
+    }
+
+    #[test]
+    fn delayed_stale_generation_does_not_advance_the_reducer_clock() {
+        let mut app = App::new();
+        assert!(app.apply_at(
+            MonitorUpdate::Link {
+                generation: 1,
+                snapshot: test_link("en0", "house", "192.168.1.1"),
+            },
+            Duration::from_secs(1),
+        ));
+        assert!(app.apply_at(
+            MonitorUpdate::Link {
+                generation: 2,
+                snapshot: test_link("en0", "field", "192.168.2.1"),
+            },
+            Duration::from_secs(10),
+        ));
+        assert!(!app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 1,
+                counters: Some(test_counters("en0", 1, 2, 3, 4, 0, 0, 0)),
+            },
+            Duration::from_secs(30),
+        ));
+        assert_eq!(app.last_reduced_at, Duration::from_secs(10));
+        assert!(app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 2,
+                counters: Some(test_counters("en0", 10, 20, 30, 40, 0, 0, 0)),
+            },
+            Duration::from_secs(11),
+        ));
+        assert_eq!(app.last_reduced_at, Duration::from_secs(11));
+        assert_eq!(
+            app.interface_counters
+                .as_ref()
+                .map(|counters| counters.received_bytes),
+            Some(10)
+        );
+    }
+
+    #[test]
     fn counter_wrap_and_interface_replacement_start_new_baselines_without_fake_deltas() {
         let mut app = App::new();
-        app.apply(MonitorUpdate::Traffic {
-            generation: 0,
-            counters: Some(test_counters("en0", 1_000, 2_000, 30, 40, 2, 3, 4)),
-        });
-        app.interface_counters_at = Some(Instant::now() - Duration::from_secs(1));
-        app.apply(MonitorUpdate::Traffic {
-            generation: 0,
-            counters: Some(test_counters("en0", 10, 20, 3, 4, 0, 0, 0)),
-        });
-        app.interface_counters_at = Some(Instant::now() - Duration::from_secs(1));
-        app.apply(MonitorUpdate::Traffic {
-            generation: 0,
-            counters: Some(test_counters("en9", 50_000, 60_000, 300, 400, 0, 0, 0)),
-        });
+        app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 0,
+                counters: Some(test_counters("en0", 1_000, 2_000, 30, 40, 2, 3, 4)),
+            },
+            Duration::ZERO,
+        );
+        app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 0,
+                counters: Some(test_counters("en0", 10, 20, 3, 4, 0, 0, 0)),
+            },
+            Duration::from_secs(1),
+        );
+        app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 0,
+                counters: Some(test_counters("en9", 50_000, 60_000, 300, 400, 0, 0, 0)),
+            },
+            Duration::from_secs(2),
+        );
 
         let dwell = &app.path_dwell.interface;
         assert_eq!(dwell.samples, 3);
