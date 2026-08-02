@@ -1,8 +1,8 @@
 check:
     cargo +1.88 fmt -- --check
     cargo +1.88 build --locked --bin linktop
-    python3 scripts/evaluate-review-campaign.py --self-test
-    python3 scripts/evaluate-review-campaign.py --linktop target/debug/linktop
+    python3 tests/review_campaign.py --self-test
+    python3 tests/review_campaign.py --linktop target/debug/linktop
     cargo +1.88 test --locked
     cargo +1.88 clippy --locked --all-targets -- -D warnings
     cargo +1.88 rustdoc --locked --lib -- -D warnings
@@ -15,10 +15,10 @@ check-netbraid-source:
 # Build the current binary and evaluate the checked bounded review campaign.
 review-campaign-eval:
     cargo +1.88 build --locked --bin linktop
-    python3 scripts/evaluate-review-campaign.py --linktop target/debug/linktop
+    python3 tests/review_campaign.py --linktop target/debug/linktop
 
 review-campaign-self-test:
-    python3 scripts/evaluate-review-campaign.py --self-test
+    python3 tests/review_campaign.py --self-test
 
 mutation-check:
     cargo mutants --package linktop --file src/model.rs --re 'path_fingerprint_candidate_from_identity' --test-package linktop --jobs 2 --timeout 180 --no-shuffle -v
