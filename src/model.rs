@@ -1586,6 +1586,8 @@ pub struct LiveEvidence {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workload: Option<LiveWorkloadEvidence>,
     pub dwell: LivePathDwellEvidence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub traffic_shape_candidate: Option<TrafficShapeCandidateV0>,
     pub last_path_change: Option<LivePathChangeEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_path_window: Option<CompletedPathWindow>,
@@ -2715,6 +2717,7 @@ impl App {
                     workload_observed_ms: duration_ms(self.path_dwell.workload.observed),
                     neighbors: self.peer_dwell_summary(),
                 },
+                traffic_shape_candidate: None,
                 last_path_change: self.last_path_change.as_ref().map(|change| {
                     LivePathChangeEvidence {
                         observed_at_ms: duration_ms(change.elapsed),
@@ -2731,6 +2734,16 @@ impl App {
 
     pub fn final_projection(&self, mode: MonitorMode) -> AppProjection {
         let mut projection = self.projection(mode);
+        projection.evidence.traffic_shape_candidate = mode
+            .dwell_collector_scope()
+            .interface
+            .then(|| {
+                traffic_shape_candidate_from_dwell(
+                    &self.path_dwell.interface,
+                    projection.evidence.dwell.observed_span_ms,
+                )
+            })
+            .flatten();
         for progress in &mut projection.progress {
             if progress.state != EvidenceProgressState::Collecting {
                 continue;
@@ -3732,6 +3745,57 @@ mod tests {
                 .any(|caveat| caveat.contains("not endpoint"))
         );
         assert!(traffic_shape_candidate_from_dwell(&InterfaceDwell::default(), 1_000).is_none());
+    }
+
+    #[test]
+    fn final_projection_candidate_matches_current_dwell_helper_and_collector_scope() {
+        let mut app = App::new();
+        let dwell = InterfaceDwell {
+            samples: 3,
+            valid_intervals: 2,
+            received_bytes_delta: 9_000,
+            transmitted_bytes_delta: 1_000,
+            received_packets_delta: 90,
+            transmitted_packets_delta: 10,
+            peak_received_bits_per_second: Some(100_000.0),
+            peak_transmitted_bits_per_second: Some(20_000.0),
+            ..InterfaceDwell::default()
+        };
+        app.path_dwell.interface = dwell.clone();
+        app.started_at = Instant::now() - Duration::from_secs(1);
+
+        assert!(
+            app.projection(MonitorMode::Overview)
+                .evidence
+                .traffic_shape_candidate
+                .is_none()
+        );
+
+        let overview = app.final_projection(MonitorMode::Overview);
+        assert_eq!(
+            overview.evidence.traffic_shape_candidate,
+            traffic_shape_candidate_from_dwell(&dwell, overview.evidence.dwell.observed_span_ms)
+        );
+        assert!(
+            app.final_projection(MonitorMode::Link)
+                .evidence
+                .traffic_shape_candidate
+                .is_some()
+        );
+        assert!(
+            app.final_projection(MonitorMode::Peers)
+                .evidence
+                .traffic_shape_candidate
+                .is_none()
+        );
+
+        app.path_dwell.interface.valid_intervals = 0;
+        assert!(
+            app.final_projection(MonitorMode::Overview)
+                .evidence
+                .traffic_shape_candidate
+                .is_none()
+        );
     }
 
     #[test]

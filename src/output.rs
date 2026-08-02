@@ -1629,6 +1629,114 @@ mod tests {
     }
 
     #[test]
+    fn bounded_final_summary_exposes_only_valid_in_scope_current_dwell_candidate() {
+        let mut app = crate::model::App::new();
+        assert!(app.apply_at(
+            crate::model::MonitorUpdate::Link {
+                generation: 1,
+                snapshot: test_link(),
+            },
+            Duration::ZERO,
+        ));
+        let baseline = test_counters();
+        assert!(app.apply_at(
+            crate::model::MonitorUpdate::Traffic {
+                generation: 1,
+                counters: Some(baseline.clone()),
+            },
+            Duration::from_secs(1),
+        ));
+        let mut later = baseline;
+        later.received_bytes += 9_000;
+        later.transmitted_bytes += 1_000;
+        later.received_packets += 90;
+        later.transmitted_packets += 10;
+        assert!(app.apply_at(
+            crate::model::MonitorUpdate::Traffic {
+                generation: 1,
+                counters: Some(later),
+            },
+            Duration::from_secs(2),
+        ));
+        app.started_at = Instant::now() - Duration::from_secs(2);
+
+        let mut bounded =
+            LiveObservationStream::start(ProbePolicy::Passive, Some(Duration::from_secs(2)));
+        let checkpoint = bounded
+            .observe(
+                LiveTrigger::Traffic,
+                crate::model::MonitorMode::Overview,
+                &app,
+            )
+            .expect("first accepted projection emits a checkpoint");
+        let checkpoint = serde_json::to_value(checkpoint).unwrap();
+        assert!(
+            checkpoint["evidence"]
+                .get("traffic_shape_candidate")
+                .is_none()
+        );
+
+        let final_summary = bounded
+            .final_summary(crate::model::MonitorMode::Overview, &app)
+            .expect("bounded dwell emits a final summary");
+        let final_summary = serde_json::to_value(final_summary).unwrap();
+        assert_eq!(final_summary["schema"], LIVE_OBSERVATION_SCHEMA_V1);
+        assert_eq!(final_summary["line"], "final_summary");
+        assert!(
+            final_summary["evidence"]
+                .get("completed_path_window")
+                .is_none(),
+            "a stable current dwell must not fabricate a completed transition"
+        );
+        let candidate = &final_summary["evidence"]["traffic_shape_candidate"];
+        assert_eq!(
+            candidate["schema"],
+            crate::model::TRAFFIC_SHAPE_CANDIDATE_SCHEMA_V0
+        );
+        assert_eq!(candidate["valid_intervals"], 1);
+        assert_eq!(candidate["direction"], "receive_dominant");
+        assert_eq!(candidate["received_bytes_delta"], 9_000);
+        assert_eq!(candidate["transmitted_bytes_delta"], 1_000);
+
+        let mut peers =
+            LiveObservationStream::start(ProbePolicy::Passive, Some(Duration::from_secs(2)));
+        let peers = peers
+            .final_summary(crate::model::MonitorMode::Peers, &app)
+            .expect("bounded peers dwell emits a final summary");
+        assert!(
+            serde_json::to_value(peers).unwrap()["evidence"]
+                .get("traffic_shape_candidate")
+                .is_none()
+        );
+
+        let mut no_interval_app = crate::model::App::new();
+        assert!(no_interval_app.apply_at(
+            crate::model::MonitorUpdate::Link {
+                generation: 1,
+                snapshot: test_link(),
+            },
+            Duration::ZERO,
+        ));
+        assert!(no_interval_app.apply_at(
+            crate::model::MonitorUpdate::Traffic {
+                generation: 1,
+                counters: Some(test_counters()),
+            },
+            Duration::from_secs(1),
+        ));
+        let mut no_interval =
+            LiveObservationStream::start(ProbePolicy::Passive, Some(Duration::from_secs(1)));
+        let no_interval = no_interval
+            .final_summary(crate::model::MonitorMode::Overview, &no_interval_app)
+            .expect("bounded dwell emits a final summary without a valid interval");
+        assert!(
+            serde_json::to_value(no_interval).unwrap()["evidence"]
+                .get("traffic_shape_candidate")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn live_stream_suppresses_nonmaterial_updates_until_checkpoint_or_transition() {
         let mut app = crate::model::App::new();
         let mut stream = LiveObservationStream::start(ProbePolicy::Passive, None);
