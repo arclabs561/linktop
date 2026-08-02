@@ -1717,10 +1717,13 @@ mod tests {
         let mut app = crate::model::App::new();
         let mut previous = test_link();
         previous.ssid = Some("field-kit".into());
-        assert!(app.apply(crate::model::MonitorUpdate::Link {
-            generation: 1,
-            snapshot: previous,
-        }));
+        assert!(app.apply_at(
+            crate::model::MonitorUpdate::Link {
+                generation: 1,
+                snapshot: previous,
+            },
+            Duration::ZERO,
+        ));
         let subject = crate::model::MonitorMode::Overview;
         let mut stream = LiveObservationStream::start(ProbePolicy::Passive, None);
         assert!(
@@ -1735,10 +1738,36 @@ mod tests {
                 .is_some()
         );
 
-        assert!(app.apply(crate::model::MonitorUpdate::Link {
-            generation: 2,
-            snapshot: test_link(),
-        }));
+        let first_counters = test_counters();
+        let mut last_counters = first_counters.clone();
+        last_counters.received_bytes += 1_000;
+        last_counters.transmitted_bytes += 2_000;
+        last_counters.received_packets += 10;
+        last_counters.transmitted_packets += 20;
+        last_counters.receive_errors += 1;
+        last_counters.transmit_errors += 2;
+        last_counters.drops += 3;
+        assert!(app.apply_at(
+            crate::model::MonitorUpdate::Traffic {
+                generation: 1,
+                counters: Some(first_counters.clone()),
+            },
+            Duration::from_secs(1),
+        ));
+        assert!(app.apply_at(
+            crate::model::MonitorUpdate::Traffic {
+                generation: 1,
+                counters: Some(last_counters.clone()),
+            },
+            Duration::from_secs(2),
+        ));
+        assert!(app.apply_at(
+            crate::model::MonitorUpdate::Link {
+                generation: 2,
+                snapshot: test_link(),
+            },
+            Duration::from_secs(3),
+        ));
         let transition = stream
             .observe_at(
                 LiveTrigger::Link,
@@ -1768,6 +1797,18 @@ mod tests {
         assert_eq!(completed.completed_by.changed_dimensions, change.dimensions);
         assert_eq!(completed.completed_by.previous, change.previous);
         assert_eq!(completed.completed_by.current, change.current);
+        assert_eq!(
+            completed.interface.first_raw_counters.as_ref(),
+            Some(&first_counters)
+        );
+        assert_eq!(
+            completed.interface.last_raw_counters.as_ref(),
+            Some(&last_counters)
+        );
+        assert_eq!(completed.interface.received_bytes_delta, 1_000);
+        assert_eq!(completed.interface.transmitted_bytes_delta, 2_000);
+        assert_eq!(completed.interface.received_packets_delta, 10);
+        assert_eq!(completed.interface.transmitted_packets_delta, 20);
     }
 
     #[test]
@@ -1881,6 +1922,15 @@ mod tests {
             .completed_path_window
             .as_mut()
             .expect("transition retains the completed generation");
+        let expected_counters = test_counters();
+        assert_eq!(
+            completed.interface.first_raw_counters.as_ref(),
+            Some(&expected_counters)
+        );
+        assert_eq!(
+            completed.interface.last_raw_counters.as_ref(),
+            Some(&expected_counters)
+        );
         completed.observed_span_ms = 0;
         completed.completed_by.observed_at_ms = 0;
 

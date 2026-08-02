@@ -199,6 +199,8 @@ pub struct WorkloadDwell {
 #[derive(Debug, Clone, Default)]
 pub struct PathDwell {
     pub interface: InterfaceDwell,
+    pub first_raw_interface_counters: Option<InterfaceCounters>,
+    pub last_raw_interface_counters: Option<InterfaceCounters>,
     pub wifi: WifiDwell,
     pub workload: WorkloadDwell,
 }
@@ -336,11 +338,14 @@ impl PathDwell {
         interval: Option<&InterfaceInterval>,
         counter_reset: bool,
     ) {
-        let interface = &mut self.interface;
-        interface.current_rate = interval.map(|interval| interval.rate.clone());
-        if counters.is_none() {
+        self.interface.current_rate = interval.map(|interval| interval.rate.clone());
+        let Some(counters) = counters else {
             return;
-        }
+        };
+        self.first_raw_interface_counters
+            .get_or_insert_with(|| counters.clone());
+        self.last_raw_interface_counters = Some(counters.clone());
+        let interface = &mut self.interface;
         interface.samples = interface.samples.saturating_add(1);
         if counter_reset {
             interface.counter_resets = interface.counter_resets.saturating_add(1);
@@ -1426,6 +1431,8 @@ pub struct CompletedInterfaceWindow {
     pub state: CompletedPathWindowSupportState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<CompletedPathWindowSource>,
+    pub first_raw_counters: Option<InterfaceCounters>,
+    pub last_raw_counters: Option<InterfaceCounters>,
     pub samples: u64,
     pub valid_intervals: u64,
     pub counter_resets: u64,
@@ -2457,6 +2464,14 @@ impl App {
                     scope.interface,
                     CompletedPathWindowSource::KernelInterfaceCounters,
                 ),
+                first_raw_counters: scope
+                    .interface
+                    .then(|| completed.dwell.first_raw_interface_counters.clone())
+                    .flatten(),
+                last_raw_counters: scope
+                    .interface
+                    .then(|| completed.dwell.last_raw_interface_counters.clone())
+                    .flatten(),
                 samples: if scope.interface {
                     interface.samples
                 } else {
@@ -4431,6 +4446,14 @@ mod tests {
         }
 
         let interface = &app.path_dwell.interface;
+        assert_eq!(
+            app.path_dwell.first_raw_interface_counters.as_ref(),
+            Some(&test_counters("en0", 1_000, 2_000, 10, 20, 1, 2, 3))
+        );
+        assert_eq!(
+            app.path_dwell.last_raw_interface_counters.as_ref(),
+            Some(&test_counters("en0", 2_000, 4_000, 30, 60, 2, 4, 5))
+        );
         assert_eq!(interface.samples, 2);
         assert_eq!(interface.valid_intervals, 1);
         assert_eq!(interface.received_bytes_delta, 1_000);
@@ -4514,6 +4537,8 @@ mod tests {
         });
 
         assert_eq!(app.path_dwell.interface.samples, 0);
+        assert!(app.path_dwell.first_raw_interface_counters.is_none());
+        assert!(app.path_dwell.last_raw_interface_counters.is_none());
         assert_eq!(app.path_dwell.wifi.samples, 0);
         assert_eq!(app.path_dwell.workload.sampled_windows, 0);
         assert_eq!(app.path_dwell.workload.observed, Duration::ZERO);
@@ -4574,6 +4599,15 @@ mod tests {
         assert_eq!(completed.identity.interface.as_deref(), Some("en0"));
         assert_eq!(completed.identity.ssid.as_deref(), Some("house"));
         assert_eq!(completed.identity.gateway.as_deref(), Some("192.168.1.1"));
+        let retained_counters = test_counters("en0", 1, 2, 3, 4, 0, 0, 0);
+        assert_eq!(
+            completed.dwell.first_raw_interface_counters.as_ref(),
+            Some(&retained_counters)
+        );
+        assert_eq!(
+            completed.dwell.last_raw_interface_counters.as_ref(),
+            Some(&retained_counters)
+        );
         assert_eq!(completed.dwell.interface.samples, 1);
         assert_eq!(completed.dwell.wifi.samples, 1);
         assert_eq!(completed.dwell.workload.sampled_windows, 1);
@@ -4597,6 +4631,14 @@ mod tests {
         assert_eq!(
             window.interface.source,
             Some(CompletedPathWindowSource::KernelInterfaceCounters)
+        );
+        assert_eq!(
+            window.interface.first_raw_counters.as_ref(),
+            Some(&retained_counters)
+        );
+        assert_eq!(
+            window.interface.last_raw_counters.as_ref(),
+            Some(&retained_counters)
         );
         assert_eq!(
             window.radio.state,
@@ -4735,6 +4777,8 @@ mod tests {
             CompletedPathWindowSupportState::NotCollected
         );
         assert_eq!(peers.interface.samples, 0);
+        assert!(peers.interface.first_raw_counters.is_none());
+        assert!(peers.interface.last_raw_counters.is_none());
         assert!(peers.interface.current_rate.is_none());
         assert_eq!(
             peers.workload.state,
@@ -5152,6 +5196,14 @@ mod tests {
         assert_eq!(dwell.error_delta, 0);
         assert_eq!(dwell.drop_delta, 0);
         assert_eq!(dwell.counter_resets, 2);
+        assert_eq!(
+            app.path_dwell.first_raw_interface_counters.as_ref(),
+            Some(&test_counters("en0", 1_000, 2_000, 30, 40, 2, 3, 4))
+        );
+        assert_eq!(
+            app.path_dwell.last_raw_interface_counters.as_ref(),
+            Some(&test_counters("en9", 50_000, 60_000, 300, 400, 0, 0, 0))
+        );
         assert!(dwell.current_rate.is_none());
     }
 

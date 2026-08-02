@@ -364,6 +364,26 @@
       "interface": {
         "state": "partial",
         "source": "kernel_interface_counters",
+        "first_raw_counters": {
+          "interface": "en0",
+          "received_bytes": 123456,
+          "transmitted_bytes": 78901,
+          "received_packets": 1234,
+          "transmitted_packets": 789,
+          "receive_errors": 2,
+          "transmit_errors": 3,
+          "drops": 4
+        },
+        "last_raw_counters": {
+          "interface": "en0",
+          "received_bytes": 123456,
+          "transmitted_bytes": 78901,
+          "received_packets": 1234,
+          "transmitted_packets": 789,
+          "receive_errors": 2,
+          "transmit_errors": 3,
+          "drops": 4
+        },
         "samples": 1,
         "valid_intervals": 0,
         "counter_resets": 0,
