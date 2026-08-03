@@ -2,13 +2,13 @@
 
 set -eu
 
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 netbraid_source=${NETBRAID_SOURCE:-}
 if [ -z "$netbraid_source" ]; then
     printf '%s\n' 'NETBRAID_SOURCE must point to Netbraid rust/' >&2
     exit 2
 fi
-netbraid_source=$(CDPATH= cd -- "$netbraid_source" && pwd)
+netbraid_source=$(CDPATH='' cd -- "$netbraid_source" && pwd)
 
 case "$netbraid_source" in
     */rust) ;;
@@ -57,5 +57,9 @@ PY
 
 printf 'linktop: testing against Netbraid source %s\n' "$netbraid_source"
 cargo test --offline --manifest-path "$tmp_root/Cargo.toml"
+cargo build --offline --manifest-path "$tmp_root/Cargo.toml" --bin linktop
+python3 "$tmp_root/tests/review_campaign.py" --self-test
+python3 "$tmp_root/tests/review_campaign.py" \
+    --linktop "$tmp_root/target/debug/linktop"
 cargo clippy --offline --manifest-path "$tmp_root/Cargo.toml" --all-targets -- -D warnings
 RUSTDOCFLAGS='-D warnings' cargo doc --offline --manifest-path "$tmp_root/Cargo.toml" --no-deps

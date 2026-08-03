@@ -7,17 +7,29 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use netbraid::replay::{
     SavedPcapClaimScopeV0, SavedPcapConversationDirectionV0, SavedPcapConversationExclusionCountV0,
-    SavedPcapConversationTriageV0, SavedPcapEventWindowV0,
-    SavedPcapNegativeClaimAbstentionReasonV1, SavedPcapNegativeClaimQualificationV1,
-    SavedPcapPacketTimeBoundsV1, SavedPcapTopConversationV0, SavedPcapTrailingConversationTriageV1,
-    SavedPcapTrailingIntervalAnchorV1, SavedPcapTrailingTopConversationV1,
-    SavedPcapTrailingWindowTriageV1, SavedPcapTriageOptionsV1, SavedPcapTriageV1,
-    SavedPcapWlanTriageV0, project_saved_pcap_triage_v1, read_saved_capture_jsonl,
+    SavedPcapConversationTriageV0, SavedPcapEventWindowV0, SavedPcapFingerprintCandidateV0,
+    SavedPcapFingerprintComparisonV0, SavedPcapFingerprintHypothesisSetV0,
+    SavedPcapFingerprintStatusV0, SavedPcapNegativeClaimAbstentionReasonV1,
+    SavedPcapNegativeClaimQualificationV1, SavedPcapPacketTimeBoundsV1, SavedPcapTopConversationV0,
+    SavedPcapTrailingConversationTriageV1, SavedPcapTrailingIntervalAnchorV1,
+    SavedPcapTrailingTopConversationV1, SavedPcapTrailingWindowTriageV1, SavedPcapTriageOptionsV1,
+    SavedPcapTriageV1, SavedPcapWlanTriageV0, assess_saved_pcap_fingerprint_v0,
+    project_saved_pcap_fingerprint_v0, project_saved_pcap_triage_v1, read_saved_capture_jsonl,
 };
 use serde::Serialize;
 
 const MIB: u64 = 1024 * 1024;
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
+const COMPARISON_SCHEMA: &str = "linktop.saved_pcap_comparison.v0";
+
+#[derive(Serialize)]
+struct SavedPcapComparisonReportV0 {
+    schema: &'static str,
+    input: SavedPcapFingerprintCandidateV0,
+    compare_with: SavedPcapFingerprintCandidateV0,
+    hypothesis: SavedPcapFingerprintHypothesisSetV0,
+    limitations: Vec<&'static str>,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct TailSecondsArg {
@@ -74,6 +86,7 @@ impl FromStr for TailSecondsArg {
 
 pub fn run(
     path: &Path,
+    compare_with: Option<&Path>,
     max_input_mib: u64,
     json: bool,
     tail_seconds: Option<TailSecondsArg>,
@@ -81,20 +94,56 @@ pub fn run(
     let max_bytes = max_input_mib
         .checked_mul(MIB)
         .context("--max-input-mib is too large")?;
-    let triage = load(
-        path,
-        max_bytes,
-        tail_seconds.map(TailSecondsArg::nanoseconds),
-    )?;
-    let rendered = if json {
-        render_json(&triage)?
+    let rendered = if let Some(right_path) = compare_with {
+        anyhow::ensure!(
+            tail_seconds.is_none(),
+            "--tail-seconds cannot be combined with --compare-with"
+        );
+        let left = load(path, max_bytes, None).context("loading left comparison input")?;
+        let right = load(right_path, max_bytes, None).context("loading right comparison input")?;
+        let report = compare_triage(&left, &right)?;
+        if json {
+            render_comparison_json(&report)?
+        } else {
+            render_comparison_human(&report)
+        }
     } else {
-        render_human(&triage)
+        let triage = load(
+            path,
+            max_bytes,
+            tail_seconds.map(TailSecondsArg::nanoseconds),
+        )?;
+        if json {
+            render_json(&triage)?
+        } else {
+            render_human(&triage)
+        }
     };
     let mut stdout = io::stdout().lock();
     stdout.write_all(rendered.as_bytes())?;
     stdout.flush()?;
     Ok(())
+}
+
+fn compare_triage(
+    input: &SavedPcapTriageV1,
+    compare_with: &SavedPcapTriageV1,
+) -> Result<SavedPcapComparisonReportV0> {
+    let input = project_saved_pcap_fingerprint_v0(input);
+    let compare_with = project_saved_pcap_fingerprint_v0(compare_with);
+    let hypothesis = assess_saved_pcap_fingerprint_v0(&input, &compare_with)
+        .context("assessing the bounded packet-shape hypothesis set")?;
+    Ok(SavedPcapComparisonReportV0 {
+        schema: COMPARISON_SCHEMA,
+        input,
+        compare_with,
+        hypothesis,
+        limitations: vec![
+            "packet-shape corroboration is not device, person, place, service, application, or intent identity",
+            "capture-wide candidates are not sessionized and do not establish same event or same source",
+            "endpoint addresses and ports are excluded from the comparison digest",
+        ],
+    })
 }
 
 fn load(path: &Path, max_bytes: u64, tail_window_ns: Option<u64>) -> Result<SavedPcapTriageV1> {
@@ -108,6 +157,73 @@ fn render_json(triage: &SavedPcapTriageV1) -> Result<String> {
     let mut rendered = serde_json::to_string_pretty(triage)?;
     rendered.push('\n');
     Ok(rendered)
+}
+
+fn render_comparison_json(report: &SavedPcapComparisonReportV0) -> Result<String> {
+    let mut rendered = serde_json::to_string_pretty(report)?;
+    rendered.push('\n');
+    Ok(rendered)
+}
+
+fn render_comparison_human(report: &SavedPcapComparisonReportV0) -> String {
+    let mut output = String::new();
+    writeln!(output, "LINKTOP  SAVED EVIDENCE COMPARISON / READ ONLY")
+        .expect("writing to a String cannot fail");
+    render_candidate(&mut output, "input", &report.input);
+    render_candidate(&mut output, "compare", &report.compare_with);
+    match report.hypothesis.basis {
+        SavedPcapFingerprintComparisonV0::Corroborated => {
+            writeln!(
+                output,
+                "compare   corroborated / equal bounded packet-shape basis"
+            )
+            .expect("writing to a String cannot fail");
+        }
+        SavedPcapFingerprintComparisonV0::Conflicting => {
+            writeln!(
+                output,
+                "compare   conflicting / different bounded packet-shape basis"
+            )
+            .expect("writing to a String cannot fail");
+        }
+        SavedPcapFingerprintComparisonV0::NotComparable { reason } => {
+            writeln!(
+                output,
+                "compare   not comparable / canonical {}",
+                humanize(&enum_label(&reason))
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+    writeln!(
+        output,
+        "classify  packet-shape comparison only; not same event, source, device, person, place, service, application, or intent identity"
+    )
+    .expect("writing to a String cannot fail");
+    output
+}
+
+fn render_candidate(output: &mut String, label: &str, candidate: &SavedPcapFingerprintCandidateV0) {
+    write!(
+        output,
+        "{label:<9}{} / {} / ",
+        candidate.source.capture_id,
+        scope_label(candidate.scope)
+    )
+    .expect("writing to a String cannot fail");
+    match &candidate.status {
+        SavedPcapFingerprintStatusV0::Observed { digest, .. } => {
+            writeln!(output, "observed / {digest}").expect("writing to a String cannot fail");
+        }
+        SavedPcapFingerprintStatusV0::Insufficient { reason, .. } => {
+            writeln!(output, "insufficient / {}", humanize(&enum_label(reason)))
+                .expect("writing to a String cannot fail");
+        }
+        SavedPcapFingerprintStatusV0::Unsupported { reason, .. } => {
+            writeln!(output, "unsupported / {}", humanize(&enum_label(reason)))
+                .expect("writing to a String cannot fail");
+        }
+    }
 }
 
 fn render_human(triage: &SavedPcapTriageV1) -> String {

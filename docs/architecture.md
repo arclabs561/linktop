@@ -54,7 +54,7 @@ keeps transient handoff behavior visible without mixing evidence across paths.
 | `--json` | program or agent | one observation or experiment | one versioned document |
 | `--jsonl` | program or agent | live, optional dwell | self-contained checkpoints, transitions, and bounded final summary |
 | `--history` | later recurrence review | explicit live overview | private Netbraid host-path records |
-| `review` | operator or program | finite saved evidence | read-only Netbraid triage projection |
+| `review` | operator or program | one or two finite saved-evidence streams | read-only Netbraid triage or packet-shape hypothesis projection |
 | `screenshot` | layout QA | bounded replay | frames plus completion manifest |
 
 Screen text is not a machine API. JSON schema discriminators and producer
@@ -64,11 +64,13 @@ versions are the compatibility boundary.
 
 Linktop depends on the published `netbraid` package with default features
 disabled and the `scenario-fixtures` feature enabled. It imports typed evidence
-and replay primitives only. Netbraid's policy-neutral relation reducer remains
-available as a separate source-level primitive. Linktop may compose those
-results with the current host context for an operator view, while preserving
-source, freshness, coverage, and disagreement. It does not own canonical
-cross-source fusion, collection, deployment, credentials, retention, private
-identity, or writer authority.
+and replay primitives only. For two saved-capture inputs, Linktop preserves the
+operator's input roles around Netbraid's canonical packet-shape hypothesis set.
+That reducer retains corroborated, conflicting, and unknown alternatives and
+does not promote packet-shape agreement into event, source, device, or identity
+equivalence. Linktop may compose those results with the current host context
+for an operator view, while preserving source, freshness, coverage, and
+disagreement. It does not own canonical cross-source fusion, collection,
+deployment, credentials, retention, private identity, or writer authority.
 
 See [DECISIONS.md](../DECISIONS.md) for the constraints behind this structure.

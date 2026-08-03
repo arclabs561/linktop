@@ -28,30 +28,63 @@ MAX_REVIEW_OUTPUT_BYTES = 16 * MIB
 REVIEW_MAX_INPUT_MIB = 128
 REVIEW_TIMEOUT_SECONDS = 30
 
-MANIFEST_SCHEMA = "linktop.review_campaign.v0"
-OUTPUT_SCHEMA = "linktop.review_campaign_eval.v0"
-REVIEW_SCHEMAS = frozenset({"netmon.saved_pcap_triage.v1"})
+MANIFEST_SCHEMA = "linktop.review_campaign.v1"
+OUTPUT_SCHEMA = "linktop.review_campaign_eval.v1"
+TRIAGE_SCHEMAS = frozenset({"netmon.saved_pcap_triage.v1"})
+COMPARISON_SCHEMAS = frozenset({"linktop.saved_pcap_comparison.v0"})
+HYPOTHESIS_SCHEMAS = frozenset({"netmon.saved_pcap_fingerprint_hypothesis_set.v0"})
 COMPLETENESS_STATUSES = frozenset({"complete_capture", "partial_packet_subset"})
 WLAN_STATUSES = frozenset({"insufficient", "unsupported", "not_observed", "observed"})
 CONVERSATION_STATUSES = frozenset({"insufficient", "unsupported", "observed"})
 NEGATIVE_CLAIM_STATUSES = frozenset({"not_requested", "qualified", "abstained"})
-EXPECTED_FIELDS = (
+TRIAGE_EXPECTED_FIELDS = (
     "schema",
     "completeness",
     "wlan",
     "conversation",
     "negative_claim",
 )
-VOCABULARY = {
-    "schema": REVIEW_SCHEMAS,
+TRIAGE_VOCABULARY = {
+    "schema": TRIAGE_SCHEMAS,
     "completeness": COMPLETENESS_STATUSES,
     "wlan": WLAN_STATUSES,
     "conversation": CONVERSATION_STATUSES,
     "negative_claim": NEGATIVE_CLAIM_STATUSES,
 }
+COMPARISON_EXPECTED_FIELDS = (
+    "schema",
+    "hypothesis_schema",
+    "basis",
+    "reason",
+    "input_status",
+    "compare_with_status",
+    "input_capture_id",
+    "compare_with_capture_id",
+    "canonical_left_capture_id",
+    "canonical_right_capture_id",
+)
+COMPARISON_VOCABULARY = {
+    "schema": COMPARISON_SCHEMAS,
+    "hypothesis_schema": HYPOTHESIS_SCHEMAS,
+    "basis": frozenset({"corroborated", "conflicting", "not_comparable"}),
+    "reason": frozenset(
+        {
+            "none",
+            "left_not_observed",
+            "right_not_observed",
+            "different_schema",
+            "different_claim_scope",
+            "different_feature_set",
+            "invalid_digest",
+        }
+    ),
+    "input_status": frozenset({"observed", "insufficient", "unsupported"}),
+    "compare_with_status": frozenset({"observed", "insufficient", "unsupported"}),
+}
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+CAPTURE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MANIFEST = Path(__file__).resolve().parent / "fixtures/review-campaign-v0.json"
+DEFAULT_MANIFEST = Path(__file__).resolve().parent / "fixtures/review-campaign-v1.json"
 
 
 class DuplicateKeyError(ValueError):
@@ -113,6 +146,14 @@ def read_bounded(
         raise CampaignError("execution", unavailable_stage, case) from None
 
 
+def input_metadata(path: Path, stage: str, case: int) -> tuple[int, int, int]:
+    try:
+        metadata = path.stat()
+    except OSError:
+        raise CampaignError("execution", stage, case) from None
+    return metadata.st_size, metadata.st_mode, metadata.st_mtime_ns
+
+
 def limits_metadata() -> dict[str, int]:
     return {
         "max_cases": MAX_CASES,
@@ -158,8 +199,28 @@ def validate_manifest(
     validated: list[dict[str, Any]] = []
     total_bytes = 0
     for ordinal, case in enumerate(cases, start=1):
-        if not isinstance(case, dict) or set(case) != {"input", "sha256", "expect"}:
+        if not isinstance(case, dict) or case.get("operation") not in {
+            "triage",
+            "compare",
+        }:
             raise CampaignError("malformed", "case_shape", ordinal)
+
+        operation = case["operation"]
+        required_fields = (
+            {"operation", "input", "sha256", "expect"}
+            if operation == "triage"
+            else {
+                "operation",
+                "input",
+                "sha256",
+                "compare_with",
+                "compare_with_sha256",
+                "expect",
+            }
+        )
+        if set(case) != required_fields:
+            raise CampaignError("malformed", "case_shape", ordinal)
+
         relative_input = case["input"]
         expected_sha256 = case["sha256"]
         expected = case["expect"]
@@ -169,11 +230,35 @@ def validate_manifest(
             expected_sha256
         ):
             raise CampaignError("malformed", "sha256", ordinal)
-        if not isinstance(expected, dict) or set(expected) != set(EXPECTED_FIELDS):
+
+        expected_fields = (
+            TRIAGE_EXPECTED_FIELDS
+            if operation == "triage"
+            else COMPARISON_EXPECTED_FIELDS
+        )
+        vocabulary = (
+            TRIAGE_VOCABULARY if operation == "triage" else COMPARISON_VOCABULARY
+        )
+        if not isinstance(expected, dict) or set(expected) != set(expected_fields):
             raise CampaignError("malformed", "expectation_shape", ordinal)
-        for field in EXPECTED_FIELDS:
-            if expected[field] not in VOCABULARY[field]:
+        for field in expected_fields:
+            if field in {
+                "input_capture_id",
+                "compare_with_capture_id",
+                "canonical_left_capture_id",
+                "canonical_right_capture_id",
+            }:
+                if not isinstance(expected[field], str) or not CAPTURE_ID_RE.fullmatch(
+                    expected[field]
+                ):
+                    raise CampaignError("malformed", "expectation_vocabulary", ordinal)
+            elif expected[field] not in vocabulary[field]:
                 raise CampaignError("malformed", "expectation_vocabulary", ordinal)
+
+        if (expected.get("basis") == "not_comparable") != (
+            expected.get("reason") not in {None, "none"}
+        ):
+            raise CampaignError("malformed", "expectation_coherence", ordinal)
 
         try:
             input_path = (manifest_path.parent / relative_input).resolve(strict=True)
@@ -188,14 +273,52 @@ def validate_manifest(
         total_bytes += file_stat.st_size
         if total_bytes > MAX_TOTAL_BYTES:
             raise CampaignError("bounds", "total_bytes", ordinal)
-        validated.append(
-            {
-                "path": input_path,
-                "sha256": expected_sha256,
-                "expect": expected,
-                "size": file_stat.st_size,
-            }
-        )
+        validated_case = {
+            "operation": operation,
+            "path": input_path,
+            "sha256": expected_sha256,
+            "expect": expected,
+            "size": file_stat.st_size,
+        }
+
+        if operation == "compare":
+            relative_compare_with = case["compare_with"]
+            compare_with_sha256 = case["compare_with_sha256"]
+            if (
+                not isinstance(relative_compare_with, str)
+                or Path(relative_compare_with).is_absolute()
+            ):
+                raise CampaignError("malformed", "compare_with_reference", ordinal)
+            if not isinstance(compare_with_sha256, str) or not SHA256_RE.fullmatch(
+                compare_with_sha256
+            ):
+                raise CampaignError("malformed", "compare_with_sha256", ordinal)
+            try:
+                compare_with_path = (
+                    manifest_path.parent / relative_compare_with
+                ).resolve(strict=True)
+                compare_with_path.relative_to(root)
+                compare_with_stat = compare_with_path.stat()
+            except (OSError, ValueError):
+                raise CampaignError(
+                    "malformed", "compare_with_reference", ordinal
+                ) from None
+            if not stat.S_ISREG(compare_with_stat.st_mode):
+                raise CampaignError("malformed", "compare_with_reference", ordinal)
+            if compare_with_stat.st_size > MAX_CASE_BYTES:
+                raise CampaignError("bounds", "case_bytes", ordinal)
+            total_bytes += compare_with_stat.st_size
+            if total_bytes > MAX_TOTAL_BYTES:
+                raise CampaignError("bounds", "total_bytes", ordinal)
+            validated_case.update(
+                {
+                    "compare_with_path": compare_with_path,
+                    "compare_with_sha256": compare_with_sha256,
+                    "compare_with_size": compare_with_stat.st_size,
+                }
+            )
+
+        validated.append(validated_case)
     return validated, total_bytes
 
 
@@ -217,15 +340,26 @@ def terminate_process(process: subprocess.Popen[bytes]) -> None:
             pass
 
 
-def run_review(binary: Path, input_path: Path, case: int) -> bytes:
+def run_review(
+    binary: Path,
+    input_path: Path,
+    case: int,
+    compare_with_path: Path | None = None,
+) -> bytes:
     argv = [
         os.fspath(binary),
         "review",
         os.fspath(input_path),
-        "--json",
-        "--max-input-mib",
-        str(REVIEW_MAX_INPUT_MIB),
     ]
+    if compare_with_path is not None:
+        argv.extend(["--compare-with", os.fspath(compare_with_path)])
+    argv.extend(
+        [
+            "--json",
+            "--max-input-mib",
+            str(REVIEW_MAX_INPUT_MIB),
+        ]
+    )
     try:
         process = subprocess.Popen(
             argv,
@@ -275,7 +409,7 @@ def run_review(binary: Path, input_path: Path, case: int) -> bytes:
     return b"".join(output)
 
 
-def extract_statuses(document: Any, case: int) -> dict[str, str]:
+def extract_triage_statuses(document: Any, case: int) -> dict[str, str]:
     try:
         statuses = {
             "schema": document["schema"],
@@ -292,8 +426,69 @@ def extract_statuses(document: Any, case: int) -> dict[str, str]:
     except (KeyError, TypeError, AttributeError):
         raise CampaignError("malformed", "review_shape", case) from None
     for field, value in statuses.items():
-        if not isinstance(value, str) or value not in VOCABULARY[field]:
+        if not isinstance(value, str) or value not in TRIAGE_VOCABULARY[field]:
             raise CampaignError("malformed", "review_vocabulary", case)
+    return statuses
+
+
+def extract_comparison_statuses(document: Any, case: int) -> dict[str, str]:
+    if not isinstance(document, dict) or set(document) != {
+        "schema",
+        "input",
+        "compare_with",
+        "hypothesis",
+        "limitations",
+    }:
+        raise CampaignError("malformed", "review_shape", case)
+    try:
+        basis = document["hypothesis"]["basis"]
+        statuses = {
+            "schema": document["schema"],
+            "hypothesis_schema": document["hypothesis"]["schema"],
+            "basis": basis["status"],
+            "reason": basis.get("reason", "none"),
+            "input_status": document["input"]["status"]["status"],
+            "compare_with_status": document["compare_with"]["status"]["status"],
+            "input_capture_id": document["input"]["source"]["capture_id"],
+            "compare_with_capture_id": document["compare_with"]["source"]["capture_id"],
+            "canonical_left_capture_id": document["hypothesis"]["left"]["capture_id"],
+            "canonical_right_capture_id": document["hypothesis"]["right"]["capture_id"],
+        }
+    except (KeyError, TypeError, AttributeError):
+        raise CampaignError("malformed", "review_shape", case) from None
+    for field in (
+        "schema",
+        "hypothesis_schema",
+        "basis",
+        "reason",
+        "input_status",
+        "compare_with_status",
+    ):
+        value = statuses[field]
+        if not isinstance(value, str) or value not in COMPARISON_VOCABULARY[field]:
+            raise CampaignError("malformed", "review_vocabulary", case)
+    for field in (
+        "input_capture_id",
+        "compare_with_capture_id",
+        "canonical_left_capture_id",
+        "canonical_right_capture_id",
+    ):
+        if not isinstance(statuses[field], str) or not CAPTURE_ID_RE.fullmatch(
+            statuses[field]
+        ):
+            raise CampaignError("malformed", "review_vocabulary", case)
+    if (statuses["basis"] == "not_comparable") != (statuses["reason"] != "none"):
+        raise CampaignError("malformed", "review_coherence", case)
+    expected_reference = {
+        "corroborated": {"hypothesis": "same_packet_shape"},
+        "conflicting": {"hypothesis": "different_packet_shape"},
+        "not_comparable": {
+            "hypothesis": "unknown",
+            "reason": statuses["reason"],
+        },
+    }[statuses["basis"]]
+    if document["hypothesis"].get("reference") != expected_reference:
+        raise CampaignError("malformed", "review_coherence", case)
     return statuses
 
 
@@ -306,6 +501,7 @@ def evaluate_campaign(
 
     for ordinal, case in enumerate(cases, start=1):
         input_path = case["path"]
+        compare_with_path = case.get("compare_with_path")
         before = read_bounded(
             input_path,
             MAX_CASE_BYTES,
@@ -313,8 +509,10 @@ def evaluate_campaign(
             unavailable_stage="input_read",
             case=ordinal,
         )
+        before_metadata = input_metadata(input_path, "input_read", ordinal)
         result: dict[str, Any] = {
             "case": ordinal,
+            "operation": case["operation"],
             "input_bytes": len(before),
         }
         if len(before) != case["size"]:
@@ -322,42 +520,83 @@ def evaluate_campaign(
         if hashlib.sha256(before).hexdigest() != case["sha256"]:
             raise CampaignError("malformed", "input_sha256", ordinal)
 
-        first = run_review(binary, input_path, ordinal)
-        if (
-            read_bounded(
-                input_path,
+        compare_with_before = None
+        compare_with_metadata = None
+        if compare_with_path is not None:
+            compare_with_before = read_bounded(
+                compare_with_path,
                 MAX_CASE_BYTES,
                 too_large_stage="case_bytes",
-                unavailable_stage="input_read",
+                unavailable_stage="compare_with_read",
                 case=ordinal,
             )
-            != before
-        ):
-            raise CampaignError("execution", "input_changed", ordinal)
-        second = run_review(binary, input_path, ordinal)
-        if (
-            read_bounded(
-                input_path,
-                MAX_CASE_BYTES,
-                too_large_stage="case_bytes",
-                unavailable_stage="input_read",
-                case=ordinal,
+            compare_with_metadata = input_metadata(
+                compare_with_path, "compare_with_read", ordinal
             )
-            != before
-        ):
-            raise CampaignError("execution", "input_changed", ordinal)
+            result["compare_with_bytes"] = len(compare_with_before)
+            if len(compare_with_before) != case["compare_with_size"]:
+                raise CampaignError("execution", "compare_with_changed", ordinal)
+            if (
+                hashlib.sha256(compare_with_before).hexdigest()
+                != case["compare_with_sha256"]
+            ):
+                raise CampaignError("malformed", "compare_with_sha256", ordinal)
+
+        outputs: list[bytes] = []
+        for _ in range(2):
+            outputs.append(run_review(binary, input_path, ordinal, compare_with_path))
+            if (
+                read_bounded(
+                    input_path,
+                    MAX_CASE_BYTES,
+                    too_large_stage="case_bytes",
+                    unavailable_stage="input_read",
+                    case=ordinal,
+                )
+                != before
+                or input_metadata(input_path, "input_read", ordinal) != before_metadata
+            ):
+                raise CampaignError("execution", "input_changed", ordinal)
+            if compare_with_path is not None and (
+                read_bounded(
+                    compare_with_path,
+                    MAX_CASE_BYTES,
+                    too_large_stage="case_bytes",
+                    unavailable_stage="compare_with_read",
+                    case=ordinal,
+                )
+                != compare_with_before
+                or input_metadata(compare_with_path, "compare_with_read", ordinal)
+                != compare_with_metadata
+            ):
+                raise CampaignError("execution", "compare_with_changed", ordinal)
+        first, second = outputs
         if first != second:
             raise CampaignError("execution", "nondeterministic_json", ordinal)
 
-        statuses = extract_statuses(
-            load_json_strict(first, "review_json", ordinal), ordinal
+        document = load_json_strict(first, "review_json", ordinal)
+        statuses = (
+            extract_triage_statuses(document, ordinal)
+            if case["operation"] == "triage"
+            else extract_comparison_statuses(document, ordinal)
+        )
+        expected_fields = (
+            TRIAGE_EXPECTED_FIELDS
+            if case["operation"] == "triage"
+            else COMPARISON_EXPECTED_FIELDS
         )
         mismatches = [
             field
-            for field in EXPECTED_FIELDS
+            for field in expected_fields
             if statuses[field] != case["expect"][field]
         ]
-        result.update(statuses)
+        result.update(
+            {
+                field: value
+                for field, value in statuses.items()
+                if not field.endswith("capture_id")
+            }
+        )
         if mismatches:
             result.update({"result": "expectation_failure", "mismatches": mismatches})
             failures += 1
@@ -403,6 +642,7 @@ class EvaluatorSelfTests(unittest.TestCase):
             "schema": MANIFEST_SCHEMA,
             "cases": [
                 {
+                    "operation": "triage",
                     "input": "input.jsonl",
                     "sha256": digest,
                     "expect": {
@@ -449,6 +689,89 @@ class EvaluatorSelfTests(unittest.TestCase):
         binary.chmod(0o700)
         return manifest_path, binary
 
+    def make_comparison_campaign(
+        self,
+        root: Path,
+        *,
+        mode: str = "stable",
+        compare_with_sha256: str | None = None,
+    ) -> tuple[Path, Path]:
+        input_path = root / "input.jsonl"
+        compare_with_path = root / "compare.jsonl"
+        input_path.write_bytes(b"unsupported fixture\n")
+        compare_with_path.write_bytes(b"observed fixture\n")
+        input_capture_id = "sha256:" + "2" * 64
+        compare_capture_id = "sha256:" + "0" * 64
+        manifest = {
+            "schema": MANIFEST_SCHEMA,
+            "cases": [
+                {
+                    "operation": "compare",
+                    "input": input_path.name,
+                    "sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+                    "compare_with": compare_with_path.name,
+                    "compare_with_sha256": compare_with_sha256
+                    or hashlib.sha256(compare_with_path.read_bytes()).hexdigest(),
+                    "expect": {
+                        "schema": "linktop.saved_pcap_comparison.v0",
+                        "hypothesis_schema": (
+                            "netmon.saved_pcap_fingerprint_hypothesis_set.v0"
+                        ),
+                        "basis": "not_comparable",
+                        "reason": "right_not_observed",
+                        "input_status": "unsupported",
+                        "compare_with_status": "observed",
+                        "input_capture_id": input_capture_id,
+                        "compare_with_capture_id": compare_capture_id,
+                        "canonical_left_capture_id": compare_capture_id,
+                        "canonical_right_capture_id": input_capture_id,
+                    },
+                }
+            ],
+        }
+        manifest_path = root / "comparison-campaign.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        binary = root / "fake-linktop"
+        binary.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, pathlib, sys\n"
+            "if len(sys.argv) != 8 or sys.argv[1] != 'review' or "
+            "sys.argv[3] != '--compare-with' or "
+            "sys.argv[5:] != ['--json', '--max-input-mib', '128']:\n"
+            "    raise SystemExit(9)\n"
+            f"mode = {mode!r}\n"
+            "input_path = pathlib.Path(sys.argv[2])\n"
+            "compare_path = pathlib.Path(sys.argv[4])\n"
+            "if mode == 'mutate_compare':\n"
+            "    compare_path.write_bytes(compare_path.read_bytes() + b'x')\n"
+            f"input_id = {input_capture_id!r}\n"
+            f"compare_id = {compare_capture_id!r}\n"
+            "if mode == 'swap':\n"
+            "    input_id, compare_id = compare_id, input_id\n"
+            "payload = {\n"
+            "    'schema': 'linktop.saved_pcap_comparison.v0',\n"
+            "    'input': {'source': {'capture_id': input_id}, "
+            "'status': {'status': 'unsupported'}},\n"
+            "    'compare_with': {'source': {'capture_id': compare_id}, "
+            "'status': {'status': 'observed'}},\n"
+            "    'hypothesis': {\n"
+            "        'schema': "
+            "'netmon.saved_pcap_fingerprint_hypothesis_set.v0',\n"
+            f"        'left': {{'capture_id': {compare_capture_id!r}}},\n"
+            f"        'right': {{'capture_id': {input_capture_id!r}}},\n"
+            "        'basis': {'status': 'not_comparable', "
+            "'reason': 'right_not_observed'},\n"
+            "        'reference': {'hypothesis': 'unknown', "
+            "'reason': 'right_not_observed'},\n"
+            "    },\n"
+            "    'limitations': [],\n"
+            "}\n"
+            "print(json.dumps(payload, sort_keys=True))\n",
+            encoding="utf-8",
+        )
+        binary.chmod(0o700)
+        return manifest_path, binary
+
     def test_pass_is_metadata_only_and_preserves_input(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -463,6 +786,53 @@ class EvaluatorSelfTests(unittest.TestCase):
             self.assertNotIn("192.0.2.1", rendered)
             self.assertNotIn("private-name", rendered)
             self.assertNotIn("198.51.100.2", rendered)
+
+    def test_comparison_preserves_cli_roles_inputs_and_metadata_only_output(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, binary = self.make_comparison_campaign(root)
+            input_before = (root / "input.jsonl").read_bytes()
+            compare_before = (root / "compare.jsonl").read_bytes()
+            code, report = execute_campaign(manifest, binary, root)
+            rendered = json.dumps(report, sort_keys=True)
+            self.assertEqual((code, report["status"]), (0, "pass"))
+            self.assertEqual((root / "input.jsonl").read_bytes(), input_before)
+            self.assertEqual((root / "compare.jsonl").read_bytes(), compare_before)
+            self.assertEqual(report["results"][0]["operation"], "compare")
+            self.assertNotIn("sha256:", rendered)
+            self.assertNotIn(str(root), rendered)
+
+    def test_comparison_rejects_second_input_mutation_and_digest_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, binary = self.make_comparison_campaign(
+                root, mode="mutate_compare"
+            )
+            code, report = execute_campaign(manifest, binary, root)
+            self.assertEqual(code, 2)
+            self.assertEqual(report["error"]["stage"], "compare_with_changed")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, binary = self.make_comparison_campaign(
+                root, compare_with_sha256="0" * 64
+            )
+            code, report = execute_campaign(manifest, binary, root)
+            self.assertEqual(code, 2)
+            self.assertEqual(report["error"]["stage"], "compare_with_sha256")
+
+    def test_comparison_cli_role_swap_is_an_expectation_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, binary = self.make_comparison_campaign(root, mode="swap")
+            code, report = execute_campaign(manifest, binary, root)
+            self.assertEqual((code, report["status"]), (1, "expectation_failure"))
+            self.assertEqual(
+                report["results"][0]["mismatches"],
+                ["input_capture_id", "compare_with_capture_id"],
+            )
 
     def test_expectation_mismatch_exits_one_and_sha256_mismatch_exits_two(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -503,15 +873,19 @@ class EvaluatorSelfTests(unittest.TestCase):
             )
             binary.chmod(0o700)
             previous_timeout = REVIEW_TIMEOUT_SECONDS
-            REVIEW_TIMEOUT_SECONDS = 0.2
+            REVIEW_TIMEOUT_SECONDS = 1.0
             try:
                 with self.assertRaises(CampaignError) as raised:
                     run_review(binary, root / "unused", 1)
                 self.assertEqual(raised.exception.stage, "review_timeout")
             finally:
                 REVIEW_TIMEOUT_SECONDS = previous_timeout
-            child_pid = int(pid_file.read_text())
             deadline = time.monotonic() + 1
+            while not pid_file.exists():
+                if time.monotonic() >= deadline:
+                    self.fail("timed-out review leader never recorded its child")
+                time.sleep(0.01)
+            child_pid = int(pid_file.read_text())
             while True:
                 try:
                     os.kill(child_pid, 0)
@@ -539,6 +913,14 @@ class EvaluatorSelfTests(unittest.TestCase):
             code, report = execute_campaign(manifest, binary, root)
             self.assertEqual(code, 2)
             self.assertEqual(report["error"]["stage"], "expectation_vocabulary")
+
+            manifest, binary = self.make_campaign(root)
+            document = json.loads(manifest.read_text(encoding="utf-8"))
+            del document["cases"][0]["operation"]
+            manifest.write_text(json.dumps(document), encoding="utf-8")
+            code, report = execute_campaign(manifest, binary, root)
+            self.assertEqual(code, 2)
+            self.assertEqual(report["error"]["stage"], "case_shape")
 
             manifest.write_bytes(b"[" * 2000 + b"0" + b"]" * 2000)
             code, report = execute_campaign(manifest, binary, root)

@@ -24,18 +24,18 @@ Status: experimental.
 Cargo installation requires Rust 1.88 or newer:
 
 ```sh
-cargo install linktop --version 0.1.2 --locked
+cargo install linktop --version 0.1.3 --locked
 ```
 
 Checksummed native archives for x86-64 Linux, Intel macOS, and Apple-silicon
 macOS are attached to the
-[`linktop-v0.1.2` release](https://github.com/arclabs561/linktop/releases/tag/linktop-v0.1.2):
+[`linktop-v0.1.3` release](https://github.com/arclabs561/linktop/releases/tag/linktop-v0.1.3):
 
 ```sh
-gh release download linktop-v0.1.2 \
+gh release download linktop-v0.1.3 \
   --repo arclabs561/linktop \
-  --dir linktop-v0.1.2
-(cd linktop-v0.1.2 && shasum -a 256 --check SHA256SUMS)
+  --dir linktop-v0.1.3
+(cd linktop-v0.1.3 && shasum -a 256 --check SHA256SUMS)
 ```
 
 The macOS archives are not code-signed or notarized. Cargo installation is the
@@ -62,6 +62,7 @@ linktop probe                   # bounded active path diagnosis
 linktop readiness               # purpose-specific readiness with explicit gaps
 linktop speed 192.0.2.10        # explicit iperf3 load experiment
 linktop review records.jsonl    # finite saved-evidence projection
+linktop review a.jsonl --compare-with b.jsonl  # bounded packet-shape comparison
 linktop history host-path.jsonl  # finite episode summary
 linktop capsule pack history.jsonl --output incident-capsule
 linktop capsule verify incident-capsule
@@ -181,6 +182,7 @@ invoke TShark or the Netbraid CLI, contact the network, or modify the input.
 linktop review records.jsonl
 linktop review records.jsonl --tail-seconds 30
 linktop review records.jsonl --json
+linktop review a.jsonl --compare-with b.jsonl --json
 ```
 
 The report preserves artifact and record digests, acquisition and extractor
@@ -188,6 +190,13 @@ provenance, coverage, event bounds, normalization and quarantine counts,
 conversation evidence, exclusions, limitations, and candidate TShark display
 filters. Endpoints and filters remain drill-down pivots, not claims about a
 device, person, service, application, or intent.
+
+`--compare-with` projects both inputs into Netbraid's endpoint-independent
+packet-shape candidates and reports a finite hypothesis set: corroborated,
+conflicting, or not comparable with a typed reason. The outer `input` and
+`compare_with` fields preserve command-line roles; the nested hypothesis uses
+canonical content ordering. Agreement does not establish the same event,
+source, device, person, place, service, application, or intent.
 
 `history` reads a canonical private Netbraid host-path JSONL stream and emits a
 finite observer-scoped episode report. Episodes are contiguous context-key
@@ -260,7 +269,7 @@ Linktop does not capture packets, trigger wireless scans, perform LAN discovery,
 manage controllers, retain history without an explicit path, own credentials,
 publish telemetry, or perform identity/presence fusion.
 
-It uses Netbraid 0.3.0's policy-neutral evidence and replay modules through the
+It uses Netbraid 0.3.2's policy-neutral evidence and replay modules through the
 published Rust package with CLI and TShark features disabled. Direct local
 observation remains independently useful.
 

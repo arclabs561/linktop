@@ -1,0 +1,60 @@
+{
+  "schema": "linktop.review_campaign.v1",
+  "cases": [
+    {
+      "operation": "triage",
+      "input": "../../src/review/fixtures/positive-records.jsonl",
+      "sha256": "402d2d96b2bff5dfa9a43b8e915e9f683fdb3801e91128f1fbb33749da8d770e",
+      "expect": {
+        "schema": "netmon.saved_pcap_triage.v1",
+        "completeness": "complete_capture",
+        "wlan": "observed",
+        "conversation": "observed",
+        "negative_claim": "not_requested"
+      }
+    },
+    {
+      "operation": "triage",
+      "input": "../../src/review/fixtures/partial-records.jsonl",
+      "sha256": "d21efd0fee8adccc01d313231b180ba11f4eb7470d09bc9757276e5a9dea85ff",
+      "expect": {
+        "schema": "netmon.saved_pcap_triage.v1",
+        "completeness": "partial_packet_subset",
+        "wlan": "insufficient",
+        "conversation": "observed",
+        "negative_claim": "not_requested"
+      }
+    },
+    {
+      "operation": "triage",
+      "input": "../../src/review/fixtures/unsupported-records.jsonl",
+      "sha256": "5d69b00b35002ed6f807c220e05daf8e72a8e741676f6b28692774fb968d75f3",
+      "expect": {
+        "schema": "netmon.saved_pcap_triage.v1",
+        "completeness": "complete_capture",
+        "wlan": "unsupported",
+        "conversation": "unsupported",
+        "negative_claim": "not_requested"
+      }
+    },
+    {
+      "operation": "compare",
+      "input": "../../src/review/fixtures/unsupported-records.jsonl",
+      "sha256": "5d69b00b35002ed6f807c220e05daf8e72a8e741676f6b28692774fb968d75f3",
+      "compare_with": "../../src/review/fixtures/positive-records.jsonl",
+      "compare_with_sha256": "402d2d96b2bff5dfa9a43b8e915e9f683fdb3801e91128f1fbb33749da8d770e",
+      "expect": {
+        "schema": "linktop.saved_pcap_comparison.v0",
+        "hypothesis_schema": "netmon.saved_pcap_fingerprint_hypothesis_set.v0",
+        "basis": "not_comparable",
+        "reason": "right_not_observed",
+        "input_status": "unsupported",
+        "compare_with_status": "observed",
+        "input_capture_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "compare_with_capture_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "canonical_left_capture_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "canonical_right_capture_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    }
+  ]
+}

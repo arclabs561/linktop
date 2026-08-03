@@ -9,8 +9,16 @@ one version.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-03
+
 ### Added
 
+- Added finite read-only comparison of two normalized saved-capture streams
+  using Netbraid's canonical packet-shape hypothesis set, with typed
+  corroboration, conflict, and abstention results that do not infer identity.
+- Extended the checked saved-evidence campaign to exercise two-input CLI role
+  preservation, canonical hypothesis ordering, deterministic output, and
+  byte-and-metadata immutability for both inputs.
 - Added private, bounded incident-capsule packaging and verification for
   canonical Netbraid host-path history. Version 0 is lossless and does not
   collect, capture packets, or infer identity.
@@ -74,7 +82,8 @@ one version.
   evidence, replay, and public scenario-fixture surfaces; Netbraid's CLI and
   TShark adapter features remain disabled.
 
-[Unreleased]: https://github.com/arclabs561/linktop/compare/linktop-v0.1.2...HEAD
+[Unreleased]: https://github.com/arclabs561/linktop/compare/linktop-v0.1.3...HEAD
+[0.1.3]: https://github.com/arclabs561/linktop/compare/linktop-v0.1.2...linktop-v0.1.3
 [0.1.2]: https://github.com/arclabs561/linktop/compare/linktop-v0.1.1...linktop-v0.1.2
 [0.1.1]: https://github.com/arclabs561/linktop/compare/linktop-v0.1.0...linktop-v0.1.1
 [0.1.0]: https://github.com/arclabs561/linktop/releases/tag/linktop-v0.1.0

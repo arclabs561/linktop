@@ -11,15 +11,17 @@ evidence supports.
 - Bounded DNS, HTTPS, public-egress, and load probes.
 - Text, TUI, JSON, JSONL, history, saved-evidence, and capsule views.
 - Deterministic terminal and headless capture.
+- Finite packet-shape comparison of two saved-capture candidates with canonical
+  ordering, explicit abstention, and a checked process-level campaign.
 
 ## Next
 
 - Better recurrence and place evidence without automatic location labels.
 - More synthetic and reviewed replay scenarios.
-- A local evaluation loop with fixtures, properties, fuzzing, mutation runs,
-  and bounded live checks for OS and network changes.
-- The first fingerprinting step: compare source-preserving candidates from
-  more than one vantage and explain disagreement or missing evidence.
+- Expand the local evaluation loop from checked saved-evidence fixtures into
+  properties, fuzzing, mutation runs, and bounded live OS/network checks.
+- Add reviewed conflicting packet-shape fixtures and multiple-vantage corpus
+  cases without introducing automatic identity or location labels.
 
 ## Later
 

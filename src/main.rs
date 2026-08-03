@@ -116,6 +116,9 @@ enum Command {
     Review {
         /// Canonical Netbraid manifest, packet, and quarantine records.
         input: PathBuf,
+        /// Compare with a second canonical stream using Netbraid's packet-shape candidate.
+        #[arg(long, value_name = "INPUT", conflicts_with = "tail_seconds")]
+        compare_with: Option<PathBuf>,
         /// Emit the exact typed Netbraid saved-PCAP triage projection as JSON.
         #[arg(long)]
         json: bool,
@@ -406,6 +409,7 @@ fn main() -> Result<()> {
         }
         Some(Command::Review {
             input,
+            compare_with,
             json,
             tail_seconds,
             max_input_mib,
@@ -413,7 +417,13 @@ fn main() -> Result<()> {
             reject_live_options("review", &root_live)?;
             reject_root_active("review", active)?;
             reject_history("review", explicit_history.as_ref())?;
-            review::run(&input, max_input_mib, json, tail_seconds)
+            review::run(
+                &input,
+                compare_with.as_deref(),
+                max_input_mib,
+                json,
+                tail_seconds,
+            )
         }
         Some(Command::History {
             input,
@@ -1616,6 +1626,7 @@ mod cli_tests {
         .unwrap();
         let Some(Command::Review {
             input,
+            compare_with,
             json,
             tail_seconds,
             max_input_mib,
@@ -1624,11 +1635,59 @@ mod cli_tests {
             panic!("review command was not parsed");
         };
         assert_eq!(input, PathBuf::from("evidence.jsonl"));
+        assert!(compare_with.is_none());
         assert!(json);
         assert_eq!(tail_seconds.unwrap().nanoseconds(), 150_000_000);
         assert_eq!(max_input_mib, 64);
         assert!(!cli.active);
         assert!(cli.history.is_none());
+    }
+
+    #[test]
+    fn review_compare_parses_as_a_finite_read_only_transaction() {
+        let cli = Cli::try_parse_from([
+            "linktop",
+            "review",
+            "left.jsonl",
+            "--compare-with",
+            "right.jsonl",
+            "--json",
+            "--max-input-mib",
+            "64",
+        ])
+        .unwrap();
+        let Some(Command::Review {
+            input,
+            compare_with,
+            json,
+            tail_seconds,
+            max_input_mib,
+        }) = cli.command
+        else {
+            panic!("review command was not parsed");
+        };
+        assert_eq!(input, PathBuf::from("left.jsonl"));
+        assert_eq!(compare_with, Some(PathBuf::from("right.jsonl")));
+        assert!(json);
+        assert!(tail_seconds.is_none());
+        assert_eq!(max_input_mib, 64);
+        assert!(!cli.active);
+        assert!(cli.history.is_none());
+    }
+
+    #[test]
+    fn review_compare_rejects_a_trailing_window() {
+        let error = Cli::try_parse_from([
+            "linktop",
+            "review",
+            "left.jsonl",
+            "--compare-with",
+            "right.jsonl",
+            "--tail-seconds",
+            "1",
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
