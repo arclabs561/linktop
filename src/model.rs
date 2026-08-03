@@ -338,7 +338,7 @@ impl PathDwell {
         interval: Option<&InterfaceInterval>,
         counter_reset: bool,
     ) {
-        self.interface.current_rate = interval.map(|interval| interval.rate.clone());
+        self.interface.current_rate = interval.map(InterfaceInterval::rate);
         let Some(counters) = counters else {
             return;
         };
@@ -366,23 +366,20 @@ impl PathDwell {
         interface.transmitted_packets_delta = interface
             .transmitted_packets_delta
             .saturating_add(interval.transmitted_packets);
-        interface.error_delta = interface
-            .error_delta
-            .saturating_add(interval.rate.error_delta);
-        interface.drop_delta = interface
-            .drop_delta
-            .saturating_add(interval.rate.drop_delta);
+        let rate = interval.rate();
+        interface.error_delta = interface.error_delta.saturating_add(rate.error_delta);
+        interface.drop_delta = interface.drop_delta.saturating_add(rate.drop_delta);
         interface.peak_received_bits_per_second = Some(
             interface
                 .peak_received_bits_per_second
                 .unwrap_or_default()
-                .max(interval.rate.received_bits_per_second),
+                .max(rate.received_bits_per_second),
         );
         interface.peak_transmitted_bits_per_second = Some(
             interface
                 .peak_transmitted_bits_per_second
                 .unwrap_or_default()
-                .max(interval.rate.transmitted_bits_per_second),
+                .max(rate.transmitted_bits_per_second),
         );
     }
 
@@ -1949,7 +1946,7 @@ impl App {
                     interval.as_ref(),
                     counter_reset,
                 );
-                self.interface_rate = interval.map(|interval| interval.rate);
+                self.interface_rate = interval.as_ref().map(InterfaceInterval::rate);
                 self.interface_counters = counters;
                 self.interface_counters_at = self.interface_counters.as_ref().map(|_| observed_at);
                 if self.interface_counters.is_some() {
@@ -3654,11 +3651,27 @@ fn link_evidence_incomplete(
 
 #[derive(Debug, Clone)]
 struct InterfaceInterval {
-    rate: InterfaceRate,
+    elapsed: Duration,
     received_bytes: u64,
     transmitted_bytes: u64,
     received_packets: u64,
     transmitted_packets: u64,
+    error_delta: u64,
+    drop_delta: u64,
+}
+
+impl InterfaceInterval {
+    fn rate(&self) -> InterfaceRate {
+        let seconds = self.elapsed.as_secs_f64();
+        InterfaceRate {
+            received_bits_per_second: self.received_bytes as f64 * 8.0 / seconds,
+            transmitted_bits_per_second: self.transmitted_bytes as f64 * 8.0 / seconds,
+            received_packets_per_second: self.received_packets as f64 / seconds,
+            transmitted_packets_per_second: self.transmitted_packets as f64 / seconds,
+            error_delta: self.error_delta,
+            drop_delta: self.drop_delta,
+        }
+    }
 }
 
 fn interface_interval(
@@ -3669,7 +3682,6 @@ fn interface_interval(
     if before.interface != after.interface || elapsed.is_zero() {
         return None;
     }
-    let seconds = elapsed.as_secs_f64();
     let received_bytes = after.received_bytes.checked_sub(before.received_bytes)?;
     let transmitted_bytes = after
         .transmitted_bytes
@@ -3683,18 +3695,13 @@ fn interface_interval(
     let receive_errors = after.receive_errors.checked_sub(before.receive_errors)?;
     let transmit_errors = after.transmit_errors.checked_sub(before.transmit_errors)?;
     Some(InterfaceInterval {
-        rate: InterfaceRate {
-            received_bits_per_second: received_bytes as f64 * 8.0 / seconds,
-            transmitted_bits_per_second: transmitted_bytes as f64 * 8.0 / seconds,
-            received_packets_per_second: received_packets as f64 / seconds,
-            transmitted_packets_per_second: transmitted_packets as f64 / seconds,
-            error_delta: receive_errors.checked_add(transmit_errors)?,
-            drop_delta: after.drops.checked_sub(before.drops)?,
-        },
+        elapsed,
         received_bytes,
         transmitted_bytes,
         received_packets,
         transmitted_packets,
+        error_delta: receive_errors.checked_add(transmit_errors)?,
+        drop_delta: after.drops.checked_sub(before.drops)?,
     })
 }
 
@@ -4406,7 +4413,7 @@ mod tests {
     }
 
     #[test]
-    fn interface_rate_uses_deltas_and_rejects_counter_reset() {
+    fn interface_interval_retains_aligned_duration_deltas_and_rate() {
         let before = InterfaceCounters {
             interface: "en0".into(),
             received_bytes: 1_000,
@@ -4427,15 +4434,26 @@ mod tests {
             transmit_errors: 4,
             drops: 5,
         };
-        let rate = interface_interval(&before, &after, Duration::from_secs(2))
-            .unwrap()
-            .rate;
-        assert_eq!(rate.received_bits_per_second, 4_000.0);
-        assert_eq!(rate.transmitted_bits_per_second, 8_000.0);
+        let interval = interface_interval(&before, &after, Duration::from_millis(2_500)).unwrap();
+        assert_eq!(interval.elapsed, Duration::from_millis(2_500));
+        assert_eq!(interval.received_bytes, 1_000);
+        assert_eq!(interval.transmitted_bytes, 2_000);
+        assert_eq!(interval.received_packets, 20);
+        assert_eq!(interval.transmitted_packets, 40);
+
+        let rate = interval.rate();
+        assert_eq!(rate.received_bits_per_second, 3_200.0);
+        assert_eq!(rate.transmitted_bits_per_second, 6_400.0);
+        assert_eq!(rate.received_packets_per_second, 8.0);
+        assert_eq!(rate.transmitted_packets_per_second, 16.0);
         assert_eq!(rate.error_delta, 3);
         assert_eq!(rate.drop_delta, 2);
 
+        assert!(interface_interval(&before, &after, Duration::ZERO).is_none());
         assert!(interface_interval(&after, &before, Duration::from_secs(2)).is_none());
+        let mut replacement = after.clone();
+        replacement.interface = "en9".into();
+        assert!(interface_interval(&after, &replacement, Duration::from_secs(2)).is_none());
     }
 
     #[test]
@@ -5269,6 +5287,89 @@ mod tests {
             Some(&test_counters("en9", 50_000, 60_000, 300, 400, 0, 0, 0))
         );
         assert!(dwell.current_rate.is_none());
+    }
+
+    #[test]
+    fn invalid_counter_intervals_do_not_complete_a_path_window() {
+        let mut app = App::new();
+        assert!(app.apply_at(
+            MonitorUpdate::Link {
+                generation: 1,
+                snapshot: test_link("en0", "house", "192.168.1.1"),
+            },
+            Duration::ZERO,
+        ));
+        assert!(app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 1,
+                counters: Some(test_counters("en0", 1_000, 2_000, 30, 40, 2, 3, 4)),
+            },
+            Duration::from_secs(1),
+        ));
+        assert!(app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 1,
+                counters: Some(test_counters("en0", 2_000, 4_000, 60, 80, 4, 6, 8)),
+            },
+            Duration::from_secs(1),
+        ));
+        assert!(app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 1,
+                counters: Some(test_counters("en0", 10, 20, 3, 4, 0, 0, 0)),
+            },
+            Duration::from_secs(2),
+        ));
+        assert!(app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 1,
+                counters: Some(test_counters("en9", 50_000, 60_000, 300, 400, 0, 0, 0)),
+            },
+            Duration::from_secs(3),
+        ));
+        assert!(app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 1,
+                counters: None,
+            },
+            Duration::from_secs(4),
+        ));
+        assert!(app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 1,
+                counters: Some(test_counters("en9", 70_000, 90_000, 500, 700, 0, 0, 0)),
+            },
+            Duration::from_secs(5),
+        ));
+        assert!(app.apply_at(
+            MonitorUpdate::Link {
+                generation: 2,
+                snapshot: test_link("en0", "hotspot", "172.20.10.1"),
+            },
+            Duration::from_secs(6),
+        ));
+
+        let window = app
+            .latest_completed_path_window(MonitorMode::Overview)
+            .expect("path transition retains the incomplete counter window");
+        assert_eq!(window.observed_span_ms, 6_000);
+        assert_eq!(
+            window.interface.state,
+            CompletedPathWindowSupportState::Partial
+        );
+        assert_eq!(window.interface.valid_intervals, 0);
+        assert_eq!(window.interface.received_bytes_delta, 0);
+        assert_eq!(window.interface.transmitted_bytes_delta, 0);
+        assert_eq!(window.interface.received_packets_delta, 0);
+        assert_eq!(window.interface.transmitted_packets_delta, 0);
+        assert!(window.interface.current_rate.is_none());
+        assert!(window.traffic_shape_candidate.is_none());
+        assert!(
+            window
+                .interface
+                .limitations
+                .contains(&CompletedPathWindowSupportLimitation::NoCompatibleCounterInterval)
+        );
     }
 
     #[test]
