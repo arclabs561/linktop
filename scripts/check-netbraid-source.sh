@@ -34,16 +34,25 @@ fi
 python3 - "$tmp_root/Cargo.toml" "$netbraid_source" <<'PY'
 import json
 import pathlib
+import re
 import sys
 
 manifest_path = pathlib.Path(sys.argv[1])
 netbraid_source = json.dumps(sys.argv[2])
 manifest = manifest_path.read_text()
-old = 'netbraid = { version = "0.3.0", default-features = false, features = ["scenario-fixtures"] }'
-new = f'netbraid = {{ version = "0.3.0", path = {netbraid_source}, default-features = false, features = ["scenario-fixtures"] }}'
-if old not in manifest:
+pattern = re.compile(
+    r'^netbraid = \{ version = "([^"]+)", default-features = false, '
+    r'features = \["scenario-fixtures"\] \}$',
+    re.MULTILINE,
+)
+replacement = (
+    'netbraid = { version = "\\1", path = '
+    f'{netbraid_source}, default-features = false, features = ["scenario-fixtures"] }}'
+)
+manifest, replacements = pattern.subn(replacement, manifest, count=1)
+if replacements != 1:
     raise SystemExit("Linktop Netbraid dependency line was not found")
-manifest_path.write_text(manifest.replace(old, new, 1))
+manifest_path.write_text(manifest)
 PY
 
 printf 'linktop: testing against Netbraid source %s\n' "$netbraid_source"
