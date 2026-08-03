@@ -357,10 +357,7 @@ impl HistorySession {
             app.history_context = Some(context.clone());
             return Some(context.summary);
         }
-        if let Err(error) = prepare_private_path(&self.path)
-            .and_then(|()| append_jsonl(&self.path, &record).map_err(anyhow::Error::from))
-            .and_then(|()| make_private_file(&self.path))
-        {
+        if let Err(error) = append_private_jsonl(&self.path, &record) {
             self.writable = false;
             let status = HistoryContext {
                 kind: HistoryContextKind::AppendFailed,
@@ -772,6 +769,21 @@ fn prepare_private_path(path: &Path) -> anyhow::Result<()> {
     make_private_directory(parent)
 }
 
+fn append_private_jsonl(path: &Path, record: &HostPathObservationV0) -> anyhow::Result<()> {
+    append_private_jsonl_with(path, record, |_| Ok(()))
+}
+
+fn append_private_jsonl_with(
+    path: &Path,
+    record: &HostPathObservationV0,
+    before_append: impl FnOnce(&Path) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    prepare_private_path(path)?;
+    make_private_file(path)?;
+    before_append(path)?;
+    append_jsonl(path, record).map_err(anyhow::Error::from)
+}
+
 #[cfg(unix)]
 fn make_private_directory(path: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -786,8 +798,14 @@ fn make_private_directory(_path: &Path) -> anyhow::Result<()> {
 
 #[cfg(unix)]
 fn make_private_file(path: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
 
@@ -1407,6 +1425,115 @@ mod tests {
         assert_eq!(session.initial.kind, HistoryContextKind::Loaded);
         assert!(session.initial.summary.contains("assessment pending"));
         assert!(!session.initial.summary.contains("compatible record"));
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_history_is_private_before_and_after_first_append() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "linktop-private-new-history-{}-{}.jsonl",
+            std::process::id(),
+            unix_millis()
+        ));
+        let record = with_order(
+            observation_from_app(&app("network-a", "192.0.2.1", "02:00:00:00:00:01")),
+            "first",
+            1_000,
+        );
+
+        append_private_jsonl_with(&path, &record, |path| {
+            let metadata = std::fs::metadata(path).expect("inspect history before append");
+            assert_eq!(metadata.len(), 0);
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+            Ok(())
+        })
+        .expect("append private history");
+
+        let metadata = std::fs::metadata(&path).expect("inspect history after append");
+        assert!(metadata.len() > 0);
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_history_is_private_before_and_after_append() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "linktop-private-existing-history-{}-{}.jsonl",
+            std::process::id(),
+            unix_millis()
+        ));
+        let first = with_order(
+            observation_from_app(&app("network-a", "192.0.2.1", "02:00:00:00:00:01")),
+            "first",
+            1_000,
+        );
+        let second = with_order(first.clone(), "second", 2_000);
+        append_jsonl(&path, &first).expect("append history fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("make fixture permissive");
+        let original = std::fs::read(&path).expect("read history fixture");
+
+        append_private_jsonl_with(&path, &second, |path| {
+            let metadata = std::fs::metadata(path).expect("inspect history before append");
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::read(path).expect("read history before append"),
+                original
+            );
+            Ok(())
+        })
+        .expect("append private history");
+
+        let metadata = std::fs::metadata(&path).expect("inspect history after append");
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            read_jsonl_recovering_tail(&path)
+                .unwrap()
+                .replay
+                .records
+                .len(),
+            2
+        );
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_history_is_made_private_but_not_extended() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "linktop-private-malformed-history-{}-{}.jsonl",
+            std::process::id(),
+            unix_millis()
+        ));
+        let original = b"{not compatible jsonl}\n";
+        std::fs::write(&path, original).expect("write malformed fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("make fixture permissive");
+        let record = with_order(
+            observation_from_app(&app("network-a", "192.0.2.1", "02:00:00:00:00:01")),
+            "first",
+            1_000,
+        );
+
+        append_private_jsonl(&path, &record).expect_err("reject malformed history");
+
+        assert_eq!(std::fs::read(&path).expect("read fixture"), original);
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("inspect malformed history")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
         std::fs::remove_file(path).expect("remove fixture");
     }
 

@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
@@ -10,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const CAPSULE_SCHEMA_V0: &str = "linktop.incident_capsule.v0";
+const MIB: u64 = 1024 * 1024;
+const CAPSULE_MANIFEST_MAX_BYTES: u64 = MIB;
+const CAPSULE_SOURCE_MAX_BYTES: u64 = 128 * MIB;
 const SOURCE_ARTIFACT: &str = "host-path.jsonl";
 
 #[derive(Debug, Subcommand)]
@@ -89,8 +93,7 @@ pub fn pack(input: &Path, output: &Path) -> Result<CapsuleManifestV0> {
         .unwrap_or_else(|| Path::new("."));
     ensure!(parent.is_dir(), "capsule output parent is not a directory");
 
-    let bytes =
-        fs::read(input).with_context(|| format!("read capsule input {}", input.display()))?;
+    let bytes = read_bounded(input, CAPSULE_SOURCE_MAX_BYTES, "capsule input")?;
     let records = canonical_records(&bytes)?;
     let manifest = manifest_for(&bytes, &records, env!("CARGO_PKG_VERSION"));
     let temporary = temporary_output(parent, output);
@@ -117,8 +120,11 @@ pub fn verify(capsule: &Path) -> Result<CapsuleManifestV0> {
     ensure!(capsule.is_dir(), "capsule is not a directory");
     let manifest_path = capsule.join("capsule.json");
     let source_path = capsule.join(SOURCE_ARTIFACT);
-    let manifest_bytes = fs::read(&manifest_path)
-        .with_context(|| format!("read capsule manifest {}", manifest_path.display()))?;
+    let manifest_bytes = read_bounded(
+        &manifest_path,
+        CAPSULE_MANIFEST_MAX_BYTES,
+        "capsule manifest",
+    )?;
     let manifest: CapsuleManifestV0 =
         serde_json::from_slice(&manifest_bytes).context("parse capsule manifest")?;
     ensure!(
@@ -142,8 +148,7 @@ pub fn verify(capsule: &Path) -> Result<CapsuleManifestV0> {
         "unsupported capsule source path"
     );
 
-    let bytes = fs::read(&source_path)
-        .with_context(|| format!("read capsule source {}", source_path.display()))?;
+    let bytes = read_bounded(&source_path, CAPSULE_SOURCE_MAX_BYTES, "capsule source")?;
     let records = canonical_records(&bytes)?;
     let expected = manifest_for(&bytes, &records, &manifest.producer.version);
     ensure!(
@@ -151,6 +156,30 @@ pub fn verify(capsule: &Path) -> Result<CapsuleManifestV0> {
         "capsule manifest does not match its source artifact"
     );
     Ok(manifest)
+}
+
+fn read_bounded(path: &Path, max_bytes: u64, artifact: &str) -> Result<Vec<u8>> {
+    let mut file =
+        File::open(path).with_context(|| format!("open {artifact} {}", path.display()))?;
+    let file_bytes = file
+        .metadata()
+        .with_context(|| format!("inspect {artifact} {}", path.display()))?
+        .len();
+    ensure!(
+        file_bytes <= max_bytes,
+        "{artifact} exceeds {max_bytes}-byte limit"
+    );
+
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {artifact} {}", path.display()))?;
+    ensure!(
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX) <= max_bytes,
+        "{artifact} exceeds {max_bytes}-byte limit"
+    );
+    Ok(bytes)
 }
 
 fn canonical_records(bytes: &[u8]) -> Result<Vec<HostPathObservationV0>> {
@@ -330,6 +359,68 @@ mod tests {
 
         assert!(error.to_string().contains("not canonical JSONL"));
         assert!(!output.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pack_rejects_input_one_byte_over_limit_without_publishing() {
+        let root = temporary_directory("oversized-input");
+        let input = root.join("history.jsonl");
+        let output = root.join("capsule");
+        File::create(&input)
+            .unwrap()
+            .set_len(CAPSULE_SOURCE_MAX_BYTES + 1)
+            .unwrap();
+
+        let error = pack(&input, &output).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!("capsule input exceeds {CAPSULE_SOURCE_MAX_BYTES}-byte limit")
+        );
+        assert!(!output.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verify_rejects_manifest_one_byte_over_limit() {
+        let root = temporary_directory("oversized-manifest");
+        let input = root.join("history.jsonl");
+        let output = root.join("capsule");
+        fs::write(&input, RECORD).unwrap();
+        pack(&input, &output).unwrap();
+        File::create(output.join("capsule.json"))
+            .unwrap()
+            .set_len(CAPSULE_MANIFEST_MAX_BYTES + 1)
+            .unwrap();
+
+        let error = verify(&output).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!("capsule manifest exceeds {CAPSULE_MANIFEST_MAX_BYTES}-byte limit")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verify_rejects_source_one_byte_over_limit() {
+        let root = temporary_directory("oversized-source");
+        let input = root.join("history.jsonl");
+        let output = root.join("capsule");
+        fs::write(&input, RECORD).unwrap();
+        pack(&input, &output).unwrap();
+        File::create(output.join(SOURCE_ARTIFACT))
+            .unwrap()
+            .set_len(CAPSULE_SOURCE_MAX_BYTES + 1)
+            .unwrap();
+
+        let error = verify(&output).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!("capsule source exceeds {CAPSULE_SOURCE_MAX_BYTES}-byte limit")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -152,7 +152,7 @@ pub fn readiness_document_with_workload(
         .map(|kind| report.probes.iter().find(|probe| probe.kind == *kind))
         .collect();
     let path_context_complete = report.link.interface.is_some()
-        && report.link.gateway.is_some()
+        && report.link.observation_gateway().is_some()
         && !report.link.resolvers.is_empty()
         && report
             .link
@@ -174,13 +174,6 @@ pub fn readiness_document_with_workload(
             evidence: path_evidence,
             reasons: vec!["one or more path measurements failed"],
         }
-    } else if !path_context_complete || !path_measurements_complete {
-        ReadinessAssessmentV0 {
-            purpose: ReadinessPurposeV0::InteractiveUse,
-            status: ReadinessStatusV0::Insufficient,
-            evidence: path_evidence,
-            reasons: vec!["current path context or all path measurements are not complete"],
-        }
     } else if path_probes
         .iter()
         .flatten()
@@ -191,6 +184,13 @@ pub fn readiness_document_with_workload(
             status: ReadinessStatusV0::Degraded,
             evidence: path_evidence,
             reasons: vec!["one or more path measurements are degraded"],
+        }
+    } else if !path_context_complete || !path_measurements_complete {
+        ReadinessAssessmentV0 {
+            purpose: ReadinessPurposeV0::InteractiveUse,
+            status: ReadinessStatusV0::Insufficient,
+            evidence: path_evidence,
+            reasons: vec!["current path context or all path measurements are not complete"],
         }
     } else {
         ReadinessAssessmentV0 {
@@ -1088,10 +1088,44 @@ mod tests {
     }
 
     #[test]
-    fn readiness_document_requires_all_path_probes_to_be_healthy() {
-        let degraded = |detail: &str| ProbeResult {
+    fn readiness_document_accepts_vpn_underlay_gateway_as_path_context() {
+        let mut link = test_link();
+        link.interface = Some("utun4".into());
+        link.link_type = Some("vpn".into());
+        link.gateway = None;
+        link.underlay = Some(PathUnderlay {
+            interface: "en0".into(),
+            link_type: "wifi".into(),
+            gateway: Some("192.0.2.1".into()),
+        });
+        assert_eq!(link.gateway, None);
+        assert_eq!(link.observation_gateway(), Some("192.0.2.1"));
+
+        let report = SnapshotReport::from_results(
+            link,
+            Some(test_counters()),
+            test_peers(),
+            vec![
+                (ProbeKind::Gateway, test_probe_result("gateway", 8.0)),
+                (ProbeKind::Dns, test_probe_result("dns", 12.0)),
+                (ProbeKind::Https, test_probe_result("https", 35.0)),
+                (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
+            ],
+        );
+        let document = readiness_document_with_workload(&report, &[], &AcquisitionWindow::start());
+
+        assert_eq!(document.assessments[0].status, ReadinessStatusV0::Ready);
+        assert_eq!(
+            document.assessments[0].reasons,
+            vec!["fresh path context and all path measurements passed"]
+        );
+    }
+
+    #[test]
+    fn readiness_document_degrades_interactive_use_on_degraded_path_probe() {
+        let degraded = ProbeResult {
             health: Health::Degraded,
-            detail: detail.into(),
+            detail: "dns degraded".into(),
             latency_ms: Some(12.0),
             metrics: Some(test_metrics()),
         };
@@ -1100,17 +1134,18 @@ mod tests {
             Some(test_counters()),
             test_peers(),
             vec![
-                (ProbeKind::Gateway, degraded("gateway degraded")),
-                (ProbeKind::Dns, degraded("dns degraded")),
-                (ProbeKind::Https, degraded("https degraded")),
+                (ProbeKind::Gateway, test_probe_result("gateway", 8.0)),
+                (ProbeKind::Dns, degraded),
+                (ProbeKind::Https, test_probe_result("https", 35.0)),
                 (ProbeKind::PublicIp, test_probe_result("public ip", 40.0)),
             ],
         );
         let document = readiness_document_with_workload(&report, &[], &AcquisitionWindow::start());
 
+        assert_eq!(document.assessments[0].status, ReadinessStatusV0::Degraded);
         assert_eq!(
-            document.assessments[0].status,
-            ReadinessStatusV0::Insufficient
+            document.assessments[0].reasons,
+            vec!["one or more path measurements are degraded"]
         );
     }
 
