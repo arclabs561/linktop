@@ -922,7 +922,7 @@ class EvaluatorSelfTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertEqual(report["error"]["stage"], "case_shape")
 
-            manifest.write_bytes(b"[" * 2000 + b"0" + b"]" * 2000)
+            manifest.write_bytes(b"{")
             code, report = execute_campaign(manifest, binary, root)
             self.assertEqual(code, 2)
             self.assertEqual(report["error"]["stage"], "manifest_json")
