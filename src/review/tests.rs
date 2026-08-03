@@ -1,10 +1,18 @@
 use std::fs;
 use std::path::Path;
 
+use netbraid::evidence::{
+    CAPTURE_MANIFEST_SCHEMA_V0, CAPTURE_RUN_RECEIPT_SCHEMA_V0, CaptureArtifactRefV0,
+    CaptureExtractorRefV0, CaptureFileMetadataV0, CaptureManifestV0, CaptureNormalizationV0,
+    CaptureRunReceiptV0, CollectionPolicyV0, EthernetFieldsV0, Ieee80211FieldsV0, Ipv4FieldsV0,
+    NORMALIZED_RECORDS_DIGEST_PROFILE_V0, NormalizationStateV0, PACKET_ENVELOPE_SCHEMA_V0,
+    PACKET_QUARANTINE_SCHEMA_V0, PacketEnvelopeV0, PacketFrameV0, PacketQuarantineV0, TcpFieldsV0,
+    ToolRunReceiptV0,
+};
 use netbraid::replay::{
     SavedPcapClaimScopeV0, SavedPcapCompletenessV0, SavedPcapConversationTriageV0,
     SavedPcapConversationUnsupportedReasonV0, SavedPcapWlanTriageV0,
-    SavedPcapWlanUnsupportedReasonV0,
+    SavedPcapWlanUnsupportedReasonV0, parse_saved_capture_jsonl,
 };
 
 use super::{
@@ -26,6 +34,113 @@ fn positive_review_matches_exact_human_and_json_goldens() {
 
     assert_eq!(render_human(&triage), HUMAN);
     assert_eq!(render_json(&triage).unwrap(), JSON);
+}
+
+#[test]
+fn checked_review_jsonl_fixtures_are_reproducible_from_typed_records() {
+    let mut positive_manifest = review_manifest(
+        POSITIVE_CAPTURE_ID,
+        100,
+        "0.3.0",
+        "TShark 4.6.7",
+        POSITIVE_CONFIGURATION_SHA256,
+        fixture_normalization(NormalizationStateV0::Complete, 10, 3, 0),
+    );
+    positive_manifest.observer_id = Some("fixture-observer".into());
+    positive_manifest.acquired_time_unix_ms = Some(1_700_000_000_123);
+    positive_manifest.acquisition_policy = Some(CollectionPolicyV0::passive_host_local());
+    let positive_packets = vec![
+        tcp_fixture_packet(
+            POSITIVE_CAPTURE_ID,
+            1,
+            1_000,
+            100,
+            ("192.0.2.1", 40_000),
+            ("198.51.100.2", 443),
+            2,
+        ),
+        tcp_fixture_packet(
+            POSITIVE_CAPTURE_ID,
+            2,
+            2_000,
+            100,
+            ("198.51.100.2", 443),
+            ("192.0.2.1", 40_000),
+            18,
+        ),
+        wlan_fixture_packet(POSITIVE_CAPTURE_ID),
+    ];
+    let first_pass = serialize_review_records(&positive_manifest, None, &positive_packets, &[]);
+    let normalized_records_sha256 = parse_saved_capture_jsonl(first_pass.as_bytes())
+        .unwrap()
+        .normalized_records_sha256;
+    let positive_receipt = positive_fixture_receipt(normalized_records_sha256);
+
+    let partial_manifest = review_manifest(
+        PARTIAL_CAPTURE_ID,
+        164,
+        "0.2.0",
+        "TShark (Wireshark) 4.6.7",
+        PARTIAL_CONFIGURATION_SHA256,
+        fixture_normalization(NormalizationStateV0::Partial, 2, 1, 1),
+    );
+    let partial_packets = [tcp_fixture_packet(
+        PARTIAL_CAPTURE_ID,
+        1,
+        1_700_000_000_123_456_789,
+        54,
+        ("192.0.2.1", 40_000),
+        ("198.51.100.2", 443),
+        2,
+    )];
+    let partial_quarantines = [PacketQuarantineV0 {
+        schema: PACKET_QUARANTINE_SCHEMA_V0.into(),
+        capture_id: PARTIAL_CAPTURE_ID.into(),
+        source_line: 2,
+        frame_number_hint: Some(2),
+        reason: "field count 2 does not match registry field count 32".into(),
+        raw_row: "2\tinvalid".into(),
+    }];
+
+    let unsupported_manifest = review_manifest(
+        UNSUPPORTED_CAPTURE_ID,
+        64,
+        "0.3.0",
+        "TShark 4.6.7",
+        UNSUPPORTED_CONFIGURATION_SHA256,
+        fixture_normalization(NormalizationStateV0::Complete, 10, 1, 0),
+    );
+    let unsupported_packets = [base_fixture_packet(
+        UNSUPPORTED_CAPTURE_ID,
+        1,
+        1_000,
+        64,
+        147,
+        &["data"],
+    )];
+
+    assert_eq!(
+        serialize_review_records(
+            &positive_manifest,
+            Some(&positive_receipt),
+            &positive_packets,
+            &[],
+        ),
+        INPUT
+    );
+    assert_eq!(
+        serialize_review_records(
+            &partial_manifest,
+            None,
+            &partial_packets,
+            &partial_quarantines,
+        ),
+        PARTIAL_INPUT
+    );
+    assert_eq!(
+        serialize_review_records(&unsupported_manifest, None, &unsupported_packets, &[]),
+        UNSUPPORTED_INPUT
+    );
 }
 
 #[test]
@@ -289,6 +404,244 @@ fn tail_seconds_are_exact_and_bounded_to_the_projection_domain() {
             "{invalid:?} must not be accepted"
         );
     }
+}
+
+const POSITIVE_CAPTURE_ID: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+const PARTIAL_CAPTURE_ID: &str =
+    "sha256:066432299ec4a059eb4efbf10c9e90fce4f47d8cc3e0e9f9f05c55210725d2a5";
+const UNSUPPORTED_CAPTURE_ID: &str =
+    "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+const POSITIVE_CONFIGURATION_SHA256: &str =
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const PARTIAL_CONFIGURATION_SHA256: &str =
+    "sha256:f488bbcd8ea84a8cffd97498b000959f5673bb14787b240f4e34bc9bc4563042";
+const UNSUPPORTED_CONFIGURATION_SHA256: &str =
+    "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+
+fn review_manifest(
+    capture_id: &str,
+    size_bytes: u64,
+    adapter_version: &str,
+    tool_version: &str,
+    configuration_sha256: &str,
+    normalization: CaptureNormalizationV0,
+) -> CaptureManifestV0 {
+    CaptureManifestV0 {
+        schema: CAPTURE_MANIFEST_SCHEMA_V0.into(),
+        capture_id: capture_id.into(),
+        artifact: CaptureArtifactRefV0 {
+            content_sha256: capture_id.into(),
+            size_bytes,
+        },
+        observer_id: None,
+        acquired_time_unix_ms: None,
+        extractor: CaptureExtractorRefV0 {
+            adapter: "netbraid-adapter-tshark".into(),
+            adapter_version: adapter_version.into(),
+            tool: "tshark".into(),
+            tool_version: tool_version.into(),
+            configuration_sha256: configuration_sha256.into(),
+            field_registry: "netmon.tshark.packet_envelope.v1".into(),
+        },
+        acquisition_policy: None,
+        normalization,
+    }
+}
+
+fn fixture_normalization(
+    state: NormalizationStateV0,
+    packet_limit: u64,
+    packet_rows_emitted: u64,
+    packet_rows_quarantined: u64,
+) -> CaptureNormalizationV0 {
+    CaptureNormalizationV0 {
+        state,
+        packet_limit,
+        packet_limit_reached: false,
+        packet_rows_emitted,
+        packet_rows_quarantined,
+    }
+}
+
+fn tcp_fixture_packet(
+    capture_id: &str,
+    number: u64,
+    event_time_unix_ns: i64,
+    length: u32,
+    source: (&str, u16),
+    destination: (&str, u16),
+    flags: u16,
+) -> PacketEnvelopeV0 {
+    let mut packet = base_fixture_packet(
+        capture_id,
+        number,
+        event_time_unix_ns,
+        length,
+        1,
+        &["eth", "ethertype", "ip", "tcp"],
+    );
+    packet.ethernet = Some(EthernetFieldsV0 {
+        source: Some("02:00:00:00:00:01".into()),
+        destination: Some("02:00:00:00:00:02".into()),
+    });
+    packet.ipv4 = Some(Ipv4FieldsV0 {
+        source: source.0.into(),
+        destination: destination.0.into(),
+        protocol: 6,
+        total_length_octets: None,
+    });
+    packet.tcp = Some(TcpFieldsV0 {
+        source_port: source.1,
+        destination_port: destination.1,
+        flags,
+        stream_index: None,
+    });
+    packet
+}
+
+fn wlan_fixture_packet(capture_id: &str) -> PacketEnvelopeV0 {
+    let mut packet = base_fixture_packet(capture_id, 3, 3_000, 50, 105, &["wlan"]);
+    packet.ieee80211 = Some(Ieee80211FieldsV0 {
+        frame_type: 0,
+        frame_subtype: 12,
+        transmitter: Some("02:00:00:00:00:01".into()),
+        receiver: Some("02:00:00:00:00:02".into()),
+        source: Some("02:00:00:00:00:01".into()),
+        destination: Some("02:00:00:00:00:02".into()),
+        bssid: Some("02:00:00:00:00:01".into()),
+        ssid_hex: None,
+    });
+    packet
+}
+
+fn base_fixture_packet(
+    capture_id: &str,
+    number: u64,
+    event_time_unix_ns: i64,
+    length: u32,
+    encapsulation_type: i16,
+    protocols: &[&str],
+) -> PacketEnvelopeV0 {
+    PacketEnvelopeV0 {
+        schema: PACKET_ENVELOPE_SCHEMA_V0.into(),
+        record_id: format!("{capture_id}:frame:{number}"),
+        capture_id: capture_id.into(),
+        frame: PacketFrameV0 {
+            number,
+            event_time_unix_ns,
+            original_len: length,
+            captured_len: length,
+            section_number: Some(0),
+            interface_id: Some(0),
+            encapsulation_type: Some(encapsulation_type),
+            protocols: protocols
+                .iter()
+                .map(|protocol| (*protocol).into())
+                .collect(),
+        },
+        ethernet: None,
+        ipv4: None,
+        ipv6: None,
+        tcp: None,
+        udp: None,
+        ieee802154: None,
+        ieee80211: None,
+        wlan_radio: None,
+    }
+}
+
+fn positive_fixture_receipt(normalized_records_sha256: String) -> CaptureRunReceiptV0 {
+    CaptureRunReceiptV0 {
+        schema: CAPTURE_RUN_RECEIPT_SCHEMA_V0.into(),
+        run_id: "run:1111111111111111111111111111111111111111111111111111111111111111".into(),
+        capture_id: POSITIVE_CAPTURE_ID.into(),
+        started_time_unix_ns: 4_000,
+        finished_time_unix_ns: 5_000,
+        elapsed_ns: 1_000,
+        file: CaptureFileMetadataV0 {
+            file_type: "pcapng".into(),
+            encapsulation: "ether".into(),
+            timestamp_precision: "nanoseconds".into(),
+            packet_count: 3,
+            file_size_bytes: 100,
+            original_data_size_bytes: 250,
+            snaplen: None,
+            inferred_snaplen_min: None,
+            inferred_snaplen_max: None,
+            duration_ns: Some(2_000),
+            earliest_packet_time_unix_ns: Some(1_000),
+            latest_packet_time_unix_ns: Some(3_000),
+            capture_hardware: None,
+            capture_operating_system: None,
+            capture_application: None,
+        },
+        capinfos: fixture_tool_receipt(
+            "capinfos",
+            "Capinfos 4.6.7",
+            &["$STAGED_CAPTURE"],
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        ),
+        tshark: fixture_tool_receipt(
+            "tshark",
+            "TShark 4.6.7",
+            &["-r", "$STAGED_CAPTURE"],
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        ),
+        configuration_sha256: POSITIVE_CONFIGURATION_SHA256.into(),
+        field_registry: "netmon.tshark.packet_envelope.v1".into(),
+        normalized_records_digest_profile: NORMALIZED_RECORDS_DIGEST_PROFILE_V0.into(),
+        normalized_records_sha256,
+    }
+}
+
+fn fixture_tool_receipt(
+    tool: &str,
+    tool_version: &str,
+    argument_template: &[&str],
+    stdout_sha256: &str,
+    stderr_sha256: &str,
+) -> ToolRunReceiptV0 {
+    ToolRunReceiptV0 {
+        tool: tool.into(),
+        configured_executable: tool.into(),
+        tool_version: tool_version.into(),
+        argument_template: argument_template
+            .iter()
+            .map(|argument| (*argument).into())
+            .collect(),
+        environment_policy: "netmon.wireshark.environment.v0".into(),
+        exit_code: 0,
+        stdout_sha256: stdout_sha256.into(),
+        stderr_sha256: stderr_sha256.into(),
+    }
+}
+
+fn serialize_review_records(
+    manifest: &CaptureManifestV0,
+    receipt: Option<&CaptureRunReceiptV0>,
+    packets: &[PacketEnvelopeV0],
+    quarantines: &[PacketQuarantineV0],
+) -> String {
+    let mut jsonl = String::new();
+    push_jsonl_record(&mut jsonl, manifest);
+    if let Some(receipt) = receipt {
+        push_jsonl_record(&mut jsonl, receipt);
+    }
+    for packet in packets {
+        push_jsonl_record(&mut jsonl, packet);
+    }
+    for quarantine in quarantines {
+        push_jsonl_record(&mut jsonl, quarantine);
+    }
+    jsonl
+}
+
+fn push_jsonl_record(jsonl: &mut String, record: &impl serde::Serialize) {
+    jsonl.push_str(&serde_json::to_string(record).unwrap());
+    jsonl.push('\n');
 }
 
 fn fixture_path() -> &'static Path {

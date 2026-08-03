@@ -4125,15 +4125,20 @@ mod tests {
             transmit_errors: 0,
             drops: 0,
         };
-        assert!(app.apply(MonitorUpdate::Traffic {
-            generation: 0,
-            counters: Some(counters(1_000)),
-        }));
-        std::thread::sleep(Duration::from_millis(1));
-        assert!(app.apply(MonitorUpdate::Traffic {
-            generation: 0,
-            counters: Some(counters(2_000)),
-        }));
+        assert!(app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 0,
+                counters: Some(counters(1_000)),
+            },
+            Duration::ZERO,
+        ));
+        assert!(app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 0,
+                counters: Some(counters(2_000)),
+            },
+            Duration::from_millis(1),
+        ));
 
         let projection = app.projection(MonitorMode::Link);
         assert_eq!(

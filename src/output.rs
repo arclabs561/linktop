@@ -1805,17 +1805,20 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            std::thread::sleep(Duration::from_millis(1));
-            assert!(app.apply(crate::model::MonitorUpdate::Traffic {
-                generation: 0,
-                counters: Some(counters),
-            }));
+            let elapsed = Duration::from_secs((index + 1) as u64);
+            assert!(app.apply_at(
+                crate::model::MonitorUpdate::Traffic {
+                    generation: 0,
+                    counters: Some(counters),
+                },
+                elapsed,
+            ));
             let observed = stream.observe_at(
                 LiveTrigger::Traffic,
                 subject,
                 app.projection(subject),
                 format!("2026-07-26T20:00:0{}.000Z", index + 1),
-                Duration::from_secs((index + 1) as u64),
+                elapsed,
             );
             if index < 2 {
                 assert!(observed.is_some(), "progress state transition emits");
@@ -1838,10 +1841,13 @@ mod tests {
             .expect("five-second checkpoint interval emits current full state");
         assert_eq!(periodic.line, LiveLineKind::Checkpoint);
 
-        assert!(app.apply(crate::model::MonitorUpdate::Link {
-            generation: 1,
-            snapshot: test_link(),
-        }));
+        assert!(app.apply_at(
+            crate::model::MonitorUpdate::Link {
+                generation: 1,
+                snapshot: test_link(),
+            },
+            Duration::from_secs(8),
+        ));
         let transition = stream
             .observe_at(
                 LiveTrigger::Link,

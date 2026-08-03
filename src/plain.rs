@@ -917,15 +917,20 @@ mod tests {
             transmit_errors: 0,
             drops: 0,
         };
-        app.apply(MonitorUpdate::Traffic {
-            generation: 0,
-            counters: Some(counters(1_000, 2_000)),
-        });
-        std::thread::sleep(Duration::from_millis(1));
-        app.apply(MonitorUpdate::Traffic {
-            generation: 0,
-            counters: Some(counters(2_000, 4_000)),
-        });
+        app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 0,
+                counters: Some(counters(1_000, 2_000)),
+            },
+            Duration::ZERO,
+        );
+        app.apply_at(
+            MonitorUpdate::Traffic {
+                generation: 0,
+                counters: Some(counters(2_000, 4_000)),
+            },
+            Duration::from_millis(1),
+        );
         assert_eq!(
             app.progress_for(MonitorMode::Overview, EvidenceClaim::InterfaceRate)
                 .state,
@@ -937,8 +942,7 @@ mod tests {
             generation: 0,
             counters: Some(counters(3_000, 6_000)),
         };
-        std::thread::sleep(Duration::from_millis(1));
-        app.apply(update.clone());
+        app.apply_at(update.clone(), Duration::from_millis(2));
         let rendered = format_update(&update, &before, &app).join("\n");
         assert!(rendered.contains("traffic"));
         assert!(!rendered.contains("progress"));
