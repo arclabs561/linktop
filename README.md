@@ -119,9 +119,9 @@ linktop capsule pack history.jsonl --output incident-capsule
 linktop capsule verify incident-capsule
 ```
 
-Comparisons report corroborated, conflicting, or not-comparable packet-shape
-evidence. Agreement is not proof of the same event, device, person, service, or
-intent.
+Comparisons keep the declared artifact-digest relation and packet-shape
+evidence as separate claims. They do not vote or establish the same event,
+source, device, person, service, or intent.
 
 ## Boundaries
 

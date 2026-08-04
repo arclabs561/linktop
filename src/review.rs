@@ -5,6 +5,11 @@ use std::path::Path;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
+use netbraid::infer::{
+    ContentDigestEvidenceV0, ContentRelationBasisV0, ContentRelationHypothesisSetV0,
+    ContentSha256V0, FiniteHypothesisCompositionV0, ProjectFiniteHypothesisClaimV0,
+    assess_content_relation_v0,
+};
 use netbraid::replay::{
     SavedPcapClaimScopeV0, SavedPcapConversationDirectionV0, SavedPcapConversationExclusionCountV0,
     SavedPcapConversationTriageV0, SavedPcapEventWindowV0, SavedPcapFingerprintCandidateV0,
@@ -20,14 +25,16 @@ use serde::Serialize;
 
 const MIB: u64 = 1024 * 1024;
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
-const COMPARISON_SCHEMA: &str = "linktop.saved_pcap_comparison.v0";
+const COMPARISON_SCHEMA: &str = "linktop.saved_pcap_comparison.v1";
 
 #[derive(Serialize)]
-struct SavedPcapComparisonReportV0 {
+struct SavedPcapComparisonReportV1 {
     schema: &'static str,
     input: SavedPcapFingerprintCandidateV0,
     compare_with: SavedPcapFingerprintCandidateV0,
     hypothesis: SavedPcapFingerprintHypothesisSetV0,
+    content_relation: ContentRelationHypothesisSetV0,
+    composition: FiniteHypothesisCompositionV0,
     limitations: Vec<&'static str>,
 }
 
@@ -128,22 +135,58 @@ pub fn run(
 fn compare_triage(
     input: &SavedPcapTriageV1,
     compare_with: &SavedPcapTriageV1,
-) -> Result<SavedPcapComparisonReportV0> {
+) -> Result<SavedPcapComparisonReportV1> {
+    let input_content = project_artifact_content_evidence(input)?;
+    let compare_content = project_artifact_content_evidence(compare_with)?;
+    let content_relation = assess_content_relation_v0(&input_content, &compare_content)
+        .context("assessing the bounded artifact-content hypothesis set")?;
     let input = project_saved_pcap_fingerprint_v0(input);
     let compare_with = project_saved_pcap_fingerprint_v0(compare_with);
     let hypothesis = assess_saved_pcap_fingerprint_v0(&input, &compare_with)
         .context("assessing the bounded packet-shape hypothesis set")?;
-    Ok(SavedPcapComparisonReportV0 {
+    let content_claim = content_relation
+        .project_finite_hypothesis_claim_v0((&input_content, &compare_content))
+        .context("projecting the artifact-content hypothesis claim")?;
+    let packet_shape_claim = hypothesis
+        .project_finite_hypothesis_claim_v0((&input, &compare_with))
+        .context("projecting the packet-shape hypothesis claim")?;
+    let composition =
+        FiniteHypothesisCompositionV0::try_new(vec![content_claim, packet_shape_claim])
+            .context("composing independent saved-capture hypothesis claims")?;
+    Ok(SavedPcapComparisonReportV1 {
         schema: COMPARISON_SCHEMA,
         input,
         compare_with,
         hypothesis,
+        content_relation,
+        composition,
         limitations: vec![
             "packet-shape corroboration is not device, person, place, service, application, or intent identity",
             "capture-wide candidates are not sessionized and do not establish same event or same source",
             "endpoint addresses and ports are excluded from the comparison digest",
+            "content-digest and packet-shape claims remain independent; co-presence does not merge subjects, vote, or establish identity",
         ],
     })
+}
+
+fn project_artifact_content_evidence(
+    triage: &SavedPcapTriageV1,
+) -> Result<ContentDigestEvidenceV0> {
+    let manifest = &triage.source.manifest;
+    let digest = manifest
+        .artifact
+        .content_sha256
+        .strip_prefix("sha256:")
+        .context("capture artifact digest must use the sha256: prefix")?;
+    let digest = ContentSha256V0::try_new(digest)
+        .context("capture artifact digest must contain canonical lowercase SHA-256")?;
+    ContentDigestEvidenceV0::observed(
+        format!("{}:artifact-content", manifest.capture_id),
+        manifest.schema.clone(),
+        manifest.capture_id.clone(),
+        digest,
+    )
+    .context("projecting capture artifact content evidence")
 }
 
 fn load(path: &Path, max_bytes: u64, tail_window_ns: Option<u64>) -> Result<SavedPcapTriageV1> {
@@ -159,13 +202,13 @@ fn render_json(triage: &SavedPcapTriageV1) -> Result<String> {
     Ok(rendered)
 }
 
-fn render_comparison_json(report: &SavedPcapComparisonReportV0) -> Result<String> {
+fn render_comparison_json(report: &SavedPcapComparisonReportV1) -> Result<String> {
     let mut rendered = serde_json::to_string_pretty(report)?;
     rendered.push('\n');
     Ok(rendered)
 }
 
-fn render_comparison_human(report: &SavedPcapComparisonReportV0) -> String {
+fn render_comparison_human(report: &SavedPcapComparisonReportV1) -> String {
     let mut output = String::new();
     writeln!(output, "LINKTOP  SAVED EVIDENCE COMPARISON / READ ONLY")
         .expect("writing to a String cannot fail");
@@ -195,9 +238,33 @@ fn render_comparison_human(report: &SavedPcapComparisonReportV0) -> String {
             .expect("writing to a String cannot fail");
         }
     }
+    match report.content_relation.basis() {
+        ContentRelationBasisV0::Sha256Equal => {
+            writeln!(output, "content   matching declared SHA-256 digest")
+                .expect("writing to a String cannot fail");
+        }
+        ContentRelationBasisV0::Sha256Different => {
+            writeln!(output, "content   different declared SHA-256 digest")
+                .expect("writing to a String cannot fail");
+        }
+        ContentRelationBasisV0::DigestUnavailable { .. } => {
+            writeln!(output, "content   declared SHA-256 relation unavailable")
+                .expect("writing to a String cannot fail");
+        }
+        _ => {
+            writeln!(output, "content   unknown declared-content relation")
+                .expect("writing to a String cannot fail");
+        }
+    }
     writeln!(
         output,
-        "classify  packet-shape comparison only; not same event, source, device, person, place, service, application, or intent identity"
+        "claims    {} independent families / no merged verdict",
+        report.composition.claims().len()
+    )
+    .expect("writing to a String cannot fail");
+    writeln!(
+        output,
+        "classify  declared-content and packet-shape comparisons only; not same event, source, device, person, place, service, application, or intent identity"
     )
     .expect("writing to a String cannot fail");
     output

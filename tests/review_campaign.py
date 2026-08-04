@@ -31,8 +31,14 @@ REVIEW_TIMEOUT_SECONDS = 30
 MANIFEST_SCHEMA = "linktop.review_campaign.v1"
 OUTPUT_SCHEMA = "linktop.review_campaign_eval.v1"
 TRIAGE_SCHEMAS = frozenset({"netmon.saved_pcap_triage.v1"})
-COMPARISON_SCHEMAS = frozenset({"linktop.saved_pcap_comparison.v0"})
+COMPARISON_SCHEMAS = frozenset({"linktop.saved_pcap_comparison.v1"})
 HYPOTHESIS_SCHEMAS = frozenset({"netmon.saved_pcap_fingerprint_hypothesis_set.v0"})
+CONTENT_RELATION_SCHEMAS = frozenset({"netbraid.content_relation_hypothesis_set.v0"})
+COMPOSITION_SCHEMAS = frozenset({"netbraid.finite_hypothesis_composition.v0"})
+COMPOSITION_FAMILIES = (
+    "netbraid.content_relation_hypothesis_set.v0",
+    "netmon.saved_pcap_fingerprint_hypothesis_set.v0",
+)
 COMPLETENESS_STATUSES = frozenset({"complete_capture", "partial_packet_subset"})
 WLAN_STATUSES = frozenset({"insufficient", "unsupported", "not_observed", "observed"})
 CONVERSATION_STATUSES = frozenset({"insufficient", "unsupported", "observed"})
@@ -54,6 +60,10 @@ TRIAGE_VOCABULARY = {
 COMPARISON_EXPECTED_FIELDS = (
     "schema",
     "hypothesis_schema",
+    "content_relation_schema",
+    "content_basis",
+    "composition_schema",
+    "composition_claim_count",
     "basis",
     "reason",
     "input_status",
@@ -66,6 +76,9 @@ COMPARISON_EXPECTED_FIELDS = (
 COMPARISON_VOCABULARY = {
     "schema": COMPARISON_SCHEMAS,
     "hypothesis_schema": HYPOTHESIS_SCHEMAS,
+    "content_relation_schema": CONTENT_RELATION_SCHEMAS,
+    "content_basis": frozenset({"sha256_equal", "sha256_different"}),
+    "composition_schema": COMPOSITION_SCHEMAS,
     "basis": frozenset({"corroborated", "conflicting", "not_comparable"}),
     "reason": frozenset(
         {
@@ -242,7 +255,10 @@ def validate_manifest(
         if not isinstance(expected, dict) or set(expected) != set(expected_fields):
             raise CampaignError("malformed", "expectation_shape", ordinal)
         for field in expected_fields:
-            if field in {
+            if field == "composition_claim_count":
+                if expected[field] != 2:
+                    raise CampaignError("malformed", "expectation_vocabulary", ordinal)
+            elif field in {
                 "input_capture_id",
                 "compare_with_capture_id",
                 "canonical_left_capture_id",
@@ -431,20 +447,30 @@ def extract_triage_statuses(document: Any, case: int) -> dict[str, str]:
     return statuses
 
 
-def extract_comparison_statuses(document: Any, case: int) -> dict[str, str]:
+def extract_comparison_statuses(document: Any, case: int) -> dict[str, Any]:
     if not isinstance(document, dict) or set(document) != {
         "schema",
         "input",
         "compare_with",
         "hypothesis",
+        "content_relation",
+        "composition",
         "limitations",
     }:
         raise CampaignError("malformed", "review_shape", case)
     try:
         basis = document["hypothesis"]["basis"]
+        claims = document["composition"]["claims"]
+        composition_families = tuple(
+            claim["projection"]["family_schema"] for claim in claims
+        )
         statuses = {
             "schema": document["schema"],
             "hypothesis_schema": document["hypothesis"]["schema"],
+            "content_relation_schema": document["content_relation"]["schema"],
+            "content_basis": document["content_relation"]["basis"]["basis"],
+            "composition_schema": document["composition"]["schema"],
+            "composition_claim_count": len(claims),
             "basis": basis["status"],
             "reason": basis.get("reason", "none"),
             "input_status": document["input"]["status"]["status"],
@@ -459,6 +485,9 @@ def extract_comparison_statuses(document: Any, case: int) -> dict[str, str]:
     for field in (
         "schema",
         "hypothesis_schema",
+        "content_relation_schema",
+        "content_basis",
+        "composition_schema",
         "basis",
         "reason",
         "input_status",
@@ -488,6 +517,17 @@ def extract_comparison_statuses(document: Any, case: int) -> dict[str, str]:
         },
     }[statuses["basis"]]
     if document["hypothesis"].get("reference") != expected_reference:
+        raise CampaignError("malformed", "review_coherence", case)
+    expected_content_reference = {
+        "sha256_equal": {"hypothesis": "sha256_match"},
+        "sha256_different": {"hypothesis": "sha256_mismatch"},
+    }[statuses["content_basis"]]
+    if document["content_relation"].get("reference") != expected_content_reference:
+        raise CampaignError("malformed", "review_coherence", case)
+    if (
+        statuses["composition_claim_count"] != 2
+        or composition_families != COMPOSITION_FAMILIES
+    ):
         raise CampaignError("malformed", "review_coherence", case)
     return statuses
 
@@ -713,10 +753,18 @@ class EvaluatorSelfTests(unittest.TestCase):
                     "compare_with_sha256": compare_with_sha256
                     or hashlib.sha256(compare_with_path.read_bytes()).hexdigest(),
                     "expect": {
-                        "schema": "linktop.saved_pcap_comparison.v0",
+                        "schema": "linktop.saved_pcap_comparison.v1",
                         "hypothesis_schema": (
                             "netmon.saved_pcap_fingerprint_hypothesis_set.v0"
                         ),
+                        "content_relation_schema": (
+                            "netbraid.content_relation_hypothesis_set.v0"
+                        ),
+                        "content_basis": "sha256_different",
+                        "composition_schema": (
+                            "netbraid.finite_hypothesis_composition.v0"
+                        ),
+                        "composition_claim_count": 2,
                         "basis": "not_comparable",
                         "reason": "right_not_observed",
                         "input_status": "unsupported",
@@ -749,7 +797,7 @@ class EvaluatorSelfTests(unittest.TestCase):
             "if mode == 'swap':\n"
             "    input_id, compare_id = compare_id, input_id\n"
             "payload = {\n"
-            "    'schema': 'linktop.saved_pcap_comparison.v0',\n"
+            "    'schema': 'linktop.saved_pcap_comparison.v1',\n"
             "    'input': {'source': {'capture_id': input_id}, "
             "'status': {'status': 'unsupported'}},\n"
             "    'compare_with': {'source': {'capture_id': compare_id}, "
@@ -764,8 +812,27 @@ class EvaluatorSelfTests(unittest.TestCase):
             "        'reference': {'hypothesis': 'unknown', "
             "'reason': 'right_not_observed'},\n"
             "    },\n"
+            "    'content_relation': {\n"
+            "        'schema': 'netbraid.content_relation_hypothesis_set.v0',\n"
+            "        'basis': {'basis': 'sha256_different'},\n"
+            "        'reference': {'hypothesis': 'sha256_mismatch'},\n"
+            "    },\n"
+            "    'composition': {\n"
+            "        'schema': 'netbraid.finite_hypothesis_composition.v0',\n"
+            "        'claims': [\n"
+            "            {'projection': {'family_schema': "
+            "'netbraid.content_relation_hypothesis_set.v0'}},\n"
+            "            {'projection': {'family_schema': "
+            "'netmon.saved_pcap_fingerprint_hypothesis_set.v0'}},\n"
+            "        ],\n"
+            "    },\n"
             "    'limitations': [],\n"
             "}\n"
+            "if mode == 'bad_composition':\n"
+            "    payload['composition']['claims'].pop()\n"
+            "if mode == 'bad_content_reference':\n"
+            "    payload['content_relation']['reference'] = "
+            "{'hypothesis': 'sha256_match'}\n"
             "print(json.dumps(payload, sort_keys=True))\n",
             encoding="utf-8",
         )
@@ -833,6 +900,15 @@ class EvaluatorSelfTests(unittest.TestCase):
                 report["results"][0]["mismatches"],
                 ["input_capture_id", "compare_with_capture_id"],
             )
+
+    def test_comparison_rejects_incoherent_composition_and_content_claim(self) -> None:
+        for mode in ("bad_composition", "bad_content_reference"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest, binary = self.make_comparison_campaign(root, mode=mode)
+                code, report = execute_campaign(manifest, binary, root)
+                self.assertEqual(code, 2)
+                self.assertEqual(report["error"]["stage"], "review_coherence")
 
     def test_expectation_mismatch_exits_one_and_sha256_mismatch_exits_two(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

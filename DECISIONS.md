@@ -53,6 +53,10 @@ Human and machine outputs project the same typed model. The TUI may rank and
 compress it for the available space; JSON retains the complete versioned
 contract. Machine consumers must not parse terminal prose.
 
+Saved-capture comparison may carry multiple canonical Netbraid claim families.
+Composition preserves and orders those claims; it does not merge their
+subjects, score agreement, or produce an identity or event verdict.
+
 ## Explicit lifetimes
 
 Terminal defaults are interactive only when stdin and stdout are terminals.

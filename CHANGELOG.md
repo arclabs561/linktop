@@ -11,6 +11,9 @@ one version.
 
 ### Changed
 
+- Saved-capture comparison now keeps declared artifact-digest relation and
+  packet-shape evidence as two independent canonical Netbraid claims. The
+  report composes them without a merged verdict or identity inference.
 - Replaced the two-point speed report with a versioned before/after-spawn/
   after-exit gateway-latency experiment. The contract does not call the second
   probe "during" or treat the final probe as proof of recovery.

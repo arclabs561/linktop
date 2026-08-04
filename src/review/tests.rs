@@ -156,14 +156,20 @@ fn identical_saved_evidence_candidates_corroborate_deterministically() {
     let second_json = render_comparison_json(&report).unwrap();
     assert_eq!(first_json, second_json);
     assert_eq!(fs::read(left_path).unwrap(), before);
-    assert!(first_json.contains("\"schema\": \"linktop.saved_pcap_comparison.v0\""));
+    assert!(first_json.contains("\"schema\": \"linktop.saved_pcap_comparison.v1\""));
     assert!(first_json.contains("\"schema\": \"netmon.saved_pcap_fingerprint_hypothesis_set.v0\""));
+    assert!(first_json.contains("\"schema\": \"netbraid.content_relation_hypothesis_set.v0\""));
+    assert!(first_json.contains("\"schema\": \"netbraid.finite_hypothesis_composition.v0\""));
     assert!(first_json.contains("\"hypothesis\": \"same_packet_shape\""));
     assert!(first_json.contains("\"status\": \"corroborated\""));
+    assert!(first_json.contains("\"basis\": \"sha256_equal\""));
+    assert_eq!(report.composition.claims().len(), 2);
     assert!(!first_json.contains("192.0.2.1"));
 
     let human = render_comparison_human(&report);
     assert!(human.contains("compare   corroborated / equal bounded packet-shape basis"));
+    assert!(human.contains("content   matching declared SHA-256 digest"));
+    assert!(human.contains("claims    2 independent families / no merged verdict"));
     assert!(human.contains("not same event, source, device"));
 }
 
@@ -184,7 +190,10 @@ fn distinct_observed_packet_shape_candidates_conflict_without_identity_claims() 
 
     assert!(json.contains("\"status\": \"conflicting\""));
     assert!(json.contains("\"hypothesis\": \"different_packet_shape\""));
+    assert!(json.contains("\"basis\": \"sha256_equal\""));
     assert!(human.contains("compare   conflicting / different bounded packet-shape basis"));
+    assert!(human.contains("content   matching declared SHA-256 digest"));
+    assert!(human.contains("claims    2 independent families / no merged verdict"));
     assert!(human.contains("not same event, source, device"));
 }
 
@@ -204,7 +213,10 @@ fn unsupported_saved_evidence_abstains_from_comparison() {
     assert!(json.contains("\"status\": \"not_comparable\""));
     assert!(json.contains("\"hypothesis\": \"unknown\""));
     assert!(json.contains("\"reason\": \"right_not_observed\""));
+    assert!(json.contains("\"basis\": \"sha256_different\""));
     assert!(human.contains("compare   not comparable / canonical right not observed"));
+    assert!(human.contains("content   different declared SHA-256 digest"));
+    assert!(human.contains("claims    2 independent families / no merged verdict"));
     assert!(human.contains(
         "compare  sha256:2222222222222222222222222222222222222222222222222222222222222222"
     ));
@@ -224,6 +236,8 @@ fn comparison_keeps_cli_roles_distinct_from_canonical_hypothesis_order() {
     let reversed = compare_triage(&unsupported, &observed).unwrap();
 
     assert_eq!(forward.hypothesis, reversed.hypothesis);
+    assert_eq!(forward.content_relation, reversed.content_relation);
+    assert_eq!(forward.composition, reversed.composition);
     assert_eq!(
         reversed.input.source.capture_id,
         unsupported.source.manifest.capture_id
@@ -245,6 +259,8 @@ fn comparison_keeps_cli_roles_distinct_from_canonical_hypothesis_order() {
         keys,
         [
             "compare_with",
+            "composition",
+            "content_relation",
             "hypothesis",
             "input",
             "limitations",
@@ -268,6 +284,7 @@ fn comparison_keeps_cli_roles_distinct_from_canonical_hypothesis_order() {
         "compare  sha256:0000000000000000000000000000000000000000000000000000000000000000"
     ));
     assert!(human.contains("compare   not comparable / canonical right not observed"));
+    assert!(human.contains("content   different declared SHA-256 digest"));
 }
 
 #[test]

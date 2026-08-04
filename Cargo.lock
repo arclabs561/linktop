@@ -1332,9 +1332,9 @@ dependencies = [
 
 [[package]]
 name = "netbraid"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3e40060f61decdac92a75f5df2406519afc2f3e57a69fded9fa7fccecfaad0d"
+checksum = "2172b463e784c01afe37d4c33bba8375d5ce48edaf6462a9362d0b9e7cb71ce0"
 dependencies = [
  "libc",
  "serde",
