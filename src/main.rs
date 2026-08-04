@@ -34,7 +34,7 @@ use ratatui::backend::CrosstermBackend;
 #[command(
     name = "linktop",
     version,
-    about = "Terminal instrument for the host's current network context",
+    about = "Linktop shows how the host is connected and what changes",
     long_about = "Observe the default route, interface, radio, counters, and native neighbor cache without transmitting by default. Active next-hop, DNS, HTTPS, and public-egress probes are explicit."
 )]
 struct Cli {

@@ -2,7 +2,7 @@
 # https://github.com/repository-settings/app
 
 repository:
-  description: "Terminal instrument for the host's current network context"
+  description: "Linktop shows how the host is connected and what changes"
   private: false
   has_issues: true
   has_wiki: false
