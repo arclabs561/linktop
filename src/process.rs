@@ -123,7 +123,7 @@ mod tests {
     fn callback_does_not_postpone_the_child_deadline() {
         let started = Instant::now();
         let output = run_bounded_with(
-            Command::new("sh").args(["-c", "sleep 1"]),
+            Command::new("sleep").arg("1"),
             Duration::from_millis(20),
             || std::thread::sleep(Duration::from_millis(30)),
         )
