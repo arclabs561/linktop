@@ -84,6 +84,10 @@ HTTPS results. Calls and bulk transfer remain explicitly `not_tested` until
 their own measurements exist. Idle background reports only observed
 per-process traffic across the accounting window and never claims absolute
 idleness; no single readiness boolean may collapse missing prerequisites.
+The explicit speed experiment brackets the `iperf3` child with before,
+after-spawn, and after-exit gateway probes. It does not label the second probe
+"during" because a short transfer may finish before or during that probe. The
+final probe does not claim that the path recovered.
 
 ## Reproducible visual QA
 

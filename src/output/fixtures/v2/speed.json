@@ -1,0 +1,106 @@
+{
+  "schema": "linktop.speed_experiment.v2",
+  "producer": {
+    "name": "linktop",
+    "version": "0.1.3"
+  },
+  "subject": "speed",
+  "completed_at": "2026-07-26T20:00:10Z",
+  "acquisition": {
+    "policy": "active",
+    "lifetime": "bounded_experiment",
+    "started_at": "2026-07-26T20:00:00Z",
+    "elapsed_ms": 10250
+  },
+  "evidence": {
+    "tool": "iperf3",
+    "mode": "tcp",
+    "target": "192.0.2.20",
+    "port": 5201,
+    "duration_s": 10,
+    "gateway_latency": {
+      "before": {
+        "health": "ok",
+        "detail": "gateway before load complete",
+        "latency_ms": 12.0,
+        "metrics": {
+          "sent": 4,
+          "received": 3,
+          "lost": 1,
+          "loss_rate": 0.25,
+          "rtt_min_ms": 8.0,
+          "rtt_mean_ms": 12.0,
+          "rtt_p50_ms": 11.0,
+          "rtt_p95_ms": 17.0,
+          "rtt_p99_ms": 17.8,
+          "rtt_max_ms": 18.0,
+          "rtt_sample_variance_ms2": 26.0,
+          "rtt_sample_stddev_ms": 5.1,
+          "mean_abs_adjacent_rtt_delta_ms": 5.0,
+          "positive_adjacent_rtt_delta_p95_ms": 7.0,
+          "rtt_delta_from_min_p95_ms": 9.0,
+          "rtt_delta_from_min_max_ms": 10.0,
+          "adjacent_rtt_pairs": 2
+        }
+      },
+      "after_spawn": {
+        "health": "ok",
+        "detail": "gateway after spawn complete",
+        "latency_ms": 24.0,
+        "metrics": {
+          "sent": 4,
+          "received": 3,
+          "lost": 1,
+          "loss_rate": 0.25,
+          "rtt_min_ms": 8.0,
+          "rtt_mean_ms": 12.0,
+          "rtt_p50_ms": 11.0,
+          "rtt_p95_ms": 17.0,
+          "rtt_p99_ms": 17.8,
+          "rtt_max_ms": 18.0,
+          "rtt_sample_variance_ms2": 26.0,
+          "rtt_sample_stddev_ms": 5.1,
+          "mean_abs_adjacent_rtt_delta_ms": 5.0,
+          "positive_adjacent_rtt_delta_p95_ms": 7.0,
+          "rtt_delta_from_min_p95_ms": 9.0,
+          "rtt_delta_from_min_max_ms": 10.0,
+          "adjacent_rtt_pairs": 2
+        }
+      },
+      "after_exit": {
+        "health": "ok",
+        "detail": "gateway after exit complete",
+        "latency_ms": 14.0,
+        "metrics": {
+          "sent": 4,
+          "received": 3,
+          "lost": 1,
+          "loss_rate": 0.25,
+          "rtt_min_ms": 8.0,
+          "rtt_mean_ms": 12.0,
+          "rtt_p50_ms": 11.0,
+          "rtt_p95_ms": 17.0,
+          "rtt_p99_ms": 17.8,
+          "rtt_max_ms": 18.0,
+          "rtt_sample_variance_ms2": 26.0,
+          "rtt_sample_stddev_ms": 5.1,
+          "mean_abs_adjacent_rtt_delta_ms": 5.0,
+          "positive_adjacent_rtt_delta_p95_ms": 7.0,
+          "rtt_delta_from_min_p95_ms": 9.0,
+          "rtt_delta_from_min_max_ms": 10.0,
+          "adjacent_rtt_pairs": 2
+        }
+      },
+      "limitations": [
+        "the after-spawn probe does not prove overlap with a short-lived transfer",
+        "the after-exit probe does not establish recovery",
+        "gateway latency is not end-to-end transfer latency"
+      ]
+    },
+    "transfer": {
+      "sent_bits_per_second": 1000000.0,
+      "received_bits_per_second": 900000.0,
+      "retransmits": 1
+    }
+  }
+}

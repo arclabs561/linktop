@@ -15,7 +15,7 @@ use crate::model::{
 };
 
 pub const OBSERVATION_SCHEMA_V1: &str = "linktop.observation.v1";
-pub const SPEED_EXPERIMENT_SCHEMA_V1: &str = "linktop.speed_experiment.v1";
+pub const SPEED_EXPERIMENT_SCHEMA_V2: &str = "linktop.speed_experiment.v2";
 pub const LIVE_OBSERVATION_SCHEMA_V1: &str = "linktop.live_observation.v1";
 pub const READINESS_SCHEMA_V0: &str = "linktop.readiness.v0";
 pub const READINESS_WORKLOAD_SAMPLE_COUNT: usize = 3;
@@ -794,7 +794,7 @@ impl<E> SpeedExperimentDocument<E> {
 
     fn at(evidence: E, started_at: String, elapsed_ms: u64, completed_at: String) -> Self {
         Self {
-            schema: SPEED_EXPERIMENT_SCHEMA_V1,
+            schema: SPEED_EXPERIMENT_SCHEMA_V2,
             producer: Producer::LINKTOP,
             subject: "speed",
             completed_at,
@@ -835,7 +835,7 @@ mod tests {
         Address, EvidenceCoverage, NetworkConfiguration, PathStatus, ProbeKind, ProbeResult,
         ProcessTraffic, SnapshotProbe, SnapshotReport, WifiTelemetry, WorkloadSnapshot,
     };
-    use crate::speed::{LoadedLatency, SpeedReport, TransferSummary};
+    use crate::speed::{InterventionLatency, SpeedReport, TransferSummary};
 
     fn passive_summary(coverage: EvidenceCoverage) -> SnapshotSummary {
         SnapshotSummary {
@@ -1562,7 +1562,7 @@ mod tests {
         );
         let value = serde_json::to_value(document).unwrap();
 
-        assert_eq!(value["schema"], SPEED_EXPERIMENT_SCHEMA_V1);
+        assert_eq!(value["schema"], SPEED_EXPERIMENT_SCHEMA_V2);
         assert_eq!(value["producer"]["name"], "linktop");
         assert_eq!(value["subject"], "speed");
         assert_eq!(value["completed_at"], "2026-07-26T20:00:10Z");
@@ -2102,7 +2102,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_documents_match_exact_readable_golden_fixtures() {
+    fn versioned_documents_match_exact_readable_golden_fixtures() {
         let link = test_link();
         let peers = test_peers();
         let snapshot_summary = passive_summary(EvidenceCoverage::Partial);
@@ -2198,9 +2198,15 @@ mod tests {
             target: "192.0.2.20".into(),
             port: 5201,
             duration_s: 10,
-            gateway_latency: LoadedLatency {
-                baseline: Some(test_probe_result("gateway baseline complete", 12.0)),
-                loaded: Some(test_probe_result("gateway under load complete", 24.0)),
+            gateway_latency: InterventionLatency {
+                before: Some(test_probe_result("gateway before load complete", 12.0)),
+                after_spawn: Some(test_probe_result("gateway after spawn complete", 24.0)),
+                after_exit: Some(test_probe_result("gateway after exit complete", 14.0)),
+                limitations: [
+                    "the after-spawn probe does not prove overlap with a short-lived transfer",
+                    "the after-exit probe does not establish recovery",
+                    "gateway latency is not end-to-end transfer latency",
+                ],
             },
             transfer: TransferSummary {
                 sent_bits_per_second: Some(1_000_000.0),
@@ -2216,7 +2222,7 @@ mod tests {
         );
         assert_golden(
             &speed_document,
-            include_str!("output/fixtures/v1/speed.json"),
+            include_str!("output/fixtures/v2/speed.json"),
         );
     }
 }

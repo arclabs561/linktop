@@ -1,6 +1,5 @@
 use std::io;
 use std::process::Command;
-use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -16,14 +15,16 @@ pub struct SpeedReport {
     pub target: String,
     pub port: u16,
     pub duration_s: u64,
-    pub gateway_latency: LoadedLatency,
+    pub gateway_latency: InterventionLatency,
     pub transfer: TransferSummary,
 }
 
 #[derive(Debug, Serialize)]
-pub struct LoadedLatency {
-    pub baseline: Option<ProbeResult>,
-    pub loaded: Option<ProbeResult>,
+pub struct InterventionLatency {
+    pub before: Option<ProbeResult>,
+    pub after_spawn: Option<ProbeResult>,
+    pub after_exit: Option<ProbeResult>,
+    pub limitations: [&'static str; 3],
 }
 
 #[derive(Debug, Serialize)]
@@ -81,15 +82,9 @@ fn summarize_iperf_report(report: IperfReport, command_succeeded: bool) -> Resul
 
 pub fn run(target: &str, port: u16, duration: Duration) -> Result<SpeedReport> {
     let gateway = net::default_gateway();
-    let baseline = gateway
+    let before = gateway
         .as_deref()
         .map(|gateway| net::probe_gateway(Some(gateway), 5));
-    let loaded_gateway = gateway.clone();
-    let loaded = thread::spawn(move || {
-        loaded_gateway
-            .as_deref()
-            .map(|gateway| net::probe_gateway(Some(gateway), 5))
-    });
 
     let mut command = Command::new("iperf3");
     command.args([
@@ -101,17 +96,22 @@ pub fn run(target: &str, port: u16, duration: Duration) -> Result<SpeedReport> {
         "-t",
         &duration.as_secs().to_string(),
     ]);
-    let output = match process::run_bounded(&mut command, duration + Duration::from_secs(15)) {
-        Ok(Some(output)) => output,
-        Ok(None) => bail!("iperf3 exceeded its {}s deadline", duration.as_secs() + 15),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            bail!("iperf3 is required for an explicit load test")
-        }
-        Err(error) => return Err(error).context("run iperf3"),
-    };
-    let loaded = loaded
-        .join()
-        .map_err(|_| anyhow::anyhow!("loaded-latency worker panicked"))?;
+    let (output, after_spawn) =
+        match process::run_bounded_with(&mut command, duration + Duration::from_secs(15), || {
+            gateway
+                .as_deref()
+                .map(|gateway| net::probe_gateway(Some(gateway), 5))
+        }) {
+            Ok((Some(output), after_spawn)) => (output, after_spawn),
+            Ok((None, _)) => bail!("iperf3 exceeded its {}s deadline", duration.as_secs() + 15),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                bail!("iperf3 is required for an explicit load test")
+            }
+            Err(error) => return Err(error).context("run iperf3"),
+        };
+    let after_exit = gateway
+        .as_deref()
+        .map(|gateway| net::probe_gateway(Some(gateway), 5));
     let report = parse_iperf_json(&output.stdout, &String::from_utf8_lossy(&output.stderr))?;
     let transfer = summarize_iperf_report(report, output.status.success())?;
     Ok(SpeedReport {
@@ -120,7 +120,16 @@ pub fn run(target: &str, port: u16, duration: Duration) -> Result<SpeedReport> {
         target: target.into(),
         port,
         duration_s: duration.as_secs(),
-        gateway_latency: LoadedLatency { baseline, loaded },
+        gateway_latency: InterventionLatency {
+            before,
+            after_spawn,
+            after_exit,
+            limitations: [
+                "the after-spawn probe does not prove overlap with a short-lived transfer",
+                "the after-exit probe does not establish recovery",
+                "gateway latency is not end-to-end transfer latency",
+            ],
+        },
         transfer,
     })
 }

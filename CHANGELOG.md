@@ -9,6 +9,12 @@ one version.
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced the two-point speed report with a versioned before/after-spawn/
+  after-exit gateway-latency experiment. The contract does not call the second
+  probe "during" or treat the final probe as proof of recovery.
+
 ## [0.1.3] - 2026-08-03
 
 ### Added

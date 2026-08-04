@@ -90,7 +90,10 @@ measurements. Idle-background status uses three bounded process-accounting
 samples; it does not claim that the host is absolutely idle.
 
 `linktop speed HOST` requires a local `iperf3` binary and a reachable iperf3
-server selected by the operator.
+server selected by the operator. It measures gateway latency before `iperf3`,
+after the child is spawned, and after exit. The after-spawn probe is not labeled
+"during" because a short transfer may finish first. The after-exit probe is not
+a recovery claim.
 
 ## Saved evidence
 

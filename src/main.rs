@@ -145,7 +145,7 @@ enum Command {
         #[command(subcommand)]
         command: capsule::Command,
     },
-    /// Run an explicit bounded iperf3 TCP test with gateway latency under load.
+    /// Run an explicit bounded iperf3 TCP test with bracketing gateway latency.
     Speed {
         /// iperf3 server to test.
         host: String,
@@ -1081,25 +1081,33 @@ fn speed(host: &str, port: u16, duration: Duration, json: bool) -> Result<()> {
         "received {}",
         speed::human_rate(report.transfer.received_bits_per_second)
     );
-    if let (Some(baseline), Some(loaded)) = (
-        &report.gateway_latency.baseline,
-        &report.gateway_latency.loaded,
+    if let (Some(before), Some(after_spawn), Some(after_exit)) = (
+        &report.gateway_latency.before,
+        &report.gateway_latency.after_spawn,
+        &report.gateway_latency.after_exit,
     ) {
         println!(
-            "gateway  baseline p95 {}  loaded p95 {}  loaded {}",
+            "gateway  before p95 {}  after-spawn p95 {}  after-exit p95 {}  after-spawn {}  after-exit {}",
             human_ms(
-                baseline
+                before
                     .metrics
                     .as_ref()
                     .and_then(|metrics| metrics.rtt_p95_ms)
             ),
             human_ms(
-                loaded
+                after_spawn
                     .metrics
                     .as_ref()
                     .and_then(|metrics| metrics.rtt_p95_ms)
             ),
-            loaded.health.label()
+            human_ms(
+                after_exit
+                    .metrics
+                    .as_ref()
+                    .and_then(|metrics| metrics.rtt_p95_ms)
+            ),
+            after_spawn.health.label(),
+            after_exit.health.label()
         );
     }
     Ok(())
