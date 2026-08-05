@@ -174,6 +174,88 @@ fn identical_saved_evidence_candidates_corroborate_deterministically() {
 }
 
 #[test]
+fn comparison_claim_ledger_renders_deterministic_provenance() {
+    let triage = load(fixture_path(), INPUT.len() as u64, None).unwrap();
+    let report = compare_triage(&triage, &triage).unwrap();
+
+    let first = render_comparison_human(&report);
+    let second = render_comparison_human(&report);
+    assert_eq!(first, second);
+    assert_eq!(
+        rendered_claim_ledger(&first),
+        concat!(
+            "claim 1   family netbraid.content_relation_hypothesis_set.v0\n",
+            "  reducer  netbraid.content_relation.sha256.v0\n",
+            "  alternative sha256_match / supported\n",
+            "  alternative sha256_mismatch / contradicted\n",
+            "  alternative unknown / contradicted\n",
+            "  input    left_content_evidence\n",
+            "    source schema  netbraid.content_digest_evidence.v0\n",
+            "    source id      sha256:0000000000000000000000000000000000000000000000000000000000000000:artifact-content\n",
+            "    content digest sha256:a1c73bcee81bb893af3010da4a86d31ea7c7b501aee9404ec71f89fac2c4ee2d\n",
+            "  input    right_content_evidence\n",
+            "    source schema  netbraid.content_digest_evidence.v0\n",
+            "    source id      sha256:0000000000000000000000000000000000000000000000000000000000000000:artifact-content\n",
+            "    content digest sha256:a1c73bcee81bb893af3010da4a86d31ea7c7b501aee9404ec71f89fac2c4ee2d\n",
+            "claim 2   family netmon.saved_pcap_fingerprint_hypothesis_set.v0\n",
+            "  reducer  netbraid.saved_pcap_fingerprint.packet_shape.v0\n",
+            "  alternative same_packet_shape / supported\n",
+            "  alternative different_packet_shape / contradicted\n",
+            "  alternative unknown / contradicted\n",
+            "  input    left_candidate\n",
+            "    source schema  netmon.saved_pcap_fingerprint_candidate.v0\n",
+            "    source id      sha256:0000000000000000000000000000000000000000000000000000000000000000\n",
+            "    content digest sha256:8663ab0e5d12d6a3abda522416fa0f634f4815f452151c0882859c77fd6e9d4e\n",
+            "  input    right_candidate\n",
+            "    source schema  netmon.saved_pcap_fingerprint_candidate.v0\n",
+            "    source id      sha256:0000000000000000000000000000000000000000000000000000000000000000\n",
+            "    content digest sha256:8663ab0e5d12d6a3abda522416fa0f634f4815f452151c0882859c77fd6e9d4e\n",
+        )
+    );
+}
+
+#[test]
+fn comparison_claim_ledger_keeps_simultaneous_distinct_family_outcomes() {
+    let baseline = load(fixture_path(), INPUT.len() as u64, None).unwrap();
+    let mut different = baseline.clone();
+    let SavedPcapConversationTriageV0::Observed { conversation, .. } =
+        &mut different.top_capture_conversation
+    else {
+        panic!("the positive fixture must retain an observed conversation");
+    };
+    conversation.total_original_frame_octets += 1;
+
+    let report = compare_triage(&baseline, &different).unwrap();
+    let human = render_comparison_human(&report);
+    let ledger = rendered_claim_ledger(&human);
+
+    assert!(ledger.contains(
+        "claim 1   family netbraid.content_relation_hypothesis_set.v0\n  reducer  netbraid.content_relation.sha256.v0\n  alternative sha256_match / supported"
+    ));
+    assert!(ledger.contains(
+        "claim 2   family netmon.saved_pcap_fingerprint_hypothesis_set.v0\n  reducer  netbraid.saved_pcap_fingerprint.packet_shape.v0\n  alternative same_packet_shape / contradicted\n  alternative different_packet_shape / supported"
+    ));
+}
+
+#[test]
+fn comparison_claim_ledger_renders_unknown_and_underdetermined_alternatives() {
+    let observed = load(fixture_path(), INPUT.len() as u64, None).unwrap();
+    let unsupported = load(
+        unsupported_fixture_path(),
+        UNSUPPORTED_INPUT.len() as u64,
+        None,
+    )
+    .unwrap();
+
+    let report = compare_triage(&observed, &unsupported).unwrap();
+    let human = render_comparison_human(&report);
+
+    assert!(rendered_claim_ledger(&human).contains(
+        "claim 2   family netmon.saved_pcap_fingerprint_hypothesis_set.v0\n  reducer  netbraid.saved_pcap_fingerprint.packet_shape.v0\n  alternative same_packet_shape / underdetermined\n  alternative different_packet_shape / underdetermined\n  alternative unknown / supported"
+    ));
+}
+
+#[test]
 fn distinct_observed_packet_shape_candidates_conflict_without_identity_claims() {
     let baseline = load(fixture_path(), INPUT.len() as u64, None).unwrap();
     let mut different = baseline.clone();
@@ -659,6 +741,16 @@ fn serialize_review_records(
 fn push_jsonl_record(jsonl: &mut String, record: &impl serde::Serialize) {
     jsonl.push_str(&serde_json::to_string(record).unwrap());
     jsonl.push('\n');
+}
+
+fn rendered_claim_ledger(human: &str) -> &str {
+    let start = human
+        .find("claim 1   family ")
+        .expect("comparison output must contain a first claim");
+    let end = human
+        .find("classify  ")
+        .expect("comparison output must retain its classification boundary");
+    &human[start..end]
 }
 
 fn fixture_path() -> &'static Path {

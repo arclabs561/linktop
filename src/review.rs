@@ -262,12 +262,51 @@ fn render_comparison_human(report: &SavedPcapComparisonReportV1) -> String {
         report.composition.claims().len()
     )
     .expect("writing to a String cannot fail");
+    render_claim_ledger(&mut output, &report.composition);
     writeln!(
         output,
         "classify  declared-content and packet-shape comparisons only; not same event, source, device, person, place, service, application, or intent identity"
     )
     .expect("writing to a String cannot fail");
     output
+}
+
+fn render_claim_ledger(output: &mut String, composition: &FiniteHypothesisCompositionV0) {
+    for (index, claim) in composition.claims().iter().enumerate() {
+        let projection = claim.projection();
+        writeln!(
+            output,
+            "claim {}   family {}",
+            index + 1,
+            projection.family_schema()
+        )
+        .expect("writing to a String cannot fail");
+        writeln!(output, "  reducer  {}", projection.reducer())
+            .expect("writing to a String cannot fail");
+        for alternative in projection.alternatives() {
+            writeln!(
+                output,
+                "  alternative {} / {}",
+                alternative.role(),
+                enum_label(&alternative.disposition())
+            )
+            .expect("writing to a String cannot fail");
+        }
+        for input in claim.inputs() {
+            writeln!(output, "  input    {}", input.role())
+                .expect("writing to a String cannot fail");
+            writeln!(output, "    source schema  {}", input.source_schema())
+                .expect("writing to a String cannot fail");
+            writeln!(output, "    source id      {}", input.source_id())
+                .expect("writing to a String cannot fail");
+            writeln!(
+                output,
+                "    content digest sha256:{}",
+                input.content_sha256()
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
 }
 
 fn render_candidate(output: &mut String, label: &str, candidate: &SavedPcapFingerprintCandidateV0) {
