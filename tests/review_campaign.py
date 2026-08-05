@@ -31,10 +31,14 @@ REVIEW_TIMEOUT_SECONDS = 30
 MANIFEST_SCHEMA = "linktop.review_campaign.v1"
 OUTPUT_SCHEMA = "linktop.review_campaign_eval.v1"
 TRIAGE_SCHEMAS = frozenset({"netmon.saved_pcap_triage.v1"})
-COMPARISON_SCHEMAS = frozenset({"linktop.saved_pcap_comparison.v1"})
+COMPARISON_SCHEMAS = frozenset({"linktop.saved_pcap_comparison.v2"})
 HYPOTHESIS_SCHEMAS = frozenset({"netmon.saved_pcap_fingerprint_hypothesis_set.v0"})
 CONTENT_RELATION_SCHEMAS = frozenset({"netbraid.content_relation_hypothesis_set.v0"})
+QUALIFIED_COMPOSITION_SCHEMAS = frozenset(
+    {"netbraid.provenance_qualified_finite_hypothesis_composition.v0"}
+)
 COMPOSITION_SCHEMAS = frozenset({"netbraid.finite_hypothesis_composition.v0"})
+DEPENDENCE_STATUSES = frozenset({"declared_shared_lineage", "no_shared_ancestry_found"})
 COMPOSITION_FAMILIES = (
     "netbraid.content_relation_hypothesis_set.v0",
     "netmon.saved_pcap_fingerprint_hypothesis_set.v0",
@@ -62,8 +66,10 @@ COMPARISON_EXPECTED_FIELDS = (
     "hypothesis_schema",
     "content_relation_schema",
     "content_basis",
+    "qualified_composition_schema",
     "composition_schema",
     "composition_claim_count",
+    "dependence",
     "basis",
     "reason",
     "input_status",
@@ -78,7 +84,9 @@ COMPARISON_VOCABULARY = {
     "hypothesis_schema": HYPOTHESIS_SCHEMAS,
     "content_relation_schema": CONTENT_RELATION_SCHEMAS,
     "content_basis": frozenset({"sha256_equal", "sha256_different"}),
+    "qualified_composition_schema": QUALIFIED_COMPOSITION_SCHEMAS,
     "composition_schema": COMPOSITION_SCHEMAS,
+    "dependence": DEPENDENCE_STATUSES,
     "basis": frozenset({"corroborated", "conflicting", "not_comparable"}),
     "reason": frozenset(
         {
@@ -447,6 +455,200 @@ def extract_triage_statuses(document: Any, case: int) -> dict[str, str]:
     return statuses
 
 
+def _canonical_claim_key(claim: Any, case: int) -> dict[str, Any]:
+    if not isinstance(claim, dict) or set(claim) != {"schema", "projection", "inputs"}:
+        raise CampaignError("malformed", "review_coherence", case)
+    projection = claim["projection"]
+    inputs = claim["inputs"]
+    if (
+        claim["schema"] != "netbraid.finite_hypothesis_claim.v0"
+        or not isinstance(projection, dict)
+        or set(projection) != {"schema", "family_schema", "reducer", "alternatives"}
+        or projection["schema"] != "netbraid.finite_hypothesis_projection.v0"
+        or not isinstance(projection["family_schema"], str)
+        or not isinstance(projection["reducer"], str)
+        or not isinstance(projection["alternatives"], list)
+        or not isinstance(inputs, list)
+        or len(inputs) != 2
+    ):
+        raise CampaignError("malformed", "review_coherence", case)
+    for item in inputs:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"role", "source_schema", "source_id", "content_sha256"}
+            or not all(isinstance(item[field], str) for field in item)
+            or not SHA256_RE.fullmatch(item["content_sha256"])
+        ):
+            raise CampaignError("malformed", "review_coherence", case)
+    if [item["role"] for item in inputs] != sorted(item["role"] for item in inputs):
+        raise CampaignError("malformed", "review_coherence", case)
+    return {
+        "family_schema": projection["family_schema"],
+        "reducer": projection["reducer"],
+        "inputs": inputs,
+    }
+
+
+def _artifact_ref_key(reference: Any, case: int) -> str:
+    if (
+        not isinstance(reference, dict)
+        or set(reference) != {"source_schema", "source_id", "content_sha256"}
+        or not all(isinstance(reference[field], str) for field in reference)
+        or not SHA256_RE.fullmatch(reference["content_sha256"])
+    ):
+        raise CampaignError("malformed", "review_coherence", case)
+    return json.dumps(reference, sort_keys=True, separators=(",", ":"))
+
+
+def _lineage_root_key(root: Any, case: int) -> str:
+    key = _artifact_ref_key(root, case)
+    if (
+        root["source_schema"] != "netmon.capture_manifest.v0"
+        or not CAPTURE_ID_RE.fullmatch(root["source_id"])
+        or root["content_sha256"] != root["source_id"].removeprefix("sha256:")
+    ):
+        raise CampaignError("malformed", "review_coherence", case)
+    return key
+
+
+def _validate_qualified_composition(
+    qualified: Any,
+    canonical_capture_ids: tuple[str, str],
+    case: int,
+) -> tuple[tuple[str, ...], str]:
+    if not isinstance(qualified, dict) or set(qualified) != {
+        "schema",
+        "composition",
+        "provenance_graph",
+        "claim_lineage_pairs",
+    }:
+        raise CampaignError("malformed", "review_coherence", case)
+    canonical = qualified["composition"]
+    if not isinstance(canonical, dict) or set(canonical) != {"schema", "claims"}:
+        raise CampaignError("malformed", "review_coherence", case)
+    claims = canonical["claims"]
+    graph = qualified["provenance_graph"]
+    lineage_pairs = qualified["claim_lineage_pairs"]
+    if (
+        not isinstance(claims, list)
+        or len(claims) != 2
+        or not isinstance(graph, dict)
+        or set(graph) != {"schema", "records"}
+        or graph["schema"] != "netbraid.provenance_graph.v0"
+        or not isinstance(graph["records"], list)
+        or not isinstance(lineage_pairs, list)
+        or len(lineage_pairs) != 1
+    ):
+        raise CampaignError("malformed", "review_coherence", case)
+
+    claim_keys = [_canonical_claim_key(claim, case) for claim in claims]
+    families = tuple(key["family_schema"] for key in claim_keys)
+    expected_outputs: dict[str, tuple[str, str]] = {}
+    family_contracts = {
+        "netbraid.content_relation_hypothesis_set.v0": (
+            "netbraid.content_relation.sha256.v0",
+            (
+                ("left_content_evidence", "netbraid.content_digest_evidence.v0"),
+                ("right_content_evidence", "netbraid.content_digest_evidence.v0"),
+            ),
+            "linktop:review:artifact-content",
+        ),
+        "netmon.saved_pcap_fingerprint_hypothesis_set.v0": (
+            "netbraid.saved_pcap_fingerprint.packet_shape.v0",
+            (
+                ("left_candidate", "netmon.saved_pcap_fingerprint_candidate.v0"),
+                ("right_candidate", "netmon.saved_pcap_fingerprint_candidate.v0"),
+            ),
+            "netbraid:project-saved-pcap-fingerprint-v0",
+        ),
+    }
+    for claim_key in claim_keys:
+        family = claim_key["family_schema"]
+        contract = family_contracts.get(family)
+        if contract is None:
+            raise CampaignError("malformed", "review_coherence", case)
+        reducer, expected_inputs, producer_id = contract
+        observed_inputs = tuple(
+            (claim_input["role"], claim_input["source_schema"])
+            for claim_input in claim_key["inputs"]
+        )
+        if claim_key["reducer"] != reducer or observed_inputs != expected_inputs:
+            raise CampaignError("malformed", "review_coherence", case)
+        for claim_input in claim_key["inputs"]:
+            expected_capture_id = canonical_capture_ids[
+                0 if claim_input["role"].startswith("left_") else 1
+            ]
+            output = {key: value for key, value in claim_input.items() if key != "role"}
+            output_key = _artifact_ref_key(output, case)
+            if output_key in expected_outputs:
+                raise CampaignError("malformed", "review_coherence", case)
+            expected_outputs[output_key] = (expected_capture_id, producer_id)
+
+    observed_outputs = set()
+    for record in graph["records"]:
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"schema", "output", "producer", "activity", "inputs"}
+            or record["schema"] != "netbraid.provenance_record.v0"
+            or not isinstance(record["producer"], dict)
+            or set(record["producer"]) != {"producer_id", "kind"}
+            or record["producer"].get("kind") != "software"
+            or not isinstance(record["activity"], dict)
+            or set(record["activity"]) != {"activity_id", "kind"}
+            or record["activity"].get("kind") != "deterministic_derivation"
+            or not isinstance(record["inputs"], list)
+            or len(record["inputs"]) != 1
+        ):
+            raise CampaignError("malformed", "review_coherence", case)
+        output_key = _artifact_ref_key(record["output"], case)
+        expected = expected_outputs.get(output_key)
+        if expected is None or output_key in observed_outputs:
+            raise CampaignError("malformed", "review_coherence", case)
+        expected_capture_id, producer_id = expected
+        _lineage_root_key(record["inputs"][0], case)
+        if (
+            record["producer"]["producer_id"] != producer_id
+            or record["activity"]
+            != {"activity_id": producer_id, "kind": "deterministic_derivation"}
+            or record["inputs"][0]["source_id"] != expected_capture_id
+        ):
+            raise CampaignError("malformed", "review_coherence", case)
+        observed_outputs.add(output_key)
+    if observed_outputs != set(expected_outputs):
+        raise CampaignError("malformed", "review_coherence", case)
+
+    pair = lineage_pairs[0]
+    if (
+        not isinstance(pair, dict)
+        or set(pair)
+        != {"left_claim_index", "right_claim_index", "status", "input_relations"}
+        or pair["left_claim_index"] != 0
+        or pair["right_claim_index"] != 1
+        or pair["status"] != "declared_shared_lineage"
+        or not isinstance(pair["input_relations"], list)
+        or len(pair["input_relations"]) != 2
+    ):
+        raise CampaignError("malformed", "review_coherence", case)
+    observed_relation_indices = set()
+    for relation in pair["input_relations"]:
+        if (
+            not isinstance(relation, dict)
+            or set(relation) != {"left_input_index", "right_input_index", "comparison"}
+            or relation.get("comparison")
+            != {
+                "content": "different_content_digest",
+                "lineage": "shared_ancestor",
+            }
+        ):
+            raise CampaignError("malformed", "review_coherence", case)
+        observed_relation_indices.add(
+            (relation["left_input_index"], relation["right_input_index"])
+        )
+    if observed_relation_indices != {(0, 0), (1, 1)}:
+        raise CampaignError("malformed", "review_coherence", case)
+    return families, pair["status"]
+
+
 def extract_comparison_statuses(document: Any, case: int) -> dict[str, Any]:
     if not isinstance(document, dict) or set(document) != {
         "schema",
@@ -460,25 +662,33 @@ def extract_comparison_statuses(document: Any, case: int) -> dict[str, Any]:
         raise CampaignError("malformed", "review_shape", case)
     try:
         basis = document["hypothesis"]["basis"]
-        claims = document["composition"]["claims"]
-        composition_families = tuple(
-            claim["projection"]["family_schema"] for claim in claims
+        qualified_composition = document["composition"]
+        canonical_composition = qualified_composition["composition"]
+        claims = canonical_composition["claims"]
+        canonical_capture_ids = (
+            document["hypothesis"]["left"]["capture_id"],
+            document["hypothesis"]["right"]["capture_id"],
+        )
+        composition_families, dependence_status = _validate_qualified_composition(
+            qualified_composition, canonical_capture_ids, case
         )
         statuses = {
             "schema": document["schema"],
             "hypothesis_schema": document["hypothesis"]["schema"],
             "content_relation_schema": document["content_relation"]["schema"],
             "content_basis": document["content_relation"]["basis"]["basis"],
-            "composition_schema": document["composition"]["schema"],
+            "qualified_composition_schema": qualified_composition["schema"],
+            "composition_schema": canonical_composition["schema"],
             "composition_claim_count": len(claims),
+            "dependence": dependence_status,
             "basis": basis["status"],
             "reason": basis.get("reason", "none"),
             "input_status": document["input"]["status"]["status"],
             "compare_with_status": document["compare_with"]["status"]["status"],
             "input_capture_id": document["input"]["source"]["capture_id"],
             "compare_with_capture_id": document["compare_with"]["source"]["capture_id"],
-            "canonical_left_capture_id": document["hypothesis"]["left"]["capture_id"],
-            "canonical_right_capture_id": document["hypothesis"]["right"]["capture_id"],
+            "canonical_left_capture_id": canonical_capture_ids[0],
+            "canonical_right_capture_id": canonical_capture_ids[1],
         }
     except (KeyError, TypeError, AttributeError):
         raise CampaignError("malformed", "review_shape", case) from None
@@ -487,7 +697,9 @@ def extract_comparison_statuses(document: Any, case: int) -> dict[str, Any]:
         "hypothesis_schema",
         "content_relation_schema",
         "content_basis",
+        "qualified_composition_schema",
         "composition_schema",
+        "dependence",
         "basis",
         "reason",
         "input_status",
@@ -753,7 +965,7 @@ class EvaluatorSelfTests(unittest.TestCase):
                     "compare_with_sha256": compare_with_sha256
                     or hashlib.sha256(compare_with_path.read_bytes()).hexdigest(),
                     "expect": {
-                        "schema": "linktop.saved_pcap_comparison.v1",
+                        "schema": "linktop.saved_pcap_comparison.v2",
                         "hypothesis_schema": (
                             "netmon.saved_pcap_fingerprint_hypothesis_set.v0"
                         ),
@@ -761,10 +973,15 @@ class EvaluatorSelfTests(unittest.TestCase):
                             "netbraid.content_relation_hypothesis_set.v0"
                         ),
                         "content_basis": "sha256_different",
+                        "qualified_composition_schema": (
+                            "netbraid.provenance_qualified_finite_hypothesis_"
+                            "composition.v0"
+                        ),
                         "composition_schema": (
                             "netbraid.finite_hypothesis_composition.v0"
                         ),
                         "composition_claim_count": 2,
+                        "dependence": "declared_shared_lineage",
                         "basis": "not_comparable",
                         "reason": "right_not_observed",
                         "input_status": "unsupported",
@@ -796,8 +1013,58 @@ class EvaluatorSelfTests(unittest.TestCase):
             f"compare_id = {compare_capture_id!r}\n"
             "if mode == 'swap':\n"
             "    input_id, compare_id = compare_id, input_id\n"
+            f"left_id = {compare_capture_id!r}\n"
+            f"right_id = {input_capture_id!r}\n"
+            "left_root = {'source_schema': 'netmon.capture_manifest.v0', "
+            "'source_id': left_id, 'content_sha256': '0' * 64}\n"
+            "right_root = {'source_schema': 'netmon.capture_manifest.v0', "
+            "'source_id': right_id, 'content_sha256': '2' * 64}\n"
+            "content_inputs = [\n"
+            "    {'role': 'left_content_evidence', 'source_schema': "
+            "'netbraid.content_digest_evidence.v0', 'source_id': "
+            "left_id + ':artifact-content', 'content_sha256': 'a' * 64},\n"
+            "    {'role': 'right_content_evidence', 'source_schema': "
+            "'netbraid.content_digest_evidence.v0', 'source_id': "
+            "right_id + ':artifact-content', 'content_sha256': 'b' * 64},\n"
+            "]\n"
+            "packet_inputs = [\n"
+            "    {'role': 'left_candidate', 'source_schema': "
+            "'netmon.saved_pcap_fingerprint_candidate.v0', 'source_id': "
+            "left_id, 'content_sha256': 'c' * 64},\n"
+            "    {'role': 'right_candidate', 'source_schema': "
+            "'netmon.saved_pcap_fingerprint_candidate.v0', 'source_id': "
+            "right_id, 'content_sha256': 'd' * 64},\n"
+            "]\n"
+            "content_key = {'family_schema': "
+            "'netbraid.content_relation_hypothesis_set.v0', 'reducer': "
+            "'netbraid.content_relation.sha256.v0', 'inputs': content_inputs}\n"
+            "packet_key = {'family_schema': "
+            "'netmon.saved_pcap_fingerprint_hypothesis_set.v0', 'reducer': "
+            "'netbraid.saved_pcap_fingerprint.packet_shape.v0', "
+            "'inputs': packet_inputs}\n"
+            "records = []\n"
+            "for output, root, producer_id in [\n"
+            "    (content_inputs[0], left_root, "
+            "'linktop:review:artifact-content'),\n"
+            "    (content_inputs[1], right_root, "
+            "'linktop:review:artifact-content'),\n"
+            "    (packet_inputs[0], left_root, "
+            "'netbraid:project-saved-pcap-fingerprint-v0'),\n"
+            "    (packet_inputs[1], right_root, "
+            "'netbraid:project-saved-pcap-fingerprint-v0'),\n"
+            "]:\n"
+            "    records.append({\n"
+            "        'schema': 'netbraid.provenance_record.v0',\n"
+            "        'output': {key: value for key, value in output.items() "
+            "if key != 'role'},\n"
+            "        'producer': {'producer_id': producer_id, "
+            "'kind': 'software'},\n"
+            "        'activity': {'activity_id': producer_id, "
+            "'kind': 'deterministic_derivation'},\n"
+            "        'inputs': [root],\n"
+            "    })\n"
             "payload = {\n"
-            "    'schema': 'linktop.saved_pcap_comparison.v1',\n"
+            "    'schema': 'linktop.saved_pcap_comparison.v2',\n"
             "    'input': {'source': {'capture_id': input_id}, "
             "'status': {'status': 'unsupported'}},\n"
             "    'compare_with': {'source': {'capture_id': compare_id}, "
@@ -818,18 +1085,48 @@ class EvaluatorSelfTests(unittest.TestCase):
             "        'reference': {'hypothesis': 'sha256_mismatch'},\n"
             "    },\n"
             "    'composition': {\n"
-            "        'schema': 'netbraid.finite_hypothesis_composition.v0',\n"
-            "        'claims': [\n"
-            "            {'projection': {'family_schema': "
-            "'netbraid.content_relation_hypothesis_set.v0'}},\n"
-            "            {'projection': {'family_schema': "
-            "'netmon.saved_pcap_fingerprint_hypothesis_set.v0'}},\n"
-            "        ],\n"
+            "        'schema': "
+            "'netbraid.provenance_qualified_finite_hypothesis_composition.v0',\n"
+            "        'composition': {\n"
+            "            'schema': 'netbraid.finite_hypothesis_composition.v0',\n"
+            "            'claims': [\n"
+            "                {'schema': 'netbraid.finite_hypothesis_claim.v0', "
+            "'projection': {'schema': "
+            "'netbraid.finite_hypothesis_projection.v0', 'family_schema': "
+            "content_key['family_schema'], 'reducer': content_key['reducer'], "
+            "'alternatives': []}, 'inputs': content_inputs},\n"
+            "                {'schema': 'netbraid.finite_hypothesis_claim.v0', "
+            "'projection': {'schema': "
+            "'netbraid.finite_hypothesis_projection.v0', 'family_schema': "
+            "packet_key['family_schema'], 'reducer': packet_key['reducer'], "
+            "'alternatives': []}, 'inputs': packet_inputs},\n"
+            "            ],\n"
+            "        },\n"
+            "        'provenance_graph': {\n"
+            "            'schema': 'netbraid.provenance_graph.v0',\n"
+            "            'records': records,\n"
+            "        },\n"
+            "        'claim_lineage_pairs': [{\n"
+            "            'left_claim_index': 0, 'right_claim_index': 1,\n"
+            "            'status': 'declared_shared_lineage',\n"
+            "            'input_relations': [\n"
+            "                {'left_input_index': 0, 'right_input_index': 0, "
+            "'comparison': {'content': 'different_content_digest', "
+            "'lineage': 'shared_ancestor'}},\n"
+            "                {'left_input_index': 1, 'right_input_index': 1, "
+            "'comparison': {'content': 'different_content_digest', "
+            "'lineage': 'shared_ancestor'}},\n"
+            "            ],\n"
+            "        }],\n"
             "    },\n"
             "    'limitations': [],\n"
             "}\n"
             "if mode == 'bad_composition':\n"
-            "    payload['composition']['claims'].pop()\n"
+            "    payload['composition']['composition']['claims'].pop()\n"
+            "if mode == 'empty_lineage_pairs':\n"
+            "    payload['composition']['claim_lineage_pairs'].clear()\n"
+            "if mode == 'missing_provenance_record':\n"
+            "    payload['composition']['provenance_graph']['records'].pop()\n"
             "if mode == 'bad_content_reference':\n"
             "    payload['content_relation']['reference'] = "
             "{'hypothesis': 'sha256_match'}\n"
@@ -902,7 +1199,12 @@ class EvaluatorSelfTests(unittest.TestCase):
             )
 
     def test_comparison_rejects_incoherent_composition_and_content_claim(self) -> None:
-        for mode in ("bad_composition", "bad_content_reference"):
+        for mode in (
+            "bad_composition",
+            "bad_content_reference",
+            "empty_lineage_pairs",
+            "missing_provenance_record",
+        ):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 manifest, binary = self.make_comparison_campaign(root, mode=mode)

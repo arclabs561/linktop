@@ -7,8 +7,11 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use netbraid::infer::{
     ContentDigestEvidenceV0, ContentRelationBasisV0, ContentRelationHypothesisSetV0,
-    ContentSha256V0, FiniteHypothesisCompositionV0, ProjectFiniteHypothesisClaimV0,
-    assess_content_relation_v0,
+    ContentSha256V0, FiniteHypothesisClaimV0, FiniteHypothesisCompositionV0,
+    ProjectFiniteHypothesisClaimV0, ProvenanceActivityKindV0, ProvenanceActivityV0,
+    ProvenanceArtifactRefV0, ProvenanceGraphV0, ProvenanceProducerKindV0, ProvenanceProducerV0,
+    ProvenanceQualifiedClaimLineageStatusV0, ProvenanceQualifiedFiniteHypothesisCompositionV0,
+    ProvenanceRecordV0, assess_content_relation_v0,
 };
 use netbraid::replay::{
     SavedPcapClaimScopeV0, SavedPcapConversationDirectionV0, SavedPcapConversationExclusionCountV0,
@@ -25,16 +28,16 @@ use serde::Serialize;
 
 const MIB: u64 = 1024 * 1024;
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
-const COMPARISON_SCHEMA: &str = "linktop.saved_pcap_comparison.v1";
+const COMPARISON_SCHEMA: &str = "linktop.saved_pcap_comparison.v2";
 
 #[derive(Serialize)]
-struct SavedPcapComparisonReportV1 {
+struct SavedPcapComparisonReportV2 {
     schema: &'static str,
     input: SavedPcapFingerprintCandidateV0,
     compare_with: SavedPcapFingerprintCandidateV0,
     hypothesis: SavedPcapFingerprintHypothesisSetV0,
     content_relation: ContentRelationHypothesisSetV0,
-    composition: FiniteHypothesisCompositionV0,
+    composition: ProvenanceQualifiedFiniteHypothesisCompositionV0,
     limitations: Vec<&'static str>,
 }
 
@@ -135,7 +138,9 @@ pub fn run(
 fn compare_triage(
     input: &SavedPcapTriageV1,
     compare_with: &SavedPcapTriageV1,
-) -> Result<SavedPcapComparisonReportV1> {
+) -> Result<SavedPcapComparisonReportV2> {
+    let input_root = project_artifact_evidence_root(input)?;
+    let compare_root = project_artifact_evidence_root(compare_with)?;
     let input_content = project_artifact_content_evidence(input)?;
     let compare_content = project_artifact_content_evidence(compare_with)?;
     let content_relation = assess_content_relation_v0(&input_content, &compare_content)
@@ -150,10 +155,21 @@ fn compare_triage(
     let packet_shape_claim = hypothesis
         .project_finite_hypothesis_claim_v0((&input, &compare_with))
         .context("projecting the packet-shape hypothesis claim")?;
-    let composition =
+    let provenance_graph = project_comparison_provenance(
+        &content_claim,
+        &packet_shape_claim,
+        &input_root,
+        &compare_root,
+    )?;
+    let canonical_composition =
         FiniteHypothesisCompositionV0::try_new(vec![content_claim, packet_shape_claim])
-            .context("composing independent saved-capture hypothesis claims")?;
-    Ok(SavedPcapComparisonReportV1 {
+            .context("composing saved-capture hypothesis claims")?;
+    let composition = ProvenanceQualifiedFiniteHypothesisCompositionV0::try_new(
+        canonical_composition,
+        provenance_graph,
+    )
+    .context("qualifying saved-capture hypothesis claims by declared provenance")?;
+    Ok(SavedPcapComparisonReportV2 {
         schema: COMPARISON_SCHEMA,
         input,
         compare_with,
@@ -164,9 +180,108 @@ fn compare_triage(
             "packet-shape corroboration is not device, person, place, service, application, or intent identity",
             "capture-wide candidates are not sessionized and do not establish same event or same source",
             "endpoint addresses and ports are excluded from the comparison digest",
-            "content-digest and packet-shape claims remain independent; co-presence does not merge subjects, vote, or establish identity",
+            "content-digest and packet-shape claims retain explicit capture-artifact lineage; co-presence does not merge subjects, vote, or establish identity",
         ],
     })
+}
+
+fn project_artifact_evidence_root(triage: &SavedPcapTriageV1) -> Result<ProvenanceArtifactRefV0> {
+    let manifest = &triage.source.manifest;
+    let digest = manifest
+        .artifact
+        .content_sha256
+        .strip_prefix("sha256:")
+        .context("capture artifact digest must use the sha256: prefix")?;
+    let digest = ContentSha256V0::try_new(digest)
+        .context("capture artifact digest must contain canonical lowercase SHA-256")?;
+    ProvenanceArtifactRefV0::try_new(&manifest.schema, &manifest.capture_id, digest)
+        .context("projecting capture artifact provenance root")
+}
+
+fn project_comparison_provenance(
+    content_claim: &FiniteHypothesisClaimV0,
+    packet_shape_claim: &FiniteHypothesisClaimV0,
+    input_root: &ProvenanceArtifactRefV0,
+    compare_root: &ProvenanceArtifactRefV0,
+) -> Result<ProvenanceGraphV0> {
+    let mut records = Vec::new();
+    project_claim_inputs(
+        content_claim,
+        input_root,
+        compare_root,
+        "linktop:review:artifact-content",
+    )?
+    .into_iter()
+    .try_for_each(|record| push_unique_provenance(&mut records, record))?;
+    project_claim_inputs(
+        packet_shape_claim,
+        input_root,
+        compare_root,
+        "netbraid:project-saved-pcap-fingerprint-v0",
+    )?
+    .into_iter()
+    .try_for_each(|record| push_unique_provenance(&mut records, record))?;
+    ProvenanceGraphV0::try_new(records).context("constructing saved-capture provenance graph")
+}
+
+fn project_claim_inputs(
+    claim: &FiniteHypothesisClaimV0,
+    input_root: &ProvenanceArtifactRefV0,
+    compare_root: &ProvenanceArtifactRefV0,
+    activity_id: &str,
+) -> Result<Vec<ProvenanceRecordV0>> {
+    let roots = [input_root, compare_root];
+    claim
+        .inputs()
+        .iter()
+        .map(|input| {
+            let source_id = input
+                .source_id()
+                .strip_suffix(":artifact-content")
+                .unwrap_or(input.source_id());
+            let mut matching_roots = roots
+                .iter()
+                .copied()
+                .filter(|root| root.source_id() == source_id);
+            let root = matching_roots
+                .next()
+                .context("canonical claim input has no capture provenance root")?;
+            anyhow::ensure!(
+                matching_roots.all(|candidate| candidate == root),
+                "canonical claim input has ambiguous capture provenance roots"
+            );
+            let output = ProvenanceArtifactRefV0::try_from(input)
+                .context("projecting claim input provenance reference")?;
+            let producer =
+                ProvenanceProducerV0::try_new(activity_id, ProvenanceProducerKindV0::Software)
+                    .context("constructing claim input provenance producer")?;
+            let activity = ProvenanceActivityV0::try_new(
+                activity_id,
+                ProvenanceActivityKindV0::DeterministicDerivation,
+            )
+            .context("constructing claim input provenance activity")?;
+            ProvenanceRecordV0::try_new(output, producer, activity, vec![root.clone()])
+                .context("constructing claim input provenance record")
+        })
+        .collect()
+}
+
+fn push_unique_provenance(
+    records: &mut Vec<ProvenanceRecordV0>,
+    record: ProvenanceRecordV0,
+) -> Result<()> {
+    if let Some(existing) = records
+        .iter()
+        .find(|existing| existing.output() == record.output())
+    {
+        anyhow::ensure!(
+            existing == &record,
+            "one claim input has conflicting provenance records"
+        );
+    } else {
+        records.push(record);
+    }
+    Ok(())
 }
 
 fn project_artifact_content_evidence(
@@ -202,13 +317,13 @@ fn render_json(triage: &SavedPcapTriageV1) -> Result<String> {
     Ok(rendered)
 }
 
-fn render_comparison_json(report: &SavedPcapComparisonReportV1) -> Result<String> {
+fn render_comparison_json(report: &SavedPcapComparisonReportV2) -> Result<String> {
     let mut rendered = serde_json::to_string_pretty(report)?;
     rendered.push('\n');
     Ok(rendered)
 }
 
-fn render_comparison_human(report: &SavedPcapComparisonReportV1) -> String {
+fn render_comparison_human(report: &SavedPcapComparisonReportV2) -> String {
     let mut output = String::new();
     writeln!(output, "LINKTOP  SAVED EVIDENCE COMPARISON / READ ONLY")
         .expect("writing to a String cannot fail");
@@ -258,8 +373,8 @@ fn render_comparison_human(report: &SavedPcapComparisonReportV1) -> String {
     }
     writeln!(
         output,
-        "claims    {} independent families / no merged verdict",
-        report.composition.claims().len()
+        "claims    {} separate claim families / no merged verdict",
+        report.composition.composition().claims().len()
     )
     .expect("writing to a String cannot fail");
     render_claim_ledger(&mut output, &report.composition);
@@ -271,8 +386,11 @@ fn render_comparison_human(report: &SavedPcapComparisonReportV1) -> String {
     output
 }
 
-fn render_claim_ledger(output: &mut String, composition: &FiniteHypothesisCompositionV0) {
-    for (index, claim) in composition.claims().iter().enumerate() {
+fn render_claim_ledger(
+    output: &mut String,
+    composition: &ProvenanceQualifiedFiniteHypothesisCompositionV0,
+) {
+    for (index, claim) in composition.composition().claims().iter().enumerate() {
         let projection = claim.projection();
         writeln!(
             output,
@@ -303,6 +421,70 @@ fn render_claim_ledger(output: &mut String, composition: &FiniteHypothesisCompos
                 output,
                 "    content digest sha256:{}",
                 input.content_sha256()
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+    for record in composition.provenance_graph().records() {
+        writeln!(
+            output,
+            "provenance {} / {} / sha256:{}",
+            record.output().source_schema(),
+            record.output().source_id(),
+            record.output().content_sha256().as_str()
+        )
+        .expect("writing to a String cannot fail");
+        writeln!(
+            output,
+            "  producer {} / {}",
+            record.producer().producer_id(),
+            enum_label(&record.producer().kind())
+        )
+        .expect("writing to a String cannot fail");
+        writeln!(
+            output,
+            "  activity {} / {}",
+            record.activity().activity_id(),
+            enum_label(&record.activity().kind())
+        )
+        .expect("writing to a String cannot fail");
+        for input in record.inputs() {
+            writeln!(
+                output,
+                "  input {} / {} / sha256:{}",
+                input.source_schema(),
+                input.source_id(),
+                input.content_sha256().as_str()
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+    for pair in composition.claim_lineage_pairs() {
+        let status = match pair.status() {
+            ProvenanceQualifiedClaimLineageStatusV0::DeclaredSharedLineage => {
+                "declared shared lineage"
+            }
+            ProvenanceQualifiedClaimLineageStatusV0::NoSharedAncestryFound => {
+                "no shared ancestry found"
+            }
+            _ => "unknown",
+        };
+        writeln!(
+            output,
+            "dependence claims {} + {} / {}",
+            pair.left_claim_index() + 1,
+            pair.right_claim_index() + 1,
+            status
+        )
+        .expect("writing to a String cannot fail");
+        for relation in pair.input_relations() {
+            writeln!(
+                output,
+                "  inputs {} + {} / content {} / lineage {}",
+                relation.left_input_index() + 1,
+                relation.right_input_index() + 1,
+                enum_label(&relation.comparison().content()),
+                enum_label(&relation.comparison().lineage())
             )
             .expect("writing to a String cannot fail");
         }

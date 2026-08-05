@@ -1,6 +1,10 @@
 use std::fs;
 use std::path::Path;
 
+use super::{
+    TailSecondsArg, compare_triage, load, render_comparison_human, render_comparison_json,
+    render_human, render_json,
+};
 use netbraid::evidence::{
     CAPTURE_MANIFEST_SCHEMA_V0, CAPTURE_RUN_RECEIPT_SCHEMA_V0, CaptureArtifactRefV0,
     CaptureExtractorRefV0, CaptureFileMetadataV0, CaptureManifestV0, CaptureNormalizationV0,
@@ -9,15 +13,13 @@ use netbraid::evidence::{
     PACKET_QUARANTINE_SCHEMA_V0, PacketEnvelopeV0, PacketFrameV0, PacketQuarantineV0, TcpFieldsV0,
     ToolRunReceiptV0,
 };
+use netbraid::infer::{
+    ProvenanceActivityKindV0, ProvenanceProducerKindV0, ProvenanceQualifiedClaimLineageStatusV0,
+};
 use netbraid::replay::{
     SavedPcapClaimScopeV0, SavedPcapCompletenessV0, SavedPcapConversationTriageV0,
     SavedPcapConversationUnsupportedReasonV0, SavedPcapWlanTriageV0,
     SavedPcapWlanUnsupportedReasonV0, parse_saved_capture_jsonl,
-};
-
-use super::{
-    TailSecondsArg, compare_triage, load, render_comparison_human, render_comparison_json,
-    render_human, render_json,
 };
 
 const INPUT: &str = include_str!("fixtures/positive-records.jsonl");
@@ -156,20 +158,26 @@ fn identical_saved_evidence_candidates_corroborate_deterministically() {
     let second_json = render_comparison_json(&report).unwrap();
     assert_eq!(first_json, second_json);
     assert_eq!(fs::read(left_path).unwrap(), before);
-    assert!(first_json.contains("\"schema\": \"linktop.saved_pcap_comparison.v1\""));
+    assert!(first_json.contains("\"schema\": \"linktop.saved_pcap_comparison.v2\""));
     assert!(first_json.contains("\"schema\": \"netmon.saved_pcap_fingerprint_hypothesis_set.v0\""));
     assert!(first_json.contains("\"schema\": \"netbraid.content_relation_hypothesis_set.v0\""));
     assert!(first_json.contains("\"schema\": \"netbraid.finite_hypothesis_composition.v0\""));
     assert!(first_json.contains("\"hypothesis\": \"same_packet_shape\""));
     assert!(first_json.contains("\"status\": \"corroborated\""));
     assert!(first_json.contains("\"basis\": \"sha256_equal\""));
-    assert_eq!(report.composition.claims().len(), 2);
+    assert_eq!(report.composition.composition().claims().len(), 2);
     assert!(!first_json.contains("192.0.2.1"));
 
     let human = render_comparison_human(&report);
     assert!(human.contains("compare   corroborated / equal bounded packet-shape basis"));
     assert!(human.contains("content   matching declared SHA-256 digest"));
-    assert!(human.contains("claims    2 independent families / no merged verdict"));
+    assert!(human.contains("claims    2 separate claim families / no merged verdict"));
+    assert!(human.contains("dependence claims 1 + 2 / declared shared lineage"));
+    assert!(human.contains("provenance netbraid.content_digest_evidence.v0"));
+    assert!(human.contains("producer linktop:review:artifact-content / software"));
+    assert!(human.contains(
+        "activity netbraid:project-saved-pcap-fingerprint-v0 / deterministic_derivation"
+    ));
     assert!(human.contains("not same event, source, device"));
 }
 
@@ -275,7 +283,7 @@ fn distinct_observed_packet_shape_candidates_conflict_without_identity_claims() 
     assert!(json.contains("\"basis\": \"sha256_equal\""));
     assert!(human.contains("compare   conflicting / different bounded packet-shape basis"));
     assert!(human.contains("content   matching declared SHA-256 digest"));
-    assert!(human.contains("claims    2 independent families / no merged verdict"));
+    assert!(human.contains("claims    2 separate claim families / no merged verdict"));
     assert!(human.contains("not same event, source, device"));
 }
 
@@ -298,7 +306,7 @@ fn unsupported_saved_evidence_abstains_from_comparison() {
     assert!(json.contains("\"basis\": \"sha256_different\""));
     assert!(human.contains("compare   not comparable / canonical right not observed"));
     assert!(human.contains("content   different declared SHA-256 digest"));
-    assert!(human.contains("claims    2 independent families / no merged verdict"));
+    assert!(human.contains("claims    2 separate claim families / no merged verdict"));
     assert!(human.contains(
         "compare  sha256:2222222222222222222222222222222222222222222222222222222222222222"
     ));
@@ -367,6 +375,48 @@ fn comparison_keeps_cli_roles_distinct_from_canonical_hypothesis_order() {
     ));
     assert!(human.contains("compare   not comparable / canonical right not observed"));
     assert!(human.contains("content   different declared SHA-256 digest"));
+}
+
+#[test]
+fn comparison_uses_netbraid_provenance_without_parallel_status_fields() {
+    let triage = load(fixture_path(), INPUT.len() as u64, None).unwrap();
+    let report = compare_triage(&triage, &triage).unwrap();
+    let graph = report.composition.provenance_graph();
+
+    assert_eq!(graph.records().len(), 2);
+    assert!(graph.records().iter().all(|record| {
+        record.producer().kind() == ProvenanceProducerKindV0::Software
+            && record.activity().kind() == ProvenanceActivityKindV0::DeterministicDerivation
+            && record.inputs().len() == 1
+            && record.inputs()[0].source_id() == triage.source.manifest.capture_id
+    }));
+    assert_eq!(report.composition.claim_lineage_pairs().len(), 1);
+    assert_eq!(
+        report.composition.claim_lineage_pairs()[0].status(),
+        ProvenanceQualifiedClaimLineageStatusV0::DeclaredSharedLineage
+    );
+
+    let json = render_comparison_json(&report).unwrap();
+    assert!(json.contains("\"provenance_graph\""));
+    assert!(json.contains("\"claim_lineage_pairs\""));
+    assert!(!json.contains("\"qualifications\""));
+    assert!(!json.contains("\"assessment\""));
+}
+
+#[test]
+fn repeated_capture_inputs_have_one_record_per_derived_artifact() {
+    let triage = load(fixture_path(), INPUT.len() as u64, None).unwrap();
+    let report = compare_triage(&triage, &triage).unwrap();
+    let outputs = report
+        .composition
+        .provenance_graph()
+        .records()
+        .iter()
+        .map(|record| record.output())
+        .collect::<Vec<_>>();
+
+    assert_eq!(outputs.len(), 2);
+    assert_ne!(outputs[0], outputs[1]);
 }
 
 #[test]
@@ -647,6 +697,7 @@ fn base_fixture_packet(
         ieee802154: None,
         ieee80211: None,
         wlan_radio: None,
+        bluetooth_le: None,
     }
 }
 
@@ -748,8 +799,8 @@ fn rendered_claim_ledger(human: &str) -> &str {
         .find("claim 1   family ")
         .expect("comparison output must contain a first claim");
     let end = human
-        .find("classify  ")
-        .expect("comparison output must retain its classification boundary");
+        .find("provenance ")
+        .expect("comparison output must contain provenance records");
     &human[start..end]
 }
 
