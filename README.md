@@ -7,6 +7,10 @@ physical link, resolvers, addresses, interface counters, process traffic, and
 native neighbor cache together. When a connection changes or degrades, it shows
 which layer changed and which evidence is missing.
 
+For per-hop latency and loss toward one target, use `mtr`; for bandwidth per
+process, use `bandwhich`. Linktop is for the question in between: which part of
+the host's connection changed.
+
 Linktop starts passively. Internet reachability remains `UNTESTED` until an
 operator enables bounded probes.
 
