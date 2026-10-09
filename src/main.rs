@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -1261,13 +1261,14 @@ fn run_tui(
             if event::poll(Duration::from_millis(100))?
                 && let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
-                && apply_tui_key(
-                    &mut app,
-                    &controls,
-                    &mut interaction,
-                    key.code,
-                    ui::peer_page_capacity(terminal.size()?.into()),
-                ) == InteractionOutcome::Quit
+                && (is_interrupt(&key)
+                    || apply_tui_key(
+                        &mut app,
+                        &controls,
+                        &mut interaction,
+                        key.code,
+                        ui::peer_page_capacity(terminal.size()?.into()),
+                    ) == InteractionOutcome::Quit)
             {
                 break;
             }
@@ -1278,6 +1279,11 @@ fn run_tui(
     controls.send(MonitorControl::Stop).ok();
     monitor.join().ok();
     result
+}
+
+/// Raw mode swallows SIGINT, so Ctrl-C arrives as an ordinary key event.
+fn is_interrupt(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
 }
 
 pub(crate) fn apply_tui_key(
@@ -1958,6 +1964,22 @@ mod cli_tests {
             panic!("screenshot command was not parsed");
         };
         assert_eq!(scene, Some(capture::CaptureScene::WifiHotspotWifi));
+    }
+
+    #[test]
+    fn ctrl_c_key_event_is_an_interrupt() {
+        assert!(is_interrupt(&KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_interrupt(&KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE
+        )));
+        assert!(!is_interrupt(&KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL
+        )));
     }
 
     #[test]
