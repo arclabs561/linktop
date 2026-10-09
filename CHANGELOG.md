@@ -9,6 +9,8 @@ one version.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-09
+
 ### Changed
 
 - Saved-capture comparison now keeps declared artifact-digest relation and
@@ -17,6 +19,13 @@ one version.
 - Replaced the two-point speed report with a versioned before/after-spawn/
   after-exit gateway-latency experiment. The contract does not call the second
   probe "during" or treat the final probe as proof of recovery.
+- Updated `netbraid` to 0.4.0. Review output shows the Netbraid provenance
+  behind each finite claim.
+
+### Fixed
+
+- Ctrl-C quits the live TUI.
+- Updated `rustls` to 0.23.45 for RUSTSEC-2026-0285.
 
 ## [0.1.3] - 2026-08-03
 
