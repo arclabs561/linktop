@@ -26,6 +26,8 @@ one version.
 
 - Ctrl-C quits the live TUI.
 - Updated `rustls` to 0.23.45 for RUSTSEC-2026-0285.
+- Updated `lru` to 0.18.5 for RUSTSEC-2026-0253 and `chacha20` to 0.10.2
+  (0.10.1 was yanked).
 
 ## [0.1.3] - 2026-08-03
 
