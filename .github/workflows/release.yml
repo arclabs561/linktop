@@ -162,7 +162,7 @@ jobs:
           tar -xzf "dist/${package}.tar.gz" -C verify
           "verify/${package}/linktop" --version
           "verify/${package}/linktop" --help >/dev/null
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linktop-release-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -177,7 +177,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: linktop-release-*
           path: dist
@@ -188,7 +188,7 @@ jobs:
           cd dist
           shasum -a 256 linktop-v*.tar.gz >SHA256SUMS
           shasum -a 256 --check SHA256SUMS
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linktop-release-assets
           path: |
@@ -357,7 +357,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: linktop-release-assets
           path: dist
@@ -384,7 +384,7 @@ jobs:
           cd dist
           shasum -a 256 --check SHA256SUMS
       - name: Attest release assets
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*
       - name: Create GitHub release
