@@ -29,7 +29,7 @@ host. Local output is not redacted. Status: experimental.
 Cargo installation requires Rust 1.88 or newer:
 
 ```sh
-cargo install linktop --version 0.1.3 --locked
+cargo install linktop --version 0.2.0 --locked
 ```
 
 Prebuilt archives are available from the
