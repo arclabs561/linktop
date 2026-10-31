@@ -9,6 +9,14 @@ one version.
 
 ## [Unreleased]
 
+### Fixed
+
+- Gateway latency sampling counts only echo replies. The statistics line's
+  elapsed `time` is no longer recorded as a round-trip sample, a run whose only
+  timing is that summary reports its replies as lost instead of healthy, and
+  localized iputils output (`Zeit=`, `temps=`, `tiempo=`, `tempo=`) is read the
+  same way as the English `time=`.
+
 ## [0.2.0] - 2026-10-09
 
 ### Changed
