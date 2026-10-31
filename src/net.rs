@@ -1085,28 +1085,53 @@ fn fetch_public_ip(endpoint: &str) -> Result<IpAddr> {
 
 fn is_public_address(address: IpAddr) -> bool {
     match address {
-        IpAddr::V4(address) => {
-            !address.is_private()
-                && !address.is_loopback()
-                && !address.is_link_local()
-                && !address.is_broadcast()
-                && !address.is_documentation()
-                && !address.is_unspecified()
-                && !address.is_multicast()
-        }
-        IpAddr::V6(address) => {
-            let segments = address.segments();
-            let unique_local = segments[0] & 0xfe00 == 0xfc00;
-            let link_local = segments[0] & 0xffc0 == 0xfe80;
-            let documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
-            !address.is_loopback()
-                && !address.is_unspecified()
-                && !address.is_multicast()
-                && !unique_local
-                && !link_local
-                && !documentation
-        }
+        IpAddr::V4(address) => is_public_v4(address),
+        IpAddr::V6(address) => match address.to_ipv4_mapped() {
+            // `::ffff:192.168.1.1` is the same host as the IPv4 address; the
+            // range must not become public just because it is spelled as IPv6.
+            Some(mapped) => is_public_v4(mapped),
+            None => {
+                let segments = address.segments();
+                let unique_local = segments[0] & 0xfe00 == 0xfc00;
+                let link_local = segments[0] & 0xffc0 == 0xfe80;
+                let documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
+                !address.is_loopback()
+                    && !address.is_unspecified()
+                    && !address.is_multicast()
+                    && !unique_local
+                    && !link_local
+                    && !documentation
+            }
+        },
     }
+}
+
+/// Whether an IPv4 address can be a public egress address.
+///
+/// Beyond the std predicates, the special-purpose blocks a host cannot reach
+/// as public egress stay non-public: 100.64.0.0/10 carrier-grade NAT,
+/// 198.18.0.0/15 benchmarking, 192.0.0.0/24 IETF protocol assignments,
+/// 192.88.99.0/24 6to4 relay anycast, 0.0.0.0/8 "this network" and the
+/// reserved 240.0.0.0/4.
+fn is_public_v4(address: std::net::Ipv4Addr) -> bool {
+    let octets = address.octets();
+    let carrier_grade_nat = octets[0] == 100 && (64..=127).contains(&octets[1]);
+    let benchmarking = octets[0] == 198 && (octets[1] == 18 || octets[1] == 19);
+    let ietf_protocol = octets[0] == 192 && octets[1] == 0 && octets[2] == 0;
+    let relay_anycast = octets[0] == 192 && octets[1] == 88 && octets[2] == 99;
+    !address.is_private()
+        && !address.is_loopback()
+        && !address.is_link_local()
+        && !address.is_broadcast()
+        && !address.is_documentation()
+        && !address.is_unspecified()
+        && !address.is_multicast()
+        && !carrier_grade_nat
+        && !benchmarking
+        && !ietf_protocol
+        && !relay_anycast
+        && octets[0] != 0
+        && octets[0] < 240
 }
 
 fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client> {
@@ -2329,5 +2354,42 @@ mod bughunt_route {
             parse_linux_route("default via inet6 fe80::1 dev eth0 proto bird metric 32"),
             (Some("eth0".into()), None)
         );
+    }
+}
+
+#[cfg(test)]
+mod bughunt_public_egress {
+    use super::*;
+
+    // The bug hunt reproduced the mapped form; the special-purpose blocks came
+    // from reading the registry, and each is unreachable as public egress.
+    #[test]
+    fn special_purpose_addresses_are_not_public_egress() {
+        for address in [
+            "::ffff:192.168.1.1",
+            "100.64.0.1",
+            "198.18.0.1",
+            "198.19.255.254",
+            "192.0.0.8",
+            "192.88.99.1",
+            "0.1.2.3",
+            "240.0.0.1",
+        ] {
+            assert!(
+                !is_public_address(address.parse().unwrap()),
+                "{address} accepted as public egress"
+            );
+        }
+        for address in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "::ffff:8.8.8.8",
+            "2606:4700:4700::1111",
+        ] {
+            assert!(
+                is_public_address(address.parse().unwrap()),
+                "{address} rejected as public egress"
+            );
+        }
     }
 }
