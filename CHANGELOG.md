@@ -11,11 +11,14 @@ one version.
 
 ### Fixed
 
-- Gateway latency sampling counts only echo replies. The statistics line's
-  elapsed `time` is no longer recorded as a round-trip sample, a run whose only
-  timing is that summary reports its replies as lost instead of healthy, and
-  localized iputils output (`Zeit=`, `temps=`, `tiempo=`, `tempo=`) is read the
-  same way as the English `time=`.
+- Gateway latency sampling reads only echo replies. An RTT now has to sit
+  behind the locale's marker and its `=` or `<` comparator, so a statistics
+  summary's elapsed time (`time 9012ms`, `temps 0 ms`) never becomes a sample
+  and a run whose only timing is that summary reports its replies as lost
+  instead of healthy. Translated iputils and Windows reply markers (`Zeit=`,
+  `temps=`, `tiempo=`, `tempo=`) are read like the English `time=`, and a
+  repeated sequence number counts once, so duplicate replies no longer hide
+  loss.
 
 ## [0.2.0] - 2026-10-09
 

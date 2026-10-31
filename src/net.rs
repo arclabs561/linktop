@@ -1660,46 +1660,31 @@ fn command_output(program: &str, arguments: &[&str]) -> Option<String> {
 
 /// Round-trip-time markers printed by iputils in the locale's own words.
 ///
-/// Each string is the ` time=%s ms` catalog entry for that language in
+/// Each string is that language's ` time=%s ms` catalog entry in
 /// `iputils/po/*.po`: `Zeit=` (de), `temps=` (fr), `tiempo=` (es) and
-/// `tempo=` (it). English, the untranslated default, is matched first.
+/// `tempo=` (it). English, the untranslated default, uses `time=`.
 const PING_RTT_MARKERS: [&str; 5] = ["time", "zeit", "temps", "tiempo", "tempo"];
 
-/// Statistics lines quote an elapsed wall time (`time 9012ms`), not an echo
-/// reply, and a lost run's only timing is that summary. They are not samples.
-fn is_ping_statistics_line(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    [
-        "packet loss",
-        "paketverlust",
-        "packets transmitted",
-        "pakete übertragen",
-        "pakete uebertragen",
-        "statistics",
-        "statistik",
-        "rtt min",
-        "round-trip",
-        "(dup!)",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
-}
-
-/// One reply line's RTT, in milliseconds, when the line carries a known marker.
+/// A reply's RTT follows its marker with `=` (or `<` on Windows for a
+/// sub-millisecond reply). A statistics summary writes an elapsed wall time
+/// with no comparator instead - iputils prints `time 9012ms`, `temps 0 ms`
+/// and `Zeit 1003ms` - so requiring the comparator keeps summaries out
+/// without a second, per-locale list of statistics vocabulary.
 fn reply_latency_ms(line: &str) -> Option<f64> {
     let lower = line.to_ascii_lowercase();
-    let mut best: Option<f64> = None;
     for marker in PING_RTT_MARKERS {
         let mut from = 0;
         while let Some(offset) = lower[from..].find(marker) {
             let start = from + offset + marker.len();
             from = start;
-            let rest = lower[start..].trim_start();
-            let rest = rest
+            let Some(rest) = lower[start..]
+                .trim_start()
                 .strip_prefix('=')
-                .or_else(|| rest.strip_prefix('<'))
-                .unwrap_or(rest)
-                .trim_start();
+                .or_else(|| lower[start..].trim_start().strip_prefix('<'))
+                .map(str::trim_start)
+            else {
+                continue;
+            };
             let number: String = rest
                 .chars()
                 .take_while(|character| character.is_ascii_digit() || *character == '.')
@@ -1708,19 +1693,44 @@ fn reply_latency_ms(line: &str) -> Option<f64> {
                 continue;
             }
             if let Ok(sample) = number.parse() {
-                best = Some(best.map_or(sample, |best: f64| best.max(sample)));
+                return Some(sample);
             }
         }
     }
-    best
+    None
+}
+
+/// The echo sequence number a reply line quotes, when it quotes one.
+fn reply_sequence(line: &str) -> Option<u64> {
+    ["icmp_seq=", "seq="]
+        .iter()
+        .find_map(|key| line.find(key).map(|position| (key, position)))
+        .and_then(|(key, position)| {
+            let digits: String = line[position + key.len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse().ok()
+        })
 }
 
 fn parse_ping_latencies(output: &str) -> Vec<f64> {
-    output
-        .lines()
-        .filter(|line| !is_ping_statistics_line(line))
-        .filter_map(reply_latency_ms)
-        .collect()
+    let mut samples = Vec::new();
+    let mut answered: BTreeSet<u64> = BTreeSet::new();
+    for line in output.lines() {
+        let Some(sample) = reply_latency_ms(line) else {
+            continue;
+        };
+        // Duplicate replies repeat a sequence number; they are not extra
+        // answers and must not hide loss.
+        if let Some(sequence) = reply_sequence(line) {
+            if !answered.insert(sequence) {
+                continue;
+            }
+        }
+        samples.push(sample);
+    }
+    samples
 }
 
 #[cfg(test)]
@@ -2192,5 +2202,48 @@ round-trip min/avg/max = 0.512/0.527/0.541 ms\n";
             metrics.loss_rate,
             metrics.health()
         );
+    }
+
+    // Translated summaries write the elapsed time with a space, never with a
+    // comparator: fr "temps 0 ms", es "tiempo 0 ms", it "tempo 0 ms". A lost
+    // run whose only timing is that line must stay lost.
+    #[test]
+    fn translated_summary_elapsed_is_not_a_sample() {
+        for (marker, summary) in [
+            (
+                "temps",
+                "1 paquets transmis, 0 reçus, 100 % paquets perdus, temps 0 ms",
+            ),
+            (
+                "tiempo",
+                "1 paquetes transmitidos, 0 recibidos, 100 % paquetes perdidos, tiempo 0 ms",
+            ),
+            (
+                "tempo",
+                "1 pacchetti trasmessi, 0 ricevuti, 100% pacchetti persi, tempo 0 ms",
+            ),
+        ] {
+            let samples = parse_ping_latencies(summary);
+            let metrics = LatencyMetrics::from_samples(&samples, 1);
+            assert_eq!(
+                (marker, metrics.received, metrics.lost),
+                (marker, 0, 1),
+                "samples={samples:?}"
+            );
+            assert_ne!(metrics.health(), Health::Ok);
+        }
+    }
+
+    #[test]
+    fn translated_replies_survive_their_summary() {
+        let output = "\
+PING 192.0.2.1 (192.0.2.1) 56(84) bytes of data.\n\
+64 bytes from 192.0.2.1: icmp_seq=1 ttl=64 temps=0.200 ms\n\
+64 bytes from 192.0.2.1: icmp_seq=2 ttl=64 temps=0.210 ms\n\
+\n\
+--- 192.0.2.1 ping statistics ---\n\
+2 paquets transmis, 2 reçus, 0% paquets perdus, temps 2013 ms\n\
+rtt min/moy/max/mdev = 0.200/0.205/0.210/0.005 ms\n";
+        assert_eq!(parse_ping_latencies(output), vec![0.200, 0.210]);
     }
 }
