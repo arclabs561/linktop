@@ -1259,8 +1259,53 @@ fn parse_macos_route(output: &str) -> (Option<String>, Option<String>) {
 }
 
 fn parse_linux_route(output: &str) -> (Option<String>, Option<String>) {
-    let words: Vec<_> = output.split_whitespace().collect();
-    (value_after(&words, "dev"), value_after(&words, "via"))
+    // `ip route show default` prints one default route per line, each with its
+    // own `dev` and `via`. Pairing words across the whole output attributes a
+    // VPN interface to the physical link's gateway.
+    let mut best: Option<(u64, String, Option<String>)> = None;
+    for line in output.lines() {
+        let words: Vec<_> = line.split_whitespace().collect();
+        if !words.contains(&"default") {
+            continue;
+        }
+        let Some(interface) = value_after(&words, "dev") else {
+            continue;
+        };
+        let metric = words
+            .iter()
+            .position(|word| *word == "metric")
+            .and_then(|index| words.get(index + 1))
+            .and_then(|metric| metric.parse::<u64>().ok())
+            .unwrap_or(u64::MAX);
+        if best
+            .as_ref()
+            .is_none_or(|(best_metric, _, _)| metric < *best_metric)
+        {
+            best = Some((metric, interface, linux_route_gateway(&words)));
+        }
+    }
+    match best {
+        Some((_, interface, gateway)) => (Some(interface), gateway),
+        None => (None, None),
+    }
+}
+
+/// The next hop on one default-route line, when this host can probe it.
+///
+/// `via inet6 fe80::1` (RFC 8950, an IPv4 route over an IPv6 next hop) names
+/// the family before the address. The gateway probe runs ICMPv4, so a next hop
+/// that is not an IPv4 address yields no gateway rather than a word the probe
+/// would pass to `ping` as if it were a host.
+fn linux_route_gateway(words: &[&str]) -> Option<String> {
+    let position = words.iter().position(|word| *word == "via")?;
+    let mut value = *words.get(position + 1)?;
+    if value == "inet" || value == "inet6" {
+        value = *words.get(position + 2)?;
+    }
+    value
+        .parse::<std::net::Ipv4Addr>()
+        .ok()
+        .map(|address| address.to_string())
 }
 
 fn parse_windows_route(output: &str) -> (Option<String>, Option<String>) {
@@ -2245,5 +2290,44 @@ PING 192.0.2.1 (192.0.2.1) 56(84) bytes of data.\n\
 2 paquets transmis, 2 reçus, 0% paquets perdus, temps 2013 ms\n\
 rtt min/moy/max/mdev = 0.200/0.205/0.210/0.005 ms\n";
         assert_eq!(parse_ping_latencies(output), vec![0.200, 0.210]);
+    }
+}
+
+#[cfg(test)]
+mod bughunt_route {
+    use super::*;
+
+    // A WireGuard default route usually carries the lower metric and no `via`.
+    // Pairing words across the whole output gave it the physical link's gateway.
+    #[test]
+    fn interface_and_gateway_come_from_the_same_default_route() {
+        assert_eq!(
+            parse_linux_route(
+                "default dev tun0 proto static scope link metric 50\n\
+                 default via 192.168.1.1 dev wlan0 proto dhcp metric 600",
+            ),
+            (Some("tun0".into()), None)
+        );
+    }
+
+    #[test]
+    fn the_lowest_metric_default_route_wins() {
+        assert_eq!(
+            parse_linux_route(
+                "default via 192.168.1.1 dev wlan0 proto dhcp metric 600\n\
+                 default via 10.8.0.1 dev tun0 proto static metric 50",
+            ),
+            (Some("tun0".into()), Some("10.8.0.1".into()))
+        );
+    }
+
+    // RFC 8950 prints the next hop's family first: "via inet6 fe80::1". The
+    // family word is not a host, and this probe cannot reach an IPv6 next hop.
+    #[test]
+    fn an_ipv6_next_hop_is_not_treated_as_a_host() {
+        assert_eq!(
+            parse_linux_route("default via inet6 fe80::1 dev eth0 proto bird metric 32"),
+            (Some("eth0".into()), None)
+        );
     }
 }

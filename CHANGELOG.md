@@ -11,6 +11,11 @@ one version.
 
 ### Fixed
 
+- Default-route parsing pairs each interface with the next hop printed on its
+  own route line, and the lowest metric wins. A VPN default route no longer
+  inherits the physical link's gateway, and a next hop that is not an IPv4
+  address (`via inet6 fe80::1`) is reported as no gateway instead of the word
+  `inet6` being handed to the probe as a host.
 - Gateway latency sampling reads only echo replies. An RTT now has to sit
   behind the locale's marker and its `=` or `<` comparator, so a statistics
   summary's elapsed time (`time 9012ms`, `temps 0 ms`) never becomes a sample
