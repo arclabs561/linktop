@@ -16,6 +16,11 @@ one version.
   inherits the physical link's gateway, and a next hop that is not an IPv4
   address (`via inet6 fe80::1`) is reported as no gateway instead of the word
   `inet6` being handed to the probe as a host.
+- A bounded command's output is drained within the deadline instead of waiting
+  for every writer of its pipes to close. A grandchild that inherits the pipes
+  used to hold a 100 ms deadline open for as long as it lived, so the command
+  returned late; the pipes are now read in chunks on their own threads and the
+  caller keeps whatever arrived before the deadline.
 - Gateway latency sampling reads only echo replies. An RTT now has to sit
   behind the locale's marker and its `=` or `<` comparator, so a statistics
   summary's elapsed time (`time 9012ms`, `temps 0 ms`) never becomes a sample
