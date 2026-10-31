@@ -11,6 +11,11 @@ one version.
 
 ### Fixed
 
+- The public-egress check reads an IPv4-mapped IPv6 address as the IPv4 address
+  it spells, so `::ffff:192.168.1.1` is no longer public, and it rejects the
+  special-purpose blocks a host cannot reach as public egress: carrier-grade
+  NAT (100.64.0.0/10), benchmarking (198.18.0.0/15), 192.0.0.0/24, the 6to4
+  relay anycast 192.88.99.0/24, 0.0.0.0/8 and the reserved 240.0.0.0/4.
 - The gateway variation window counts only probes that were attempted:
   `gateway not found` and `ping not found` attempts observe nothing and no
   longer enter the window as lost echoes, so a route without a next hop (for
