@@ -1989,7 +1989,7 @@ impl App {
                 }
                 self.cycles += u64::from(kind == ProbeKind::Gateway);
                 let previous = self.probe(kind).health;
-                if kind == ProbeKind::Gateway {
+                if kind == ProbeKind::Gateway && result.health != Health::Unavailable {
                     if self.gateway_outcomes.len() == MAX_GATEWAY_SAMPLES {
                         self.gateway_outcomes.pop_front();
                     }
@@ -6210,5 +6210,61 @@ mod tests {
                 metrics: None,
             },
         });
+    }
+}
+
+#[cfg(test)]
+mod bughunt_gateway {
+    use super::*;
+
+    fn unavailable_probe(app: &mut App) {
+        app.apply(MonitorUpdate::ProbeFinished {
+            generation: app.path_generation,
+            kind: ProbeKind::Gateway,
+            result: ProbeResult::unavailable("default gateway not found"),
+        });
+    }
+
+    // Bug hunt repro: a `default dev wg0` path schedules gateway probes that the
+    // probe answers "gateway not found" for. Those attempts observed nothing,
+    // and counting them as lost echoes reported the path as 100% loss.
+    #[test]
+    fn unavailable_gateway_probes_are_not_counted_as_lost_echoes() {
+        let mut app = App::with_probe_policy(ProbePolicy::Active);
+        for _ in 0..MIN_GATEWAY_ASSESSMENT_SAMPLES {
+            unavailable_probe(&mut app);
+        }
+        assert!(
+            app.gateway_assessment_metrics()
+                .is_none_or(|metrics| metrics.lost == 0),
+            "unavailable probes reported as loss: {:?}",
+            app.gateway_assessment_metrics().map(|metrics| (
+                metrics.sent,
+                metrics.lost,
+                metrics.loss_rate
+            ))
+        );
+
+        for _ in 0..MIN_GATEWAY_ASSESSMENT_SAMPLES {
+            app.apply(MonitorUpdate::ProbeFinished {
+                generation: app.path_generation,
+                kind: ProbeKind::Gateway,
+                result: ProbeResult {
+                    health: Health::Ok,
+                    detail: "reply".into(),
+                    latency_ms: Some(4.0),
+                    metrics: None,
+                },
+            });
+        }
+        for _ in 0..2 {
+            unavailable_probe(&mut app);
+        }
+        let metrics = app.gateway_assessment_metrics().expect("five replies");
+        assert_eq!(
+            (metrics.sent, metrics.received, metrics.lost),
+            (5, 5, 0),
+            "unavailable ticks entered the window"
+        );
     }
 }

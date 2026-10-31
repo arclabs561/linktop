@@ -11,6 +11,10 @@ one version.
 
 ### Fixed
 
+- The gateway variation window counts only probes that were attempted:
+  `gateway not found` and `ping not found` attempts observe nothing and no
+  longer enter the window as lost echoes, so a route without a next hop (for
+  example `default dev wg0`) stops reporting 100% loss.
 - A vendor-registry line without a vendor name no longer discards the rest of
   the registry. The unnamed entry is skipped, so the other vendors still resolve
   instead of every address being reported as an unknown vendor.
