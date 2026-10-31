@@ -1658,22 +1658,77 @@ fn command_output(program: &str, arguments: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Round-trip-time markers printed by iputils in the locale's own words.
+///
+/// Each string is that language's ` time=%s ms` catalog entry in
+/// `iputils/po/*.po`: `Zeit=` (de), `temps=` (fr), `tiempo=` (es) and
+/// `tempo=` (it). English, the untranslated default, uses `time=`.
+const PING_RTT_MARKERS: [&str; 5] = ["time", "zeit", "temps", "tiempo", "tempo"];
+
+/// A reply's RTT follows its marker with `=` (or `<` on Windows for a
+/// sub-millisecond reply). A statistics summary writes an elapsed wall time
+/// with no comparator instead - iputils prints `time 9012ms`, `temps 0 ms`
+/// and `Zeit 1003ms` - so requiring the comparator keeps summaries out
+/// without a second, per-locale list of statistics vocabulary.
+fn reply_latency_ms(line: &str) -> Option<f64> {
+    let lower = line.to_ascii_lowercase();
+    for marker in PING_RTT_MARKERS {
+        let mut from = 0;
+        while let Some(offset) = lower[from..].find(marker) {
+            let start = from + offset + marker.len();
+            from = start;
+            let Some(rest) = lower[start..]
+                .trim_start()
+                .strip_prefix('=')
+                .or_else(|| lower[start..].trim_start().strip_prefix('<'))
+                .map(str::trim_start)
+            else {
+                continue;
+            };
+            let number: String = rest
+                .chars()
+                .take_while(|character| character.is_ascii_digit() || *character == '.')
+                .collect();
+            if number.is_empty() || !rest[number.len()..].trim_start().starts_with("ms") {
+                continue;
+            }
+            if let Ok(sample) = number.parse() {
+                return Some(sample);
+            }
+        }
+    }
+    None
+}
+
+/// The echo sequence number a reply line quotes, when it quotes one.
+fn reply_sequence(line: &str) -> Option<u64> {
+    ["icmp_seq=", "seq="]
+        .iter()
+        .find_map(|key| line.find(key).map(|position| (key, position)))
+        .and_then(|(key, position)| {
+            let digits: String = line[position + key.len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse().ok()
+        })
+}
+
 fn parse_ping_latencies(output: &str) -> Vec<f64> {
     let mut samples = Vec::new();
-    let mut rest = output;
-    while let Some(position) = rest.find("time") {
-        rest = &rest[position + 4..];
-        let value = rest
-            .trim_start()
-            .trim_start_matches(['=', '<'])
-            .trim_start();
-        let number: String = value
-            .chars()
-            .take_while(|character| character.is_ascii_digit() || *character == '.')
-            .collect();
-        if let Ok(sample) = number.parse() {
-            samples.push(sample);
+    let mut answered: BTreeSet<u64> = BTreeSet::new();
+    for line in output.lines() {
+        let Some(sample) = reply_latency_ms(line) else {
+            continue;
+        };
+        // Duplicate replies repeat a sequence number; they are not extra
+        // answers and must not hide loss.
+        if let Some(sequence) = reply_sequence(line) {
+            if !answered.insert(sequence) {
+                continue;
+            }
         }
+        samples.push(sample);
     }
     samples
 }
@@ -2039,5 +2094,156 @@ mod tests {
         assert_eq!(telemetry.channel_width_mhz, Some(80));
         assert_eq!(telemetry.band.as_deref(), Some("5GHz"));
         assert_eq!(telemetry.tx_rate_mbps, Some(650.0));
+    }
+}
+
+#[cfg(test)]
+mod bughunt {
+    use super::*;
+
+    // Verbatim iputils-ping 20240117 output captured in this sandbox.
+    const IPUTILS_ALL_LOST_ONE: &str = "PING 10.255.255.1 (10.255.255.1) 56(84) bytes of data.\n\n--- 10.255.255.1 ping statistics ---\n1 packets transmitted, 0 received, 100% packet loss, time 0ms\n";
+    const IPUTILS_THREE_OK: &str = "PING 127.0.0.1 (127.0.0.1) 56(84) bytes of data.\n64 bytes from 127.0.0.1: icmp_seq=1 ttl=64 time=0.040 ms\n64 bytes from 127.0.0.1: icmp_seq=2 ttl=64 time=0.032 ms\n64 bytes from 127.0.0.1: icmp_seq=3 ttl=64 time=0.037 ms\n\n--- 127.0.0.1 ping statistics ---\n3 packets transmitted, 3 received, 0% packet loss, time 2037ms\nrtt min/avg/max/mdev = 0.032/0.036/0.040/0.003 ms\n";
+
+    #[test]
+    fn iputils_summary_elapsed_is_not_an_rtt_sample() {
+        assert_eq!(
+            parse_ping_latencies(IPUTILS_ALL_LOST_ONE),
+            Vec::<f64>::new()
+        );
+        assert_eq!(
+            parse_ping_latencies(IPUTILS_THREE_OK),
+            vec![0.040, 0.032, 0.037]
+        );
+    }
+
+    #[test]
+    fn lost_single_gateway_ping_is_not_reported_as_a_healthy_reply() {
+        let samples = parse_ping_latencies(IPUTILS_ALL_LOST_ONE);
+        let metrics = LatencyMetrics::from_samples(&samples, 1);
+        assert_eq!(metrics.received, 0, "samples={samples:?}");
+        assert_ne!(metrics.health(), Health::Ok);
+    }
+
+    #[test]
+    fn one_lost_echo_in_ten_is_reported_as_loss() {
+        let mut output = String::from("PING 192.0.2.1 (192.0.2.1) 56(84) bytes of data.\n");
+        for seq in [1, 2, 3, 4, 5, 6, 7, 8, 10] {
+            output.push_str(&format!(
+                "64 bytes from 192.0.2.1: icmp_seq={seq} ttl=64 time=0.200 ms\n"
+            ));
+        }
+        output.push_str("\n--- 192.0.2.1 ping statistics ---\n10 packets transmitted, 9 received, 10% packet loss, time 9012ms\nrtt min/avg/max/mdev = 0.200/0.200/0.200/0.000 ms\n");
+        let metrics = LatencyMetrics::from_samples(&parse_ping_latencies(&output), 10);
+        assert_eq!(metrics.lost, 1, "loss_rate={:?}", metrics.loss_rate);
+    }
+}
+
+#[cfg(test)]
+mod bughunt2 {
+    use super::*;
+
+    // Verbatim German iputils transcript (Artix Linux, enp0s3) published at
+    // https://pemmann.de/doc-html/_build/html/netze/nettools-tutorial-aliase.html .
+    // The strings match iputils po/de.po: " time=%s ms" -> " Zeit=%s ms",
+    // ", time %llums" -> ", Zeit %llums" (iputils @ a22bd56, ping/ping_common.c:880).
+    const IPUTILS_DE: &str = "PING 10.3.3.3 (10.3.3.3) 56(84) Bytes Daten.\n\
+64 Bytes von 10.3.3.3: icmp_seq=1 ttl=64 Zeit=1.99 ms\n\
+64 Bytes von 10.3.3.3: icmp_seq=2 ttl=64 Zeit=0.373 ms\n\
+\n\
+--- 10.3.3.3 ping statistics ---\n\
+2 Pakete übertragen, 2 empfangen, 0% Paketverlust, Zeit 1001ms\n\
+rtt min/avg/max/mdev = 0.373/1.183/1.993/0.810 ms\n";
+
+    #[test]
+    fn iputils_localized_reply_lines_are_parsed() {
+        assert_eq!(parse_ping_latencies(IPUTILS_DE), vec![1.99, 0.373]);
+    }
+
+    // Windows ping in German, from the de.wikipedia "Ping (Datenübertragung)" article
+    // (mirrored at https://de.wiki7.org/wiki/Ping).
+    const WINDOWS_DE: &str = "Paketaustausch mit rr.esams.wikimedia.org [91.198.174.225] je 32 Byte:\r\n\
+\r\n\
+Antwort von 91.198.174.225: Anzahl Bytes=32 Zeit=54ms TTL=32\r\n\
+Antwort von 91.198.174.225: Anzahl Bytes=32 Zeit=54ms TTL=32\r\n\
+Antwort von 91.198.174.225: Anzahl Bytes=32 Zeit=54ms TTL=32\r\n\
+Antwort von 91.198.174.225: Anzahl Bytes=32 Zeit=54ms TTL=32\r\n\
+\r\n\
+Ping-Statistiken für 91.198.174.225:\r\n\
+Pakete: gesendet = 4, empfangen = 4, verloren = 0 (0 % Verlust),\r\n\
+Ungefähre Roundtrip-Zeit in ms:\r\n\
+Minimum = 54 ms, Maximum = 54 ms, Durchschnitt = 54 ms\r\n";
+
+    #[test]
+    fn windows_localized_reply_lines_are_parsed() {
+        assert_eq!(parse_ping_latencies(WINDOWS_DE), vec![54.0; 4]);
+    }
+
+    // BusyBox ping output built from networking/ping.c format strings
+    // (@ 371fe9f: lines 491-503 summary, 680-688 reply line and " (DUP!)").
+    // One echo answered three times; BusyBox itself reports 66% loss.
+    const BUSYBOX_DUP: &str = "PING 192.168.1.1 (192.168.1.1): 56 data bytes\n\
+64 bytes from 192.168.1.1: seq=0 ttl=64 time=0.512 ms\n\
+64 bytes from 192.168.1.1: seq=0 ttl=64 time=0.530 ms (DUP!)\n\
+64 bytes from 192.168.1.1: seq=0 ttl=64 time=0.541 ms (DUP!)\n\
+\n\
+--- 192.168.1.1 ping statistics ---\n\
+3 packets transmitted, 1 packets received, 2 duplicates, 66% packet loss\n\
+round-trip min/avg/max = 0.512/0.527/0.541 ms\n";
+
+    #[test]
+    fn duplicate_replies_do_not_hide_loss() {
+        let samples = parse_ping_latencies(BUSYBOX_DUP);
+        let metrics = LatencyMetrics::from_samples(&samples, 3);
+        assert_eq!(
+            (metrics.received, metrics.lost),
+            (1, 2),
+            "samples={samples:?} loss_rate={:?} health={:?}",
+            metrics.loss_rate,
+            metrics.health()
+        );
+    }
+
+    // Translated summaries write the elapsed time with a space, never with a
+    // comparator: fr "temps 0 ms", es "tiempo 0 ms", it "tempo 0 ms". A lost
+    // run whose only timing is that line must stay lost.
+    #[test]
+    fn translated_summary_elapsed_is_not_a_sample() {
+        for (marker, summary) in [
+            (
+                "temps",
+                "1 paquets transmis, 0 reçus, 100 % paquets perdus, temps 0 ms",
+            ),
+            (
+                "tiempo",
+                "1 paquetes transmitidos, 0 recibidos, 100 % paquetes perdidos, tiempo 0 ms",
+            ),
+            (
+                "tempo",
+                "1 pacchetti trasmessi, 0 ricevuti, 100% pacchetti persi, tempo 0 ms",
+            ),
+        ] {
+            let samples = parse_ping_latencies(summary);
+            let metrics = LatencyMetrics::from_samples(&samples, 1);
+            assert_eq!(
+                (marker, metrics.received, metrics.lost),
+                (marker, 0, 1),
+                "samples={samples:?}"
+            );
+            assert_ne!(metrics.health(), Health::Ok);
+        }
+    }
+
+    #[test]
+    fn translated_replies_survive_their_summary() {
+        let output = "\
+PING 192.0.2.1 (192.0.2.1) 56(84) bytes of data.\n\
+64 bytes from 192.0.2.1: icmp_seq=1 ttl=64 temps=0.200 ms\n\
+64 bytes from 192.0.2.1: icmp_seq=2 ttl=64 temps=0.210 ms\n\
+\n\
+--- 192.0.2.1 ping statistics ---\n\
+2 paquets transmis, 2 reçus, 0% paquets perdus, temps 2013 ms\n\
+rtt min/moy/max/mdev = 0.200/0.205/0.210/0.005 ms\n";
+        assert_eq!(parse_ping_latencies(output), vec![0.200, 0.210]);
     }
 }
