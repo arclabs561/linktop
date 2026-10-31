@@ -11,6 +11,9 @@ one version.
 
 ### Fixed
 
+- A vendor-registry line without a vendor name no longer discards the rest of
+  the registry. The unnamed entry is skipped, so the other vendors still resolve
+  instead of every address being reported as an unknown vendor.
 - Default-route parsing pairs each interface with the next hop printed on its
   own route line, and the lowest metric wins. A VPN default route no longer
   inherits the physical link's gateway, and a next hop that is not an IPv4

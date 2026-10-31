@@ -48,7 +48,12 @@ fn load(path: &Path) -> Option<OuiRegistry> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let (raw_prefix, registrant) = line.split_once(char::is_whitespace)?;
+        let (raw_prefix, registrant) = match line.split_once(char::is_whitespace) {
+            Some(parts) => parts,
+            // A prefix with no vendor name on the line is one unusable entry,
+            // not a reason to discard the rest of the registry.
+            None => continue,
+        };
         let Some(prefix) = parse_registry_prefix(raw_prefix) else {
             continue;
         };
@@ -104,5 +109,37 @@ mod tests {
     fn distinguishes_local_from_universal_addresses() {
         assert!(is_locally_administered("02:00:00:00:00:01"));
         assert!(!is_locally_administered("00:11:22:33:44:55"));
+    }
+
+    // Bug hunt repro: the nmap/Etherman registry ships lines whose vendor name
+    // is missing. One such line used to abort the whole file, so every lookup
+    // answered "unknown vendor".
+    #[test]
+    fn an_unnamed_registry_line_does_not_discard_the_registry() {
+        let path = std::env::temp_dir().join(format!(
+            "linktop-oui-test-{}-{:?}.txt",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(
+            &path,
+            "# comment\n\
+             00:00:0C\tCisco Systems, Inc\n\
+             00:00:0D\n\
+             00:00:0E\tFujitsu\n",
+        )
+        .unwrap();
+        let registry = load(&path);
+        std::fs::remove_file(&path).unwrap();
+        let registry = registry.expect("registry with one unnamed line");
+        assert_eq!(
+            registry.lookup("00:00:0C:11:22:33").as_deref(),
+            Some("Cisco Systems, Inc")
+        );
+        assert_eq!(
+            registry.lookup("00:00:0E:11:22:33").as_deref(),
+            Some("Fujitsu")
+        );
+        assert_eq!(registry.lookup("00:00:0D:11:22:33"), None);
     }
 }
